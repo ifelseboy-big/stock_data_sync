@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
+COMPOSE_FILE="$INSTALL_DIR/compose.yaml"
+ENV_FILE="$INSTALL_DIR/config/app.env"
+
+fail() {
+  printf '错误：%s\n' "$*" >&2
+  exit 1
+}
+
+require_installation() {
+  command -v docker >/dev/null 2>&1 || fail "未安装 Docker"
+  docker compose version >/dev/null 2>&1 || fail "未安装 Docker Compose v2"
+  [[ -f "$COMPOSE_FILE" ]] || fail "缺少 $COMPOSE_FILE"
+  [[ -f "$ENV_FILE" ]] || fail "缺少 $ENV_FILE"
+}
+
+compose() {
+  docker compose \
+    --project-directory "$INSTALL_DIR" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    "$@"
+}
+
+usage() {
+  cat <<'EOF'
+用法：stock-data-sync <command> [service...]
+
+命令：
+  start [service...]    启动全部服务或指定服务
+  stop [service...]     停止全部服务或指定服务
+  restart [service...]  重启全部服务或指定服务
+  status                查看服务状态
+  logs [service...]     持续查看最近日志
+  migrate               执行数据库迁移
+  build                 重新构建应用镜像
+  config                校验并显示最终部署配置
+
+服务名：postgres、server、scheduler、web
+EOF
+}
+
+require_installation
+command_name="${1:-}"
+[[ -n "$command_name" ]] || {
+  usage
+  exit 1
+}
+shift
+
+case "$command_name" in
+  start)
+    if (( $# > 0 )); then
+      compose up -d "$@"
+    else
+      compose up -d postgres
+      compose run --rm migrate
+      compose up -d server scheduler web
+    fi
+    ;;
+  stop)
+    compose stop "$@"
+    ;;
+  restart)
+    if (( $# > 0 )); then
+      compose restart "$@"
+    else
+      compose stop
+      compose up -d postgres
+      compose run --rm migrate
+      compose up -d server scheduler web
+    fi
+    ;;
+  status)
+    compose ps
+    ;;
+  logs)
+    compose logs --follow --tail "${LOG_TAIL_LINES:-200}" "$@"
+    ;;
+  migrate)
+    compose up -d postgres
+    compose run --rm migrate
+    ;;
+  build)
+    compose build --pull server web
+    ;;
+  config)
+    compose config
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    fail "不支持的命令：$command_name"
+    ;;
+esac
+

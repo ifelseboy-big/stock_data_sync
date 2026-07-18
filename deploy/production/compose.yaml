@@ -1,0 +1,119 @@
+name: stock-data-sync
+
+x-app-environment: &app-environment
+  APP_ENV: production
+  APP_NAME: Stock Data Sync
+  APP_DEBUG: "false"
+  APP_API_PREFIX: /api/v1
+  APP_CORS_ORIGINS: "[]"
+  APP_LOG_MAX_BYTES: ${APP_LOG_MAX_BYTES:-52428800}
+  APP_LOG_BACKUP_COUNT: ${APP_LOG_BACKUP_COUNT:-10}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+  TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+  TUSHARE_REQUEST_LIMIT_PER_MINUTE: ${TUSHARE_REQUEST_LIMIT_PER_MINUTE:-500}
+  TUSHARE_REQUEST_BUDGET_PER_MINUTE: ${TUSHARE_REQUEST_BUDGET_PER_MINUTE:-480}
+  TUSHARE_TIMEOUT_SECONDS: ${TUSHARE_TIMEOUT_SECONDS:-30}
+  TUSHARE_MAX_ATTEMPTS: ${TUSHARE_MAX_ATTEMPTS:-3}
+  TUSHARE_RETRY_WAIT_SECONDS: ${TUSHARE_RETRY_WAIT_SECONDS:-2}
+  SCHEDULER_TIMEZONE: ${SCHEDULER_TIMEZONE:-Asia/Shanghai}
+  SCHEDULER_JOBSTORE_TABLE: ${SCHEDULER_JOBSTORE_TABLE:-apscheduler_jobs}
+  SCHEDULER_ADVISORY_LOCK_ID: ${SCHEDULER_ADVISORY_LOCK_ID:-731500001}
+  SCHEDULER_MAX_WORKERS: ${SCHEDULER_MAX_WORKERS:-4}
+  SCHEDULER_POLL_SECONDS: ${SCHEDULER_POLL_SECONDS:-30}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      TZ: Asia/Shanghai
+    command:
+      - postgres
+      - -c
+      - logging_collector=on
+      - -c
+      - log_directory=/var/log/postgresql
+      - -c
+      - log_filename=postgresql-%Y-%m-%d.log
+      - -c
+      - log_rotation_age=1d
+      - -c
+      - log_truncate_on_rotation=on
+    volumes:
+      - ${INSTALL_DIR:?INSTALL_DIR is required}/data/postgres:/var/lib/postgresql/data
+      - ${INSTALL_DIR:?INSTALL_DIR is required}/logs/postgres:/var/log/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    shm_size: 256mb
+
+  migrate:
+    image: stock-data-sync-server:${APP_VERSION:?APP_VERSION is required}
+    environment:
+      <<: *app-environment
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  server:
+    image: stock-data-sync-server:${APP_VERSION:?APP_VERSION is required}
+    build:
+      context: ./app
+      dockerfile: deploy/docker/server.Dockerfile
+    environment:
+      <<: *app-environment
+      APP_LOG_FILE: /var/log/stock-data-sync/server.log
+    volumes:
+      - ${INSTALL_DIR:?INSTALL_DIR is required}/logs/server:/var/log/stock-data-sync
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=3)
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    init: true
+
+  scheduler:
+    image: stock-data-sync-server:${APP_VERSION:?APP_VERSION is required}
+    environment:
+      <<: *app-environment
+      APP_LOG_FILE: /var/log/stock-data-sync/scheduler.log
+    command: ["python", "-m", "app.scheduler.runner"]
+    volumes:
+      - ${INSTALL_DIR:?INSTALL_DIR is required}/logs/scheduler:/var/log/stock-data-sync
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+
+  web:
+    image: stock-data-sync-web:${APP_VERSION:?APP_VERSION is required}
+    build:
+      context: ./app
+      dockerfile: deploy/docker/web.Dockerfile
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:?HTTP_PORT is required}:80"
+    volumes:
+      - ${INSTALL_DIR:?INSTALL_DIR is required}/logs/nginx:/var/log/nginx
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+

@@ -1,0 +1,23 @@
+.env
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+src/server/.venv/
+
+# Web
+src/web/node_modules/
+src/web/dist/
+src/web/.vite/
+src/web/coverage/
+
+# Release artifacts
+dist/

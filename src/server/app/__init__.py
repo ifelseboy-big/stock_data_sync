@@ -1,0 +1,1 @@
+"""Stock data synchronization server."""
