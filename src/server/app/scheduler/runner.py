@@ -10,6 +10,7 @@ from app.scheduler.jobs import (
     plan_due_collection_stages,
     plan_etf_master,
     plan_processing_tasks,
+    plan_special_master,
     plan_trade_calendar,
     reconcile_collection_runtime,
     reconcile_processing_runtime,
@@ -35,6 +36,7 @@ def main() -> None:
             plan_processing_tasks()
             plan_trade_calendar()
             plan_etf_master()
+            plan_special_master()
             plan_due_collection_stages()
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):

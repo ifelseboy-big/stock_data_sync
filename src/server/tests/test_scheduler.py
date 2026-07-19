@@ -18,12 +18,17 @@ def test_scheduler_registers_collection_coordination_jobs() -> None:
     assert scheduler.get_job("plan-trade-calendar") is not None
     assert scheduler.get_job("plan-stock-master") is not None
     assert scheduler.get_job("plan-etf-master") is not None
+    assert scheduler.get_job("plan-special-master") is not None
+    assert scheduler.get_job("plan-concept-board-members") is not None
+    assert scheduler.get_job("plan-monthly-index-weights") is not None
     assert scheduler.get_job("plan-etf-share-size") is not None
     assert scheduler.get_job("plan-next-year-trade-calendar") is not None
     assert scheduler.get_job("plan-daily-preopen") is not None
     assert scheduler.get_job("plan-daily-close") is not None
     assert scheduler.get_job("plan-daily-late") is not None
     assert scheduler.get_job("plan-daily-final") is not None
+    assert scheduler.get_job("plan-theme-members") is not None
+    assert scheduler.get_job("plan-hot-rank") is not None
 
 
 def test_scheduler_registers_partition_job() -> None:

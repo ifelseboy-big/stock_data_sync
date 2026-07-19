@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     tushare_timeout_seconds: float = Field(default=30, ge=1, le=300)
     tushare_max_attempts: int = Field(default=3, ge=1, le=10)
     tushare_retry_wait_seconds: float = Field(default=2, ge=0.1, le=60)
+    market_index_codes: tuple[str, ...] = (
+        "000001.SH",
+        "399001.SZ",
+        "000016.SH",
+        "000300.SH",
+        "000905.SH",
+        "399006.SZ",
+    )
 
     scheduler_timezone: str = "Asia/Shanghai"
     scheduler_jobstore_table: str = "apscheduler_jobs"
@@ -58,6 +66,10 @@ class Settings(BaseSettings):
     def validate_tushare_request_budget(self) -> "Settings":
         if self.tushare_request_budget_per_minute > self.tushare_request_limit_per_minute:
             raise ValueError("Tushare request budget cannot exceed the provider limit")
+        if not self.market_index_codes or len(set(self.market_index_codes)) != len(
+            self.market_index_codes
+        ):
+            raise ValueError("MARKET_INDEX_CODES must be non-empty and unique")
         if self.raw_storage_warning_used_percent >= self.raw_storage_protect_used_percent:
             raise ValueError("raw storage warning percent must be less than protect percent")
         if self.raw_storage_warning_free_bytes <= self.raw_storage_protect_free_bytes:

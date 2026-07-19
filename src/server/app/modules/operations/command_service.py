@@ -11,7 +11,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog import ApiSpec, ScheduleGroup, SpecRegistry
-from app.catalog.specs import ParameterValue
+from app.catalog.specs import ParameterValue, RequestScope
+from app.catalog.tushare import theme_member_scopes, ths_member_scopes
 from app.modules.acquisition.models import (
     BatchStatus,
     BatchType,
@@ -28,6 +29,7 @@ from app.modules.processing.models import (
     ProcessingTaskStatus,
 )
 from app.modules.stocks.models import TradeCalendar
+from app.modules.topics.models import ConceptBoard, MarketThemeDaily
 
 COLLECTION_RETRYABLE = frozenset(
     {
@@ -491,6 +493,7 @@ class OperationCommandService:
             if daily_only and spec.schedule_group not in {
                 ScheduleGroup.DAILY,
                 ScheduleGroup.DELAYED,
+                ScheduleGroup.HOT,
             }:
                 raise OperationCommandError(
                     f"历史回填只允许按业务日期采集的接口：{api_name}", status_code=422
@@ -532,7 +535,7 @@ class OperationCommandService:
         task_values: list[dict[str, object]] = []
         for spec in specs:
             try:
-                scopes = tuple(spec.scope_builder(business_date))
+                scopes = await self._resolve_scopes(spec, business_date)
             except ValueError as exc:
                 raise OperationCommandError(str(exc), status_code=422) from exc
             for scope in scopes:
@@ -572,6 +575,42 @@ class OperationCommandService:
         )
         await self._session.flush()
         return batch_id
+
+    async def _resolve_scopes(
+        self,
+        spec: ApiSpec,
+        business_date: date | None,
+    ) -> tuple[RequestScope, ...]:
+        if spec.api_name == "ths_member":
+            codes = tuple(
+                await self._session.scalars(
+                    select(ConceptBoard.ts_code)
+                    .where(ConceptBoard.source == "THS")
+                    .order_by(ConceptBoard.ts_code)
+                )
+            )
+            if not codes:
+                raise OperationCommandError("概念板块主数据尚未发布，不能采集概念成分")
+            return ths_member_scopes(codes)
+        if spec.api_name == "dc_concept_cons":
+            if business_date is None:
+                raise OperationCommandError("题材成分采集必须指定业务日期")
+            theme_codes = tuple(
+                await self._session.scalars(
+                    select(MarketThemeDaily.theme_code)
+                    .where(
+                        MarketThemeDaily.source == "DC",
+                        MarketThemeDaily.trade_date == business_date,
+                    )
+                    .order_by(MarketThemeDaily.theme_code)
+                )
+            )
+            if not theme_codes:
+                raise OperationCommandError(
+                    "该日期题材主数据尚未发布，必须先完成dc_concept采集和加工"
+                )
+            return theme_member_scopes(business_date, theme_codes)
+        return tuple(spec.scope_builder(business_date))
 
     async def _create_batch_from_task(
         self,

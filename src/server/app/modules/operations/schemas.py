@@ -170,12 +170,12 @@ class ManualCommandBase(OperationsModel):
 class CreateBackfillCommand(ManualCommandBase):
     start_date: date
     end_date: date
-    api_names: list[str] = Field(min_length=1, max_length=16)
+    api_names: list[str] = Field(min_length=1, max_length=64)
 
 
 class CreateRepairCommand(ManualCommandBase):
     business_date: date | None = None
-    api_names: list[str] = Field(min_length=1, max_length=16)
+    api_names: list[str] = Field(min_length=1, max_length=64)
 
 
 class TaskCommand(ManualCommandBase):

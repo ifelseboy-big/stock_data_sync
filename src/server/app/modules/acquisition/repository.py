@@ -92,8 +92,14 @@ class AcquisitionRepository:
             )
             if batch is None:
                 raise BatchPlanningError(f"unknown collection batch: {batch_id}")
-            if batch.status in {BatchStatus.CLOSED.value, BatchStatus.CANCELLED.value}:
-                raise BatchPlanningError("closed or cancelled batches cannot accept tasks")
+            if batch.status == BatchStatus.CANCELLED.value:
+                raise BatchPlanningError("cancelled batches cannot accept tasks")
+            if batch.status == BatchStatus.CLOSED.value:
+                return self._replay_closed_plan(
+                    session,
+                    batch=batch,
+                    blueprints=blueprints,
+                )
 
             existing_keys = set(
                 session.execute(
@@ -162,6 +168,52 @@ class AcquisitionRepository:
                 frozen=batch.planning_completed_at is not None or finalize,
                 plan_version=plan_version,
             )
+
+    @staticmethod
+    def _replay_closed_plan(
+        session: Session,
+        *,
+        batch: CollectionBatch,
+        blueprints: Sequence[TaskBlueprint],
+    ) -> BatchPlanResult:
+        submitted_keys = {(item.api_name, item.scope_key) for item in blueprints}
+        if len(submitted_keys) != len(blueprints):
+            raise BatchPlanningError("planned tasks contain duplicate api_name/scope_key pairs")
+        persisted_rows = session.execute(
+            select(
+                CollectionTask.provider,
+                CollectionTask.api_name,
+                CollectionTask.scope_key,
+                CollectionTask.request_params,
+                CollectionTask.max_attempts,
+            ).where(CollectionTask.batch_id == batch.batch_id)
+        ).all()
+        persisted = {
+            (row.api_name, row.scope_key): (
+                row.provider,
+                dict(row.request_params),
+                row.max_attempts,
+            )
+            for row in persisted_rows
+        }
+        for blueprint in blueprints:
+            key = (blueprint.api_name, blueprint.scope_key)
+            expected = (
+                blueprint.provider,
+                dict(blueprint.request_params),
+                blueprint.max_attempts,
+            )
+            if persisted.get(key) != expected:
+                raise BatchPlanningError(
+                    "closed batches only accept an exact replay of persisted tasks"
+                )
+        return BatchPlanResult(
+            batch_id=batch.batch_id,
+            created_task_count=0,
+            total_task_count=len(persisted_rows),
+            frozen=True,
+            plan_version=batch.plan_version,
+        )
 
     def is_trading_day(self, business_date: date, *, exchange: str = "SSE") -> bool | None:
         with self._session_factory() as session:

@@ -5,15 +5,22 @@ from app.common.errors import ProcessingError
 
 
 def required_text(value: object, field: str) -> str:
-    if value is None or not str(value).strip():
+    text = _clean_text(value)
+    if not text:
         raise ProcessingError(f"field {field} is required")
-    return str(value).strip()
+    return text
 
 
 def optional_text(value: object) -> str | None:
-    if value is None or not str(value).strip():
-        return None
-    return str(value).strip()
+    return _clean_text(value) or None
+
+
+def _clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    # PostgreSQL text cannot contain NUL. Preserve every other character and
+    # remove only the transport-invalid byte before normal whitespace cleanup.
+    return str(value).replace("\x00", "").strip()
 
 
 def yyyymmdd(value: object, field: str) -> date:

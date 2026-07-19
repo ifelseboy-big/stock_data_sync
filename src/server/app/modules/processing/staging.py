@@ -4,8 +4,9 @@ from uuid import uuid4
 
 from psycopg import Connection as PsycopgConnection
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from sqlalchemy import Column, MetaData, Table, delete, func, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.schema import Column as SchemaColumn
@@ -160,7 +161,7 @@ def _create_stage_table(
     target: Table,
     columns: tuple[str, ...],
 ) -> Table:
-    stage_name = f"_stage_{target.name}_{uuid4().hex}"
+    stage_name = _stage_table_name(target.name)
     stage = Table(
         stage_name,
         MetaData(),
@@ -170,6 +171,13 @@ def _create_stage_table(
     )
     stage.create(session.connection())
     return stage
+
+
+def _stage_table_name(target_name: str) -> str:
+    # PostgreSQL identifiers are limited to 63 bytes. Model/table names in this
+    # project are ASCII, so reserving 32 characters for the UUID keeps the name
+    # unique while retaining a readable target prefix.
+    return f"_stage_{target_name[:23]}_{uuid4().hex}"
 
 
 def _copy_stage_rows(
@@ -193,7 +201,18 @@ def _copy_stage_rows(
     with driver_connection.cursor() as cursor, cursor.copy(statement) as copy:
         for offset in range(0, len(rows), chunk_size):
             for row in rows[offset : offset + chunk_size]:
-                copy.write_row(tuple(row.get(column) for column in columns))
+                copy.write_row(
+                    tuple(
+                        _copy_value(stage.c[column], row.get(column))
+                        for column in columns
+                    )
+                )
+
+
+def _copy_value(column: SchemaColumn[object], value: object) -> object:
+    if value is not None and isinstance(column.type, JSONB):
+        return Jsonb(value)
+    return value
 
 
 def _clone_column(column: SchemaColumn[object]) -> Column[object]:

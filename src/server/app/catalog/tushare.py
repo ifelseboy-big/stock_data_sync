@@ -14,6 +14,7 @@ from app.catalog.specs import (
     SpecRegistry,
     SplitPolicy,
 )
+from app.core.config import settings
 
 
 def build_tushare_api_registry() -> SpecRegistry[ApiSpec]:
@@ -115,6 +116,97 @@ def _etf_share_size_scopes(business_date: date | None) -> tuple[RequestScope, ..
             {"trade_date": business_date, "exchange": exchange},
         )
         for exchange in ("SSE", "SZSE")
+    )
+
+
+def ths_member_scopes(codes: tuple[str, ...]) -> tuple[RequestScope, ...]:
+    return tuple(RequestScope(f"ts_code={code}", {"ts_code": code}) for code in sorted(set(codes)))
+
+
+def theme_member_scopes(
+    business_date: date,
+    theme_codes: tuple[str, ...],
+) -> tuple[RequestScope, ...]:
+    return tuple(
+        RequestScope(
+            f"trade_date={business_date:%Y%m%d};theme_code={theme_code}",
+            {"trade_date": business_date, "theme_code": theme_code},
+        )
+        for theme_code in sorted(set(theme_codes))
+    )
+
+
+def _dynamic_scopes_required(business_date: date | None) -> tuple[RequestScope, ...]:
+    del business_date
+    raise ValueError("this API requires entity scopes resolved from published master data")
+
+
+def _index_basic_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    del business_date
+    return tuple(
+        RequestScope(f"market={market}", {"market": market})
+        for market in ("SSE", "SZSE", "CSI", "MSCI", "CICC", "SW", "OTH")
+    )
+
+
+def _index_daily_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    if business_date is None:
+        raise ValueError("index daily API requires a business date")
+    return tuple(
+        RequestScope(
+            f"trade_date={business_date:%Y%m%d};ts_code={code}",
+            {"trade_date": business_date, "ts_code": code},
+        )
+        for code in settings.market_index_codes
+    )
+
+
+def _index_weight_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    if business_date is None:
+        raise ValueError("index weight API requires a target month")
+    start_date = date(business_date.year, business_date.month, 1)
+    month_index = start_date.year * 12 + start_date.month
+    end_year, end_zero_month = divmod(month_index, 12)
+    next_month = date(end_year, end_zero_month + 1, 1)
+    end_date = date.fromordinal(next_month.toordinal() - 1)
+    return tuple(
+        RequestScope(
+            f"month={start_date:%Y%m};index_code={code}",
+            {
+                "index_code": code,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        )
+        for code in settings.market_index_codes
+    )
+
+
+def _ths_hot_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    if business_date is None:
+        raise ValueError("THS hot API requires a business date")
+    return (
+        RequestScope(
+            f"trade_date={business_date:%Y%m%d};market=热股;is_new=Y",
+            {"trade_date": business_date, "market": "热股", "is_new": "Y"},
+        ),
+    )
+
+
+def _dc_hot_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    if business_date is None:
+        raise ValueError("DC hot API requires a business date")
+    return tuple(
+        RequestScope(
+            f"trade_date={business_date:%Y%m%d};market=A股市场;hot_type={hot_type};is_new=Y",
+            {
+                "trade_date": business_date,
+                "market": "A股市场",
+                "hot_type": hot_type,
+                "is_new": "Y",
+            },
+        )
+        for hot_type in ("人气榜", "飙升榜")
     )
 
 
@@ -548,8 +640,461 @@ ETF_SHARE_SIZE_SPEC = ApiSpec(
     date_extractor=_extract_trade_date,
 )
 
+THS_INDEX_FIELDS = ("ts_code", "name", "count", "exchange", "list_date", "type")
+THS_INDEX_SPEC = _master_spec(
+    api_name="ths_index",
+    fields=THS_INDEX_FIELDS,
+    string_fields=frozenset(THS_INDEX_FIELDS) - {"count"},
+    integer_fields=frozenset({"count"}),
+    natural_key=("ts_code",),
+    scope_builder=lambda business_date: (
+        RequestScope("exchange=A;type=N", {"exchange": "A", "type": "N"}),
+    ),
+)
+
+THS_MEMBER_FIELDS = (
+    "ts_code",
+    "con_code",
+    "con_name",
+    "weight",
+    "in_date",
+    "out_date",
+    "is_new",
+)
+THS_MEMBER_SPEC = ApiSpec(
+    api_name="ths_member",
+    provider="TUSHARE",
+    fields=THS_MEMBER_FIELDS,
+    schema=_arrow_schema(
+        THS_MEMBER_FIELDS,
+        string_fields=frozenset(THS_MEMBER_FIELDS) - {"weight"},
+    ),
+    natural_key=("ts_code", "con_code"),
+    schedule_group=ScheduleGroup.MASTER,
+    scope_builder=_dynamic_scopes_required,
+    split_policy=SplitPolicy.BOARD,
+    row_limit=5_000,
+    empty_policy=EmptyPolicy.ALLOWED,
+    retry_policy=RetryPolicy(max_attempts=3, initial_wait_seconds=60, max_wait_seconds=900),
+    date_extractor=lambda record: None,
+    endpoint_budget_per_minute=190,
+)
+
+THS_DAILY_FIELDS = (
+    "ts_code",
+    "trade_date",
+    "close",
+    "open",
+    "high",
+    "low",
+    "pre_close",
+    "avg_price",
+    "change",
+    "pct_change",
+    "vol",
+    "turnover_rate",
+    "total_mv",
+    "float_mv",
+)
+THS_DAILY_SPEC = _daily_spec(
+    api_name="ths_daily",
+    fields=THS_DAILY_FIELDS,
+    string_fields=frozenset({"ts_code", "trade_date"}),
+    natural_key=("ts_code", "trade_date"),
+    row_limit=3_000,
+    cutoff_time=time(hour=22, minute=30),
+)
+
+THS_HOT_FIELDS = (
+    "trade_date",
+    "data_type",
+    "ts_code",
+    "ts_name",
+    "rank",
+    "pct_change",
+    "current_price",
+    "concept",
+    "rank_reason",
+    "hot",
+    "rank_time",
+)
+THS_HOT_SPEC = ApiSpec(
+    api_name="ths_hot",
+    provider="TUSHARE",
+    fields=THS_HOT_FIELDS,
+    schema=_arrow_schema(
+        THS_HOT_FIELDS,
+        string_fields=frozenset(
+            {"trade_date", "data_type", "ts_code", "ts_name", "concept", "rank_reason", "rank_time"}
+        ),
+        integer_fields=frozenset({"rank"}),
+    ),
+    natural_key=("trade_date", "data_type", "ts_code"),
+    schedule_group=ScheduleGroup.HOT,
+    scope_builder=_ths_hot_scopes,
+    split_policy=SplitPolicy.TRADE_DATE,
+    row_limit=2_000,
+    empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,
+    retry_policy=RetryPolicy(
+        max_attempts=5,
+        initial_wait_seconds=120,
+        max_wait_seconds=900,
+        cutoff_time=time(hour=23),
+    ),
+    date_extractor=_extract_trade_date,
+)
+
+DC_HOT_FIELDS = (
+    "trade_date",
+    "data_type",
+    "ts_code",
+    "ts_name",
+    "rank",
+    "pct_change",
+    "current_price",
+    "hot",
+    "concept",
+    "rank_time",
+)
+DC_HOT_SPEC = ApiSpec(
+    api_name="dc_hot",
+    provider="TUSHARE",
+    fields=DC_HOT_FIELDS,
+    schema=_arrow_schema(
+        DC_HOT_FIELDS,
+        string_fields=frozenset(
+            {"trade_date", "data_type", "ts_code", "ts_name", "concept", "rank_time"}
+        ),
+        integer_fields=frozenset({"rank"}),
+    ),
+    natural_key=("trade_date", "data_type", "ts_code"),
+    schedule_group=ScheduleGroup.HOT,
+    scope_builder=_dc_hot_scopes,
+    split_policy=SplitPolicy.TRADE_DATE,
+    row_limit=2_000,
+    empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,
+    retry_policy=RetryPolicy(
+        max_attempts=5,
+        initial_wait_seconds=120,
+        max_wait_seconds=900,
+        cutoff_time=time(hour=23),
+    ),
+    date_extractor=_extract_trade_date,
+)
+
+DC_CONCEPT_FIELDS = (
+    "theme_code",
+    "trade_date",
+    "name",
+    "pct_change",
+    "hot",
+    "sort",
+    "strength",
+    "z_t_num",
+    "main_change",
+    "lead_stock",
+    "lead_stock_code",
+    "lead_stock_pct_change",
+)
+DC_CONCEPT_SPEC = _daily_spec(
+    api_name="dc_concept",
+    fields=DC_CONCEPT_FIELDS,
+    string_fields=frozenset({"theme_code", "trade_date", "name", "lead_stock", "lead_stock_code"}),
+    integer_fields=frozenset({"sort", "z_t_num"}),
+    natural_key=("theme_code", "trade_date"),
+    row_limit=5_000,
+    cutoff_time=time(hour=22, minute=30),
+)
+
+DC_CONCEPT_CONS_FIELDS = (
+    "ts_code",
+    "trade_date",
+    "name",
+    "theme_code",
+    "industry_code",
+    "industry",
+    "reason",
+    "hot_num",
+)
+DC_CONCEPT_CONS_SPEC = ApiSpec(
+    api_name="dc_concept_cons",
+    provider="TUSHARE",
+    fields=DC_CONCEPT_CONS_FIELDS,
+    schema=_arrow_schema(
+        DC_CONCEPT_CONS_FIELDS,
+        string_fields=frozenset(DC_CONCEPT_CONS_FIELDS) - {"hot_num"},
+        integer_fields=frozenset({"hot_num"}),
+    ),
+    natural_key=("theme_code", "trade_date", "ts_code"),
+    schedule_group=ScheduleGroup.DELAYED,
+    scope_builder=_dynamic_scopes_required,
+    split_policy=SplitPolicy.THEME,
+    row_limit=3_000,
+    empty_policy=EmptyPolicy.ALLOWED,
+    retry_policy=RetryPolicy(max_attempts=3, initial_wait_seconds=120, max_wait_seconds=900),
+    date_extractor=_extract_trade_date,
+)
+
+TOP_LIST_FIELDS = (
+    "trade_date",
+    "ts_code",
+    "name",
+    "close",
+    "pct_change",
+    "turnover_rate",
+    "amount",
+    "l_sell",
+    "l_buy",
+    "l_amount",
+    "net_amount",
+    "net_rate",
+    "amount_rate",
+    "float_values",
+    "reason",
+)
+TOP_LIST_SPEC = _daily_spec(
+    api_name="top_list",
+    fields=TOP_LIST_FIELDS,
+    string_fields=frozenset({"trade_date", "ts_code", "name", "reason"}),
+    # Tushare can return byte-for-byte duplicate top-list rows for the same
+    # stock and reason. Keep the raw response intact and deduplicate only in
+    # the processing layer, where conflicting duplicates can be distinguished.
+    natural_key=(),
+    row_limit=10_000,
+    cutoff_time=time(hour=22, minute=30),
+    empty_policy=EmptyPolicy.ALLOWED,
+)
+
+TOP_INST_FIELDS = (
+    "trade_date",
+    "ts_code",
+    "exalter",
+    "side",
+    "buy",
+    "buy_rate",
+    "sell",
+    "sell_rate",
+    "net_buy",
+    "reason",
+)
+TOP_INST_SPEC = _daily_spec(
+    api_name="top_inst",
+    fields=TOP_INST_FIELDS,
+    string_fields=frozenset({"trade_date", "ts_code", "exalter", "reason"}),
+    integer_fields=frozenset({"side"}),
+    natural_key=(),
+    row_limit=10_000,
+    cutoff_time=time(hour=22, minute=30),
+    empty_policy=EmptyPolicy.ALLOWED,
+)
+
+LIMIT_LIST_FIELDS = (
+    "trade_date",
+    "ts_code",
+    "industry",
+    "name",
+    "close",
+    "pct_chg",
+    "amount",
+    "limit_amount",
+    "float_mv",
+    "total_mv",
+    "turnover_ratio",
+    "fd_amount",
+    "first_time",
+    "last_time",
+    "open_times",
+    "up_stat",
+    "limit_times",
+    "limit",
+)
+LIMIT_LIST_SPEC = _daily_spec(
+    api_name="limit_list_d",
+    fields=LIMIT_LIST_FIELDS,
+    string_fields=frozenset(
+        {"trade_date", "ts_code", "industry", "name", "first_time", "last_time", "up_stat", "limit"}
+    ),
+    integer_fields=frozenset({"open_times", "limit_times"}),
+    natural_key=("trade_date", "ts_code", "limit"),
+    row_limit=2_500,
+    cutoff_time=time(hour=22, minute=30),
+)
+
+LIMIT_STEP_FIELDS = ("ts_code", "name", "trade_date", "nums")
+LIMIT_STEP_SPEC = _daily_spec(
+    api_name="limit_step",
+    fields=LIMIT_STEP_FIELDS,
+    string_fields=frozenset({"ts_code", "name", "trade_date"}),
+    integer_fields=frozenset({"nums"}),
+    natural_key=("trade_date", "ts_code"),
+    row_limit=2_000,
+    cutoff_time=time(hour=22, minute=30),
+    empty_policy=EmptyPolicy.ALLOWED,
+)
+
+MONEYFLOW_CNT_THS_FIELDS = (
+    "trade_date",
+    "ts_code",
+    "name",
+    "lead_stock",
+    "close_price",
+    "pct_change",
+    "industry_index",
+    "company_num",
+    "pct_change_stock",
+    "net_buy_amount",
+    "net_sell_amount",
+    "net_amount",
+)
+MONEYFLOW_CNT_THS_SPEC = _daily_spec(
+    api_name="moneyflow_cnt_ths",
+    fields=MONEYFLOW_CNT_THS_FIELDS,
+    string_fields=frozenset({"trade_date", "ts_code", "name", "lead_stock"}),
+    integer_fields=frozenset({"company_num"}),
+    natural_key=("trade_date", "ts_code"),
+    row_limit=5_000,
+    cutoff_time=time(hour=22, minute=30),
+)
+
+MONEYFLOW_IND_THS_FIELDS = (
+    "trade_date",
+    "ts_code",
+    "industry",
+    "lead_stock",
+    "close",
+    "pct_change",
+    "company_num",
+    "pct_change_stock",
+    "close_price",
+    "net_buy_amount",
+    "net_sell_amount",
+    "net_amount",
+)
+MONEYFLOW_IND_THS_SPEC = _daily_spec(
+    api_name="moneyflow_ind_ths",
+    fields=MONEYFLOW_IND_THS_FIELDS,
+    string_fields=frozenset({"trade_date", "ts_code", "industry", "lead_stock"}),
+    integer_fields=frozenset({"company_num"}),
+    natural_key=("trade_date", "ts_code"),
+    row_limit=5_000,
+    cutoff_time=time(hour=22, minute=30),
+)
+
+INDEX_BASIC_FIELDS = (
+    "ts_code",
+    "name",
+    "fullname",
+    "market",
+    "publisher",
+    "index_type",
+    "category",
+    "base_date",
+    "base_point",
+    "list_date",
+    "weight_rule",
+    "desc",
+    "exp_date",
+)
+INDEX_BASIC_SPEC = ApiSpec(
+    api_name="index_basic",
+    provider="TUSHARE",
+    fields=INDEX_BASIC_FIELDS,
+    schema=_arrow_schema(
+        INDEX_BASIC_FIELDS,
+        string_fields=frozenset(INDEX_BASIC_FIELDS) - {"base_point"},
+    ),
+    natural_key=("ts_code",),
+    schedule_group=ScheduleGroup.MASTER,
+    scope_builder=_index_basic_scopes,
+    split_policy=SplitPolicy.OFFSET,
+    row_limit=8_000,
+    empty_policy=EmptyPolicy.ALLOWED,
+    retry_policy=RetryPolicy(max_attempts=3, initial_wait_seconds=60, max_wait_seconds=900),
+    date_extractor=lambda record: None,
+)
+
+INDEX_DAILY_FIELDS = (
+    "ts_code",
+    "trade_date",
+    "close",
+    "open",
+    "high",
+    "low",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+)
+INDEX_DAILY_SPEC = ApiSpec(
+    api_name="index_daily",
+    provider="TUSHARE",
+    fields=INDEX_DAILY_FIELDS,
+    schema=_arrow_schema(
+        INDEX_DAILY_FIELDS,
+        string_fields=frozenset({"ts_code", "trade_date"}),
+    ),
+    natural_key=("ts_code", "trade_date"),
+    schedule_group=ScheduleGroup.DAILY,
+    scope_builder=_index_daily_scopes,
+    split_policy=SplitPolicy.INDEX,
+    row_limit=1_000,
+    empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,
+    retry_policy=RetryPolicy(
+        max_attempts=5,
+        initial_wait_seconds=120,
+        max_wait_seconds=900,
+        cutoff_time=time(hour=22, minute=30),
+    ),
+    date_extractor=_extract_trade_date,
+)
+
+INDEX_DAILY_BASIC_FIELDS = (
+    "ts_code",
+    "trade_date",
+    "total_mv",
+    "float_mv",
+    "total_share",
+    "float_share",
+    "free_share",
+    "turnover_rate",
+    "turnover_rate_f",
+    "pe",
+    "pe_ttm",
+    "pb",
+)
+INDEX_DAILY_BASIC_SPEC = _daily_spec(
+    api_name="index_dailybasic",
+    fields=INDEX_DAILY_BASIC_FIELDS,
+    string_fields=frozenset({"ts_code", "trade_date"}),
+    natural_key=("ts_code", "trade_date"),
+    row_limit=3_000,
+    cutoff_time=time(hour=22, minute=30),
+)
+
+INDEX_WEIGHT_FIELDS = ("index_code", "con_code", "trade_date", "weight")
+INDEX_WEIGHT_SPEC = ApiSpec(
+    api_name="index_weight",
+    provider="TUSHARE",
+    fields=INDEX_WEIGHT_FIELDS,
+    schema=_arrow_schema(
+        INDEX_WEIGHT_FIELDS,
+        string_fields=frozenset({"index_code", "con_code", "trade_date"}),
+    ),
+    natural_key=("index_code", "trade_date", "con_code"),
+    schedule_group=ScheduleGroup.MASTER,
+    scope_builder=_index_weight_scopes,
+    split_policy=SplitPolicy.MONTH,
+    row_limit=5_000,
+    empty_policy=EmptyPolicy.ALLOWED,
+    retry_policy=RetryPolicy(max_attempts=3, initial_wait_seconds=120, max_wait_seconds=900),
+    date_extractor=lambda record: None,
+)
+
 MASTER_STOCK_SPECS = (STOCK_BASIC_SPEC, STOCK_COMPANY_SPEC)
 MASTER_ETF_SPECS = (ETF_BASIC_SPEC,)
+MASTER_SPECIAL_SPECS = (THS_INDEX_SPEC, INDEX_BASIC_SPEC)
+MASTER_ENTITY_SPECS = (THS_MEMBER_SPEC,)
 DAILY_PREOPEN_SPECS = (ADJ_FACTOR_SPEC,)
 DAILY_CLOSE_SPECS = (DAILY_SPEC, FUND_DAILY_SPEC)
 DAILY_LATE_SPECS = (
@@ -558,16 +1103,34 @@ DAILY_LATE_SPECS = (
     MONEYFLOW_SPEC,
     SUSPEND_SPEC,
     FUND_ADJ_SPEC,
+    THS_DAILY_SPEC,
+    DC_CONCEPT_SPEC,
+    TOP_LIST_SPEC,
+    TOP_INST_SPEC,
+    LIMIT_LIST_SPEC,
+    LIMIT_STEP_SPEC,
+    MONEYFLOW_CNT_THS_SPEC,
+    MONEYFLOW_IND_THS_SPEC,
+    INDEX_DAILY_SPEC,
+    INDEX_DAILY_BASIC_SPEC,
 )
 DAILY_FINAL_SPECS = (STK_FACTOR_SPEC,)
 DELAYED_ETF_SPECS = (ETF_SHARE_SIZE_SPEC,)
+DELAYED_THEME_SPECS = (DC_CONCEPT_CONS_SPEC,)
+HOT_SPECS = (THS_HOT_SPEC, DC_HOT_SPEC)
+MONTHLY_INDEX_SPECS = (INDEX_WEIGHT_SPEC,)
 ALL_TUSHARE_API_SPECS = (
     TRADE_CAL_SPEC,
     *MASTER_STOCK_SPECS,
     *MASTER_ETF_SPECS,
+    *MASTER_SPECIAL_SPECS,
+    *MASTER_ENTITY_SPECS,
     *DAILY_PREOPEN_SPECS,
     *DAILY_CLOSE_SPECS,
     *DAILY_LATE_SPECS,
     *DAILY_FINAL_SPECS,
     *DELAYED_ETF_SPECS,
+    *DELAYED_THEME_SPECS,
+    *HOT_SPECS,
+    *MONTHLY_INDEX_SPECS,
 )

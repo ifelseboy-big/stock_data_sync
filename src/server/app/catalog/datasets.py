@@ -259,6 +259,280 @@ STOCK_SUSPEND_DAILY_DATASET = DatasetSpec(
     ),
 )
 
+CONCEPT_BOARD_DATASET = DatasetSpec(
+    dataset_name="concept_board",
+    processor="concept_board",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_index", ReleaseScope.GLOBAL),
+    ),
+    write_strategy=WriteStrategy.MASTER_MERGE,
+    release_scope=ReleaseScope.GLOBAL,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code")}),
+        QualityRuleSpec("concept_board_non_empty"),
+    ),
+)
+
+CONCEPT_BOARD_DAILY_DATASET = DatasetSpec(
+    dataset_name="concept_board_daily",
+    processor="concept_board_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_daily", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "concept_board", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code", "trade_date")}),
+        QualityRuleSpec("filter_to_concept_board_master"),
+    ),
+)
+
+CONCEPT_BOARD_MEMBER_DATASET = DatasetSpec(
+    dataset_name="concept_board_member",
+    processor="concept_board_member",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_member", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "concept_board", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+    ),
+    write_strategy=WriteStrategy.REPLACE_ENTITY,
+    release_scope=ReleaseScope.GLOBAL,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code", "con_code")}),
+        QualityRuleSpec("filter_to_current_stock_members"),
+    ),
+)
+
+STOCK_HOT_RANK_DAILY_DATASET = DatasetSpec(
+    dataset_name="stock_hot_rank_daily",
+    processor="stock_hot_rank_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_hot", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "dc_hot", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec(
+            "natural_key_unique",
+            {
+                "columns": (
+                    "source",
+                    "trade_date",
+                    "market_type",
+                    "rank_type",
+                    "ts_code",
+                )
+            },
+        ),
+        QualityRuleSpec("rank_positions_unique"),
+        QualityRuleSpec("filter_to_stock_master"),
+    ),
+)
+
+MARKET_THEME_DAILY_DATASET = DatasetSpec(
+    dataset_name="market_theme_daily",
+    processor="market_theme_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "dc_concept", ReleaseScope.DATE),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "theme_code", "trade_date")}),
+    ),
+)
+
+MARKET_THEME_MEMBER_DAILY_DATASET = DatasetSpec(
+    dataset_name="market_theme_member_daily",
+    processor="market_theme_member_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "dc_concept_cons", ReleaseScope.DATE),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "market_theme_daily", ReleaseScope.DATE
+        ),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec(
+            "natural_key_unique",
+            {"columns": ("source", "trade_date", "theme_code", "ts_code")},
+        ),
+        QualityRuleSpec("filter_to_theme_and_stock_master"),
+    ),
+)
+
+STOCK_TOP_LIST_DAILY_DATASET = DatasetSpec(
+    dataset_name="stock_top_list_daily",
+    processor="stock_top_list_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "top_list", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("empty_allowed"),),
+)
+
+STOCK_TOP_INST_DAILY_DATASET = DatasetSpec(
+    dataset_name="stock_top_inst_daily",
+    processor="stock_top_inst_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "top_inst", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("empty_allowed"),),
+)
+
+STOCK_LIMIT_EVENT_DAILY_DATASET = DatasetSpec(
+    dataset_name="stock_limit_event_daily",
+    processor="stock_limit_event_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "limit_list_d", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("empty_allowed"),),
+)
+
+STOCK_LIMIT_STEP_DAILY_DATASET = DatasetSpec(
+    dataset_name="stock_limit_step_daily",
+    processor="stock_limit_step_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "limit_step", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("empty_allowed"),),
+)
+
+THS_BOARD_MONEYFLOW_DAILY_DATASET = DatasetSpec(
+    dataset_name="ths_board_moneyflow_daily",
+    processor="ths_board_moneyflow_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "moneyflow_cnt_ths", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "moneyflow_ind_ths", ReleaseScope.DATE),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec(
+            "natural_key_unique",
+            {"columns": ("board_type", "ts_code", "trade_date")},
+        ),
+    ),
+)
+
+MARKET_INDEX_DATASET = DatasetSpec(
+    dataset_name="market_index",
+    processor="market_index",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "index_basic", ReleaseScope.GLOBAL),
+    ),
+    write_strategy=WriteStrategy.MASTER_MERGE,
+    release_scope=ReleaseScope.GLOBAL,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("ts_code",)}),
+        QualityRuleSpec("market_index_non_empty"),
+    ),
+)
+
+MARKET_INDEX_DAILY_DATASET = DatasetSpec(
+    dataset_name="market_index_daily",
+    processor="market_index_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "index_daily", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "market_index", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),),
+)
+
+INDEX_DAILY_BASIC_DATASET = DatasetSpec(
+    dataset_name="index_daily_basic",
+    processor="index_daily_basic",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "index_dailybasic", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "market_index", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("empty_allowed"),),
+)
+
+MARKET_INDEX_WEIGHT_DATASET = DatasetSpec(
+    dataset_name="market_index_weight",
+    processor="market_index_weight",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "index_weight", ReleaseScope.MONTH),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "market_index", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.MONTH,
+    quality_rules=(
+        QualityRuleSpec(
+            "natural_key_unique",
+            {"columns": ("index_code", "snapshot_date", "con_code")},
+        ),
+        QualityRuleSpec("filter_to_index_and_stock_master"),
+    ),
+)
+
 ALL_DATASET_SPECS = (
     TRADE_CALENDAR_DATASET,
     STOCK_DATASET,
@@ -271,4 +545,19 @@ ALL_DATASET_SPECS = (
     STOCK_TECHNICAL_DAILY_DATASET,
     STOCK_MONEYFLOW_DAILY_DATASET,
     STOCK_SUSPEND_DAILY_DATASET,
+    CONCEPT_BOARD_DATASET,
+    CONCEPT_BOARD_DAILY_DATASET,
+    CONCEPT_BOARD_MEMBER_DATASET,
+    STOCK_HOT_RANK_DAILY_DATASET,
+    MARKET_THEME_DAILY_DATASET,
+    MARKET_THEME_MEMBER_DAILY_DATASET,
+    STOCK_TOP_LIST_DAILY_DATASET,
+    STOCK_TOP_INST_DAILY_DATASET,
+    STOCK_LIMIT_EVENT_DAILY_DATASET,
+    STOCK_LIMIT_STEP_DAILY_DATASET,
+    THS_BOARD_MONEYFLOW_DAILY_DATASET,
+    MARKET_INDEX_DATASET,
+    MARKET_INDEX_DAILY_DATASET,
+    INDEX_DAILY_BASIC_DATASET,
+    MARKET_INDEX_WEIGHT_DATASET,
 )

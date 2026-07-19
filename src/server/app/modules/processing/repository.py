@@ -79,6 +79,14 @@ class ProcessingRepository:
                 planned_tasks: list[tuple[DatasetSpec, UUID]] = []
                 created_for_batch = False
                 for spec in eligible_specs:
+                    if not (
+                        _raw_dependency_names(spec) & batch_api_names
+                    ) and not self._has_all_raw_dependencies(
+                        session,
+                        source_batch=batch,
+                        spec=spec,
+                    ):
+                        continue
                     process_id, created = self._upsert_processing_task(
                         session,
                         batch=batch,
@@ -123,6 +131,29 @@ class ProcessingRepository:
             created_task_count=created_task_count,
             queued_task_count=queued_task_count,
             blocked_task_count=blocked_task_count,
+        )
+
+    def _has_all_raw_dependencies(
+        self,
+        session: Session,
+        *,
+        source_batch: CollectionBatch,
+        spec: DatasetSpec,
+    ) -> bool:
+        raw_dependencies = tuple(
+            dependency
+            for dependency in spec.dependencies
+            if dependency.kind == DependencyKind.RAW_ASSET
+        )
+        return bool(raw_dependencies) and all(
+            self._latest_raw_assets(
+                session,
+                source_batch=source_batch,
+                api_name=dependency.name,
+                scope=dependency.scope,
+                business_date=source_batch.business_date,
+            )
+            for dependency in raw_dependencies
         )
 
     def claim_next(

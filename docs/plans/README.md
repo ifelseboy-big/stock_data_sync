@@ -41,5 +41,6 @@ NN-topic.md
 8. [生产验收与恢复](07-production-readiness.md)
 9. [最近两周真实数据流程验收](08-live-workflow-validation.md)
 10. [ETF 数据同步链路](09-etf-data-pipeline.md)
+11. [专题与指数数据同步链路](10-special-index-data-pipelines.md)
 
 性能验收的固定规模、阈值和实测结果记录在 [目标规模性能验收](07-performance-results.md)。

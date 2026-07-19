@@ -87,7 +87,16 @@ def test_collection_repository_state_machine_roundtrip() -> None:
     )
 
     assert repository.close_ready_batches(now=retry_at) == (batch_id,)
-    with pytest.raises(BatchPlanningError, match="cannot accept tasks"):
+    replay = repository.append_tasks(
+        batch_id,
+        blueprints,
+        finalize=True,
+        now=retry_at,
+    )
+    assert replay.created_task_count == 0
+    assert replay.total_task_count == 2
+    assert replay.frozen is True
+    with pytest.raises(BatchPlanningError, match="closed batches"):
         repository.append_tasks(
             batch_id,
             (TaskBlueprint("TUSHARE", "daily", "part=3", {"part": 3}, 1),),

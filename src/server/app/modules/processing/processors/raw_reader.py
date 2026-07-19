@@ -56,16 +56,17 @@ def read_raw_assets(
             for batch in asset_store.iter_batches(dependency.storage_uri):
                 for source in batch.to_pylist():
                     row = cast(RawRow, source)
-                    key = tuple(row.get(column) for column in spec.natural_key)
-                    if any(value is None or value == "" for value in key):
-                        raise ProcessingError(
-                            f"{spec.api_name} contains an empty natural key: {key}"
-                        )
-                    if key in keys:
-                        raise ProcessingError(
-                            f"{spec.api_name} contains duplicate natural key: {key}"
-                        )
-                    keys.add(key)
+                    if spec.natural_key:
+                        key = tuple(row.get(column) for column in spec.natural_key)
+                        if any(value is None or value == "" for value in key):
+                            raise ProcessingError(
+                                f"{spec.api_name} contains an empty natural key: {key}"
+                            )
+                        if key in keys:
+                            raise ProcessingError(
+                                f"{spec.api_name} contains duplicate natural key: {key}"
+                            )
+                        keys.add(key)
                     rows.append(row)
 
         rows_by_api[spec.api_name] = tuple(rows)

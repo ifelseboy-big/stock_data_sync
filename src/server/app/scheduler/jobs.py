@@ -12,10 +12,17 @@ from app.catalog.tushare import (
     DAILY_LATE_SPECS,
     DAILY_PREOPEN_SPECS,
     DELAYED_ETF_SPECS,
+    DELAYED_THEME_SPECS,
+    HOT_SPECS,
+    MASTER_ENTITY_SPECS,
     MASTER_ETF_SPECS,
+    MASTER_SPECIAL_SPECS,
     MASTER_STOCK_SPECS,
+    MONTHLY_INDEX_SPECS,
     TRADE_CAL_SPEC,
     next_year_trade_calendar_scopes,
+    theme_member_scopes,
+    ths_member_scopes,
 )
 from app.common.errors import CalendarCoverageError
 from app.core.config import settings
@@ -36,6 +43,7 @@ from app.modules.processing.factory import (
     get_processing_runtime,
 )
 from app.modules.stocks.models import TradeCalendar
+from app.modules.topics.models import ConceptBoard, MarketThemeDaily
 
 
 def dispatch_collection_tasks() -> None:
@@ -173,6 +181,75 @@ def plan_etf_master() -> None:
     )
 
 
+def plan_special_master() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    business_date = date(now.year, now.month, 1)
+    scheduled_at = datetime.combine(business_date, time(hour=8, minute=40), timezone)
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.MASTER,
+            business_date=business_date,
+            scheduled_at=scheduled_at,
+            api_specs=MASTER_SPECIAL_SPECS,
+            finalize=True,
+        ),
+        now=now,
+        stage_name="special_master",
+    )
+
+
+def plan_concept_board_members() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    business_date = date(now.year, now.month, 1)
+    with SyncSessionFactory() as session:
+        codes = tuple(
+            session.scalars(
+                select(ConceptBoard.ts_code)
+                .where(ConceptBoard.source == "THS")
+                .order_by(ConceptBoard.ts_code)
+            )
+        )
+    if not codes:
+        structlog.get_logger("scheduler").warning("concept_member_waiting_for_master")
+        return
+    dynamic_spec = replace(
+        MASTER_ENTITY_SPECS[0],
+        scope_builder=lambda ignored_date: ths_member_scopes(codes),
+    )
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.MASTER,
+            business_date=business_date,
+            scheduled_at=datetime.combine(business_date, time(hour=10), timezone),
+            api_specs=(dynamic_spec,),
+            finalize=True,
+        ),
+        now=now,
+        stage_name="concept_board_members",
+    )
+
+
+def plan_monthly_index_weights() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    current_month = date(now.year, now.month, 1)
+    target_month = (current_month - timedelta(days=1)).replace(day=1)
+    scheduled_at = datetime.combine(date(now.year, now.month, 2), time(hour=8, minute=50), timezone)
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.MASTER,
+            business_date=target_month,
+            scheduled_at=scheduled_at,
+            api_specs=MONTHLY_INDEX_SPECS,
+            finalize=True,
+        ),
+        now=now,
+        stage_name="monthly_index_weights",
+    )
+
+
 def plan_etf_share_size() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
@@ -222,6 +299,61 @@ def plan_daily_final() -> None:
     _plan_daily_stage(daily_specs, finalize=True, stage_name="daily_final")
 
 
+def plan_theme_members() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    business_date = now.date()
+    with SyncSessionFactory() as session:
+        theme_codes = tuple(
+            session.scalars(
+                select(MarketThemeDaily.theme_code)
+                .where(
+                    MarketThemeDaily.source == "DC",
+                    MarketThemeDaily.trade_date == business_date,
+                )
+                .order_by(MarketThemeDaily.theme_code)
+            )
+        )
+    if not theme_codes:
+        structlog.get_logger("scheduler").info(
+            "theme_member_waiting_for_daily_theme",
+            business_date=business_date.isoformat(),
+        )
+        return
+    dynamic_spec = replace(
+        DELAYED_THEME_SPECS[0],
+        scope_builder=lambda ignored_date: theme_member_scopes(business_date, theme_codes),
+    )
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.DELAYED,
+            business_date=business_date,
+            scheduled_at=datetime.combine(business_date, time(hour=20), timezone),
+            api_specs=(dynamic_spec,),
+            finalize=True,
+        ),
+        now=now,
+        stage_name="theme_members",
+    )
+
+
+def plan_hot_rank() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    business_date = now.date()
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.HOT,
+            business_date=business_date,
+            scheduled_at=datetime.combine(business_date, time(hour=22, minute=35), timezone),
+            api_specs=HOT_SPECS,
+            finalize=True,
+        ),
+        now=now,
+        stage_name="hot_rank",
+    )
+
+
 def plan_due_collection_stages() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
@@ -231,6 +363,8 @@ def plan_due_collection_stages() -> None:
         (time(hour=16, minute=10), plan_daily_close),
         (time(hour=17, minute=30), plan_daily_late),
         (time(hour=19), plan_daily_final),
+        (time(hour=20), plan_theme_members),
+        (time(hour=22, minute=35), plan_hot_rank),
     )
     for scheduled_time, plan_action in stages:
         if now.time() >= scheduled_time:

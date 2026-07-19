@@ -5,17 +5,26 @@ from app.catalog.tushare import (
     DAILY_FINAL_SPECS,
     DAILY_LATE_SPECS,
     DELAYED_ETF_SPECS,
+    DELAYED_THEME_SPECS,
     ETF_BASIC_SPEC,
     ETF_SHARE_SIZE_SPEC,
     FUND_ADJ_SPEC,
+    HOT_SPECS,
+    INDEX_DAILY_SPEC,
+    INDEX_WEIGHT_SPEC,
+    MASTER_ENTITY_SPECS,
     MASTER_ETF_SPECS,
+    MASTER_SPECIAL_SPECS,
     MASTER_STOCK_SPECS,
     STK_FACTOR_SPEC,
     STK_LIMIT_SPEC,
     TRADE_CAL_SPEC,
     build_tushare_api_registry,
     next_year_trade_calendar_scopes,
+    theme_member_scopes,
+    ths_member_scopes,
 )
+from app.modules.operations.schemas import CreateBackfillCommand
 
 
 def test_trade_calendar_is_split_by_exchange_and_separate_year_batches() -> None:
@@ -51,6 +60,23 @@ def test_activated_catalog_contains_core_stock_collection_interfaces() -> None:
         "fund_daily",
         "fund_adj",
         "etf_share_size",
+        "ths_index",
+        "ths_member",
+        "ths_daily",
+        "ths_hot",
+        "dc_hot",
+        "dc_concept",
+        "dc_concept_cons",
+        "top_list",
+        "top_inst",
+        "limit_list_d",
+        "limit_step",
+        "moneyflow_cnt_ths",
+        "moneyflow_ind_ths",
+        "index_basic",
+        "index_daily",
+        "index_dailybasic",
+        "index_weight",
     }
     assert {spec.api_name for spec in MASTER_STOCK_SPECS} == {
         "stock_basic",
@@ -62,6 +88,16 @@ def test_activated_catalog_contains_core_stock_collection_interfaces() -> None:
         "moneyflow",
         "suspend_d",
         "fund_adj",
+        "ths_daily",
+        "dc_concept",
+        "top_list",
+        "top_inst",
+        "limit_list_d",
+        "limit_step",
+        "moneyflow_cnt_ths",
+        "moneyflow_ind_ths",
+        "index_daily",
+        "index_dailybasic",
     }
     assert {spec.api_name for spec in DAILY_FINAL_SPECS} == {"stk_factor"}
     assert STK_LIMIT_SPEC.split_policy == SplitPolicy.OFFSET
@@ -81,3 +117,47 @@ def test_etf_catalog_uses_status_and_exchange_scopes() -> None:
         "trade_date=20260717;exchange=SSE",
         "trade_date=20260717;exchange=SZSE",
     ]
+
+
+def test_special_catalog_uses_explicit_entity_splitting() -> None:
+    assert {spec.api_name for spec in MASTER_SPECIAL_SPECS} == {
+        "ths_index",
+        "index_basic",
+    }
+    assert {spec.api_name for spec in MASTER_ENTITY_SPECS} == {"ths_member"}
+    assert {spec.api_name for spec in DELAYED_THEME_SPECS} == {"dc_concept_cons"}
+    assert {spec.api_name for spec in HOT_SPECS} == {"ths_hot", "dc_hot"}
+    assert [scope.scope_key for scope in ths_member_scopes(("885001.TI", "885002.TI"))] == [
+        "ts_code=885001.TI",
+        "ts_code=885002.TI",
+    ]
+    assert [
+        scope.scope_key for scope in theme_member_scopes(date(2026, 7, 17), ("1001", "1002"))
+    ] == [
+        "trade_date=20260717;theme_code=1001",
+        "trade_date=20260717;theme_code=1002",
+    ]
+
+
+def test_index_catalog_uses_configured_index_and_month_scopes() -> None:
+    daily_scopes = tuple(INDEX_DAILY_SPEC.scope_builder(date(2026, 7, 17)))
+    weight_scopes = tuple(INDEX_WEIGHT_SPEC.scope_builder(date(2026, 6, 1)))
+
+    assert len(daily_scopes) == 6
+    assert all(scope.params["trade_date"] == date(2026, 7, 17) for scope in daily_scopes)
+    assert len(weight_scopes) == 6
+    assert all(scope.params["start_date"] == date(2026, 6, 1) for scope in weight_scopes)
+    assert all(scope.params["end_date"] == date(2026, 6, 30) for scope in weight_scopes)
+
+
+def test_backfill_contract_accepts_the_complete_enabled_catalog() -> None:
+    api_names = [spec.api_name for spec in build_tushare_api_registry().all()]
+
+    command = CreateBackfillCommand(
+        start_date=date(2026, 7, 13),
+        end_date=date(2026, 7, 17),
+        api_names=api_names,
+        reason="完整接口历史回补",
+    )
+
+    assert command.api_names == api_names

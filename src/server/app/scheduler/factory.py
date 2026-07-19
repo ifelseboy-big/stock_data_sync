@@ -20,15 +20,20 @@ from app.scheduler.jobs import (
     dispatch_collection_tasks,
     dispatch_processing_task,
     ensure_future_partitions,
+    plan_concept_board_members,
     plan_daily_close,
     plan_daily_final,
     plan_daily_late,
     plan_daily_preopen,
     plan_etf_master,
     plan_etf_share_size,
+    plan_hot_rank,
+    plan_monthly_index_weights,
     plan_next_year_trade_calendar,
     plan_processing_tasks,
+    plan_special_master,
     plan_stock_master,
+    plan_theme_members,
     plan_trade_calendar,
     reconcile_collection_runtime,
     reconcile_processing_runtime,
@@ -116,6 +121,27 @@ def create_scheduler() -> BlockingScheduler:
         replace_existing=True,
     )
     scheduler.add_job(
+        plan_special_master,
+        trigger=CronTrigger(day=1, hour=8, minute=40),
+        id="plan-special-master",
+        name="规划概念和指数主数据采集",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        plan_concept_board_members,
+        trigger=CronTrigger(day=1, hour=10),
+        id="plan-concept-board-members",
+        name="规划概念板块成分采集",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        plan_monthly_index_weights,
+        trigger=CronTrigger(day=2, hour=8, minute=50),
+        id="plan-monthly-index-weights",
+        name="规划月度指数权重采集",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         plan_next_year_trade_calendar,
         trigger=CronTrigger(month="10-12", day=1, hour=8, minute=25),
         id="plan-next-year-trade-calendar",
@@ -140,6 +166,20 @@ def create_scheduler() -> BlockingScheduler:
         trigger=CronTrigger(hour=8, minute=45),
         id="plan-etf-share-size",
         name="规划ETF份额规模采集",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        plan_theme_members,
+        trigger=CronTrigger(hour="20-21", minute="*/10"),
+        id="plan-theme-members",
+        name="规划题材成分采集",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        plan_hot_rank,
+        trigger=CronTrigger(hour=22, minute=35),
+        id="plan-hot-rank",
+        name="规划最终热榜采集",
         replace_existing=True,
     )
     scheduler.add_job(
