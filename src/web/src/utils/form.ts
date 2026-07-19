@@ -1,0 +1,12 @@
+export interface ValidatableForm {
+  validate: () => Promise<boolean>
+}
+
+export async function validateForm(form: ValidatableForm | null | undefined): Promise<boolean> {
+  if (!form) return false
+  try {
+    return await form.validate()
+  } catch {
+    return false
+  }
+}

@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { ElMessage, type FormInstance } from 'element-plus'
 import { reactive, ref, watch } from 'vue'
 
+import { validateForm } from '@/utils/form'
 import { createIdempotencyKey } from '@/utils/idempotency'
 
 const props = defineProps<{
@@ -16,7 +18,7 @@ const emit = defineEmits<{
   submit: [value: { reason: string; idempotencyKey: string }]
 }>()
 
-const formRef = ref()
+const formRef = ref<FormInstance>()
 const form = reactive({ reason: '' })
 let idempotencyKey = ''
 
@@ -31,7 +33,10 @@ watch(
 )
 
 async function submit() {
-  await formRef.value?.validate()
+  if (!(await validateForm(formRef.value))) {
+    ElMessage.warning('请完整填写表单后再提交')
+    return
+  }
   emit('submit', {
     reason: form.reason.trim(),
     idempotencyKey,

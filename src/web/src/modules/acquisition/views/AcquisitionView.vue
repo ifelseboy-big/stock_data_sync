@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage, type FormInstance } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
@@ -24,6 +24,7 @@ import type {
   RunRecordItem,
 } from '@/modules/operations/contracts'
 import { formatDateTime, formatDuration } from '@/modules/operations/presentation'
+import { validateForm } from '@/utils/form'
 import { createIdempotencyKey } from '@/utils/idempotency'
 
 const status = ref<ExecutionStatus | ''>('')
@@ -34,7 +35,7 @@ const manualLoading = ref(false)
 const commandOptions = ref<ManualCommandOptions | null>(null)
 const cancelTarget = ref<AcquisitionBatchItem | null>(null)
 const cancelLoading = ref(false)
-const commandFormRef = ref()
+const commandFormRef = ref<FormInstance>()
 const taskBatch = ref<AcquisitionBatchItem | null>(null)
 const taskStatus = ref<ExecutionStatus | ''>('')
 const taskPage = ref(1)
@@ -112,7 +113,14 @@ function toggleAllApis(value: boolean | string | number) {
 }
 
 async function submitManualCommand() {
-  await commandFormRef.value?.validate()
+  if (!(await validateForm(commandFormRef.value))) {
+    ElMessage.warning(
+      manualMode.value === 'backfill'
+        ? '请完整填写回填范围、采集数据和操作原因'
+        : '请完整填写采集数据和操作原因',
+    )
+    return
+  }
   if (!commandForm.apiNames.length) {
     ElMessage.warning('至少选择一个采集接口')
     return
@@ -467,7 +475,16 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
         </el-form-item>
         <el-form-item
           :label="manualMode === 'backfill' ? '需要回填的数据' : '需要修复的数据'"
-          required
+          prop="apiNames"
+          :rules="[
+            {
+              type: 'array',
+              required: true,
+              min: 1,
+              message: '至少选择一个采集接口',
+              trigger: 'change',
+            },
+          ]"
         >
           <div class="api-selector-toolbar">
             <el-checkbox
