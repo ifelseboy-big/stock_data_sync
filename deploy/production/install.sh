@@ -53,7 +53,7 @@ usage() {
     --postgres-port PORT [选项]
 
 必填：
-  --program-dir PATH    主程序、源码和配置目录；必须位于启用 ownership 的磁盘
+  --program-dir PATH    主程序、源码和配置目录
   --data-dir PATH       PostgreSQL、行情数据和日志目录；允许外接盘关闭 ownership
   --http-bind IPv4      Web/API 监听 IPv4，例如 127.0.0.1 或 0.0.0.0
   --http-port PORT      Web/API 监听端口，范围 1-65535

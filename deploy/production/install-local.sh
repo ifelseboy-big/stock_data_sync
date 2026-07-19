@@ -114,11 +114,6 @@ pre_install_doctor() {
   [[ "$HTTP_PORT" != "$POSTGRES_PORT" ]] && doctor_pass "应用与数据库端口不同" || doctor_fail "应用与数据库端口不能相同"
   program_disk_path="$(deploy_existing_parent "$PROGRAM_DIR")"
   data_disk_path="$(deploy_existing_parent "$DATA_DIR")"
-  if deploy_volume_owners_enabled "$program_disk_path"; then
-    doctor_pass "主程序磁盘已启用 ownership"
-  else
-    doctor_fail "主程序目录必须位于已启用 ownership 的磁盘；数据目录不受此限制"
-  fi
   available_kb="$(df -Pk "$program_disk_path" | awk 'NR == 2 {print $4}')"
   [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] && \
     doctor_pass "主程序磁盘至少有 5 GiB 可用空间" || doctor_fail "主程序磁盘可用空间不足 5 GiB"

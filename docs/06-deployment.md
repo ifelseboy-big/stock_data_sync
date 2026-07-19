@@ -23,7 +23,6 @@
 - uv。
 - PostgreSQL 18。
 - 能访问 GitHub、npm 和 Python 包源。
-- 主程序目录所在磁盘必须启用 macOS ownership；系统盘默认满足要求。
 - 数据目录可以位于关闭 ownership 的外接磁盘。
 
 安装依赖：
@@ -70,7 +69,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
       --postgres-port 15432
 ```
 
-缺少 `--program-dir`、`--data-dir`、`--http-bind`、`--http-port` 或 `--postgres-port` 时安装立即终止。两个目录必须是相互独立的绝对路径且为空。主程序目录所在磁盘必须启用 ownership；数据目录允许关闭 ownership。doctor 还会检查端口冲突和两个磁盘的可用空间。
+缺少 `--program-dir`、`--data-dir`、`--http-bind`、`--http-port` 或 `--postgres-port` 时安装立即终止。两个目录必须是相互独立的绝对路径且为空。数据目录允许关闭 ownership。安装器创建主程序目录后会验证它能够由 root 持有，doctor 还会检查端口冲突和两个磁盘的可用空间。
 
 首次安装必填参数：
 
@@ -93,7 +92,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 安装过程固定执行：
 
-1. `pre-install doctor` 检查系统、用户、双目录、主程序盘 ownership、依赖、端口和服务冲突。
+1. `pre-install doctor` 检查系统、用户、双目录、依赖、端口和服务冲突。
 2. 克隆正式 Git 标签到本地源码镜像。
 3. 在独立版本目录执行前端和 Python 构建。
 4. 生成带逐项注释的 `config/app.env`。

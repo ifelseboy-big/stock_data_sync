@@ -105,21 +105,6 @@ deploy_existing_parent() {
   printf '%s\n' "$path"
 }
 
-deploy_volume_owners_enabled() {
-  local path="$1" value info
-  info="$(LC_ALL=C /usr/sbin/diskutil info -plist "$path" 2>/dev/null)" || return 1
-  value="$(printf '%s' "$info" | /usr/bin/plutil -extract GlobalPermissionsEnabled raw - 2>/dev/null || true)"
-  if [[ "$value" == "true" || "$value" == "1" ]]; then
-    return 0
-  fi
-  if [[ -z "$value" ]]; then
-    value="$(LC_ALL=C /usr/sbin/diskutil info "$path" 2>/dev/null | \
-      awk -F: '$1 ~ /^[[:space:]]*Owners[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print tolower($2); exit}')"
-    [[ "$value" == "enabled" ]] && return 0
-  fi
-  return 1
-}
-
 deploy_write_env_value() {
   local key="$1"
   local value="$2"

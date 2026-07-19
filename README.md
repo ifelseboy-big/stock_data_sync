@@ -99,7 +99,7 @@ curl -fsSL https://github.com/ORG/stock-data-sync/releases/latest/download/insta
       --postgres-port 15432
 ```
 
-主程序目录所在磁盘必须启用 ownership；数据目录可以位于关闭 ownership 的外接盘。以后升级不需要再次指定目录：
+数据目录可以位于关闭 ownership 的外接盘。以后升级不需要再次指定目录：
 
 ```bash
 sudo stock-data-sync upgrade

@@ -294,7 +294,6 @@ run_doctor() {
   doctor_failures=0
   doctor_warnings=0
   printf 'Doctor 检查阶段：%s\n' "$phase"
-  deploy_volume_owners_enabled "$PROGRAM_DIR" && doctor_pass "主程序磁盘已启用 ownership" || doctor_fail_check "主程序磁盘必须启用 ownership"
   [[ ! -L "$PROGRAM_DIR" && "$(stat -f '%Su' "$PROGRAM_DIR")" == "root" ]] && \
     doctor_pass "主程序目录由 root 持有" || doctor_fail_check "主程序目录所有者不可信"
   [[ -x "$SYSTEM_RUN_SERVICE" && "$(stat -f '%Su' "$SYSTEM_RUN_SERVICE")" == "root" ]] && \
