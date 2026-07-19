@@ -1,6 +1,11 @@
 from datetime import date
 
 from app.catalog import SplitPolicy
+from app.catalog.datasets import ALL_DATASET_SPECS
+from app.catalog.presentation import (
+    DATASET_PRESENTATION_BY_NAME,
+    TUSHARE_API_PRESENTATION_BY_NAME,
+)
 from app.catalog.tushare import (
     DAILY_FINAL_SPECS,
     DAILY_LATE_SPECS,
@@ -79,6 +84,25 @@ def test_activated_catalog_contains_core_stock_collection_interfaces() -> None:
         "index_dailybasic",
         "index_weight",
     }
+
+
+def test_every_tushare_api_has_operator_facing_metadata() -> None:
+    api_names = {spec.api_name for spec in build_tushare_api_registry().all()}
+
+    assert set(TUSHARE_API_PRESENTATION_BY_NAME) == api_names
+    assert all(item.display_name for item in TUSHARE_API_PRESENTATION_BY_NAME.values())
+    assert all(item.description for item in TUSHARE_API_PRESENTATION_BY_NAME.values())
+
+
+def test_every_dataset_has_operator_facing_metadata() -> None:
+    dataset_names = {spec.dataset_name for spec in ALL_DATASET_SPECS}
+
+    assert set(DATASET_PRESENTATION_BY_NAME) == dataset_names
+    assert all(item.display_name for item in DATASET_PRESENTATION_BY_NAME.values())
+    assert all(item.description for item in DATASET_PRESENTATION_BY_NAME.values())
+
+
+def test_runtime_schedule_groups_remain_explicit() -> None:
     assert {spec.api_name for spec in MASTER_STOCK_SPECS} == {
         "stock_basic",
         "stock_company",

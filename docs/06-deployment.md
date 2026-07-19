@@ -95,7 +95,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 4. 生成带逐项注释的 `config/app.env`。
 5. 初始化独立 PostgreSQL 18 数据目录和空数据库。
 6. 对空数据库执行 Alembic 初始迁移。
-7. 注册 launchd，启动服务。
+7. 注册并显式启用 launchd，启动服务。
 8. `post-install doctor` 检查版本、配置、数据库、进程和 HTTP 健康接口。
 
 任何安装前检查失败都不会开始安装。

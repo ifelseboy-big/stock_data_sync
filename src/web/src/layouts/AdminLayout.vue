@@ -61,7 +61,7 @@ watch(isMobile, (mobile) => appStore.setSidebarCollapsed(mobile), { immediate: t
             </el-menu-item>
             <el-menu-item index="/dependencies">
               <el-icon><Link /></el-icon>
-              <template #title>依赖观测</template>
+              <template #title>数据就绪检查</template>
             </el-menu-item>
             <el-menu-item index="/releases">
               <el-icon><DataBoard /></el-icon>

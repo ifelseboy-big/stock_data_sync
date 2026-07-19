@@ -29,7 +29,7 @@ const router = createRouter({
           path: 'dependencies',
           name: 'dependencies',
           component: () => import('@/modules/dependencies/views/DependenciesView.vue'),
-          meta: { title: '依赖观测' },
+          meta: { title: '数据就绪检查' },
         },
         {
           path: 'releases',

@@ -111,7 +111,7 @@ def reconcile_processing_runtime(*, recover_all_running: bool = False) -> None:
 def plan_trade_calendar() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
-    business_date = date(now.year, now.month, 1)
+    business_date = now.date()
     scheduled_at = datetime.combine(business_date, time(hour=8, minute=20), timezone)
     spec = get_api_specs().get("trade_cal")
     _plan_stage(
@@ -152,7 +152,7 @@ def plan_next_year_trade_calendar() -> None:
 def plan_stock_master() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
-    business_date = date(now.year, now.month, 1)
+    business_date = now.date()
     scheduled_at = datetime.combine(business_date, time(hour=8, minute=30), timezone)
     _plan_stage(
         StagePlan(
@@ -170,7 +170,7 @@ def plan_stock_master() -> None:
 def plan_etf_master() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
-    business_date = date(now.year, now.month, 1)
+    business_date = now.date()
     scheduled_at = datetime.combine(business_date, time(hour=8, minute=35), timezone)
     _plan_stage(
         StagePlan(
@@ -188,7 +188,7 @@ def plan_etf_master() -> None:
 def plan_special_master() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
-    business_date = date(now.year, now.month, 1)
+    business_date = now.date()
     scheduled_at = datetime.combine(business_date, time(hour=8, minute=40), timezone)
     _plan_stage(
         StagePlan(
@@ -206,7 +206,7 @@ def plan_special_master() -> None:
 def plan_ths_board_members() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
-    business_date = date(now.year, now.month, 1)
+    business_date = now.date()
     with SyncSessionFactory() as session:
         concept_codes = tuple(
             session.scalars(

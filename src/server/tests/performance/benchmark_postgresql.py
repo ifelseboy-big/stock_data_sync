@@ -781,7 +781,7 @@ async def _benchmark_operations(profile: ScaleProfile) -> list[BenchmarkResult]:
                 "operations_dependencies",
                 lambda: repository.dependencies(
                     since=since,
-                    status=None,
+                    readiness="all",
                     query=None,
                     offset=0,
                     limit=50,
@@ -801,6 +801,8 @@ async def _benchmark_operations(profile: ScaleProfile) -> list[BenchmarkResult]:
                     since=since,
                     run_type=None,
                     status=None,
+                    batch_id=None,
+                    unresolved_only=False,
                     offset=0,
                     limit=50,
                 ),

@@ -235,7 +235,11 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert overview.json()["metrics"]["providerSuccessRateToday"] == 1.0
     assert any(item["id"] == str(batch_id) for item in batches.json()["items"])
     assert any(item["id"] == str(blocked_process_id) for item in queue.json()["items"])
-    assert any(item["sourceEndpoint"] == "missing_api" for item in dependencies.json()["items"])
+    readiness = dependencies.json()["items"]
+    blocked_readiness = next(item for item in readiness if item["id"] == str(blocked_process_id))
+    assert blocked_readiness["readinessStatus"] == "blocked"
+    assert blocked_readiness["blockedDependencyCount"] == 1
+    assert blocked_readiness["sources"][0]["sourceName"] == "missing_api"
     assert any(item["datasetName"] == "test_daily" for item in releases.json()["items"])
     assert any(item["endpoint"] == "daily" for item in provider.json()["endpoints"])
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
@@ -243,9 +247,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert all(
         item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]
     )
-    assert all(
-        item["id"] != f"scheduler:{scheduler_failure_id}" for item in alerts.json()["items"]
-    )
+    assert all(item["id"] != f"scheduler:{scheduler_failure_id}" for item in alerts.json()["items"])
     assert any(item["apiName"] == "daily" for item in command_options.json()["acquisitionApis"])
     assert resources.json()["database"]["status"] == "ok"
     assert resources.json()["storage"]["totalBytes"] > 0

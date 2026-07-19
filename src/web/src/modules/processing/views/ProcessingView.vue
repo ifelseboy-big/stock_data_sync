@@ -1,17 +1,25 @@
 <script setup lang="ts">
+import { ElMessage } from 'element-plus'
 import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
+import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
-import { getProcessingQueue } from '@/modules/operations/api'
-import type { ExecutionStatus } from '@/modules/operations/contracts'
+import { getProcessingQueue, getRunRecords, runTaskCommand } from '@/modules/operations/api'
+import type { ExecutionStatus, RunRecordItem } from '@/modules/operations/contracts'
 import { formatDateTime, formatDuration, formatPriority } from '@/modules/operations/presentation'
 
+const route = useRoute()
+const router = useRouter()
 const page = ref(1)
 const status = ref<ExecutionStatus | ''>('')
-const datasetName = ref('')
+const datasetName = ref(typeof route.query.datasetName === 'string' ? route.query.datasetName : '')
+const failedPage = ref(1)
+const retryTarget = ref<RunRecordItem | null>(null)
+const retryLoading = ref(false)
 const { data, loading, error, load } = useApiResource(() =>
   getProcessingQueue({
     status: status.value || undefined,
@@ -24,10 +32,53 @@ const currentTask = computed(() => data.value?.items.find((item) => item.status 
 const waitingTasks = computed(
   () => data.value?.items.filter((item) => item.status !== 'running') ?? [],
 )
+const {
+  data: failedData,
+  loading: failedLoading,
+  error: failedError,
+  load: loadFailed,
+} = useApiResource(() =>
+  getRunRecords({
+    runType: 'processing',
+    status: 'failed',
+    unresolvedOnly: true,
+    page: failedPage.value,
+    pageSize: 20,
+  }),
+)
 
 function search() {
   page.value = 1
   void load()
+}
+
+function openReadiness(taskName: string) {
+  void router.push({ path: '/dependencies', query: { query: taskName, readiness: 'all' } })
+}
+
+function openRetry(value: unknown) {
+  retryTarget.value = value as RunRecordItem
+}
+
+async function submitRetry(value: { reason: string; adminToken: string; idempotencyKey: string }) {
+  if (!retryTarget.value) return
+  retryLoading.value = true
+  try {
+    await runTaskCommand(
+      'processing',
+      retryTarget.value.id,
+      'retry',
+      { reason: value.reason },
+      value,
+    )
+    ElMessage.success('加工任务已重新进入全局串行队列')
+    retryTarget.value = null
+    await Promise.all([load(), loadFailed()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '加工任务重试失败')
+  } finally {
+    retryLoading.value = false
+  }
 }
 </script>
 
@@ -51,6 +102,67 @@ function search() {
         </div>
       </div>
       <div v-else class="execution-slot__empty">空闲，等待可执行任务进入队列</div>
+    </el-card>
+
+    <el-card shadow="never" class="panel-card panel-card--table failed-panel">
+      <template #header>
+        <div class="panel-card__header">
+          <div>
+            <h3>需要人工处理的失败任务</h3>
+            <p>自动重试次数已经用完；重试只读取现有原始数据，不会再次请求 Tushare。</p>
+          </div>
+          <el-tag :type="failedData?.total ? 'danger' : 'success'">
+            {{ failedData?.total ?? 0 }} 个失败任务
+          </el-tag>
+        </div>
+      </template>
+      <DataState
+        :loading="failedLoading"
+        :error="failedError"
+        :empty="failedData?.items.length === 0"
+        empty-title="当前没有需要人工处理的加工任务"
+        empty-description="可恢复错误会先按重试策略自动执行。"
+        @retry="loadFailed"
+      >
+        <el-table :data="failedData?.items ?? []" scrollbar-always-on>
+          <el-table-column label="加工任务" min-width="280" fixed="left">
+            <template #default="{ row }">
+              <div class="processing-task-name">
+                <strong>{{ row.taskDisplayName }}</strong>
+                <span>{{ row.taskDescription }}</span>
+                <code>{{ row.taskName }}</code>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="dataCycle" label="数据周期" width="120" />
+          <el-table-column prop="batchCode" label="来源批次" min-width="180" />
+          <el-table-column prop="attempt" label="尝试次数" width="100" />
+          <el-table-column label="耗时" width="110">
+            <template #default="{ row }">{{ formatDuration(row.durationMs) }}</template>
+          </el-table-column>
+          <el-table-column
+            prop="errorSummary"
+            label="失败原因"
+            min-width="260"
+            show-overflow-tooltip
+          />
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" link type="primary" @click="openRetry(row)"> 重试 </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="pagination-row">
+          <el-pagination
+            v-model:current-page="failedPage"
+            background
+            layout="total, prev, pager, next"
+            :total="failedData?.total ?? 0"
+            :page-size="20"
+            @current-change="loadFailed"
+          />
+        </div>
+      </DataState>
     </el-card>
 
     <el-card shadow="never" class="filter-card">
@@ -96,7 +208,15 @@ function search() {
       >
         <el-table :data="waitingTasks" scrollbar-always-on>
           <el-table-column prop="queuePosition" label="#" width="60" />
-          <el-table-column prop="taskName" label="加工任务" min-width="180" />
+          <el-table-column label="加工任务" min-width="280">
+            <template #default="{ row }">
+              <div class="processing-task-name">
+                <strong>{{ row.taskDisplayName }}</strong>
+                <span>{{ row.taskDescription }}</span>
+                <code>{{ row.taskName }}</code>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="batchCode" label="批次" min-width="170" />
           <el-table-column prop="dataCycle" label="数据周期" min-width="120" />
           <el-table-column label="优先级" width="120">
@@ -115,6 +235,20 @@ function search() {
             min-width="220"
             show-overflow-tooltip
           />
+          <el-table-column label="操作" width="120" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="['waiting_dependency', 'blocked'].includes(row.status)"
+                size="small"
+                link
+                type="primary"
+                @click="openReadiness(row.taskName)"
+              >
+                查看前置数据
+              </el-button>
+              <span v-else>--</span>
+            </template>
+          </el-table-column>
         </el-table>
         <div class="pagination-row">
           <el-pagination
@@ -128,5 +262,33 @@ function search() {
         </div>
       </DataState>
     </el-card>
+
+    <AdminCommandDialog
+      :model-value="retryTarget !== null"
+      title="重试加工任务"
+      :description="`任务：${retryTarget?.taskDisplayName ?? ''}。系统只重新读取已经封存的原始数据，并重新进入全局串行加工队列。`"
+      confirm-text="确认重试"
+      :loading="retryLoading"
+      @update:model-value="!$event && (retryTarget = null)"
+      @submit="submitRetry"
+    />
   </section>
 </template>
+
+<style scoped>
+.failed-panel {
+  margin-bottom: 16px;
+}
+
+.processing-task-name {
+  display: grid;
+  gap: 3px;
+}
+
+.processing-task-name span,
+.processing-task-name code {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+</style>

@@ -1,8 +1,13 @@
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from app.catalog.datasets import ALL_DATASET_SPECS
+from app.catalog.presentation import (
+    DATASET_PRESENTATION_BY_NAME,
+    TUSHARE_API_PRESENTATION_BY_NAME,
+)
 from app.catalog.specs import ReleaseScope
 from app.catalog.tushare import build_tushare_api_registry
 from app.core.config import Settings, settings
@@ -15,6 +20,7 @@ from app.modules.operations.schemas import (
     DatasetReleaseCoverageItem,
     DatasetReleaseItem,
     DependencyItem,
+    DependencySourceSummary,
     ExecutionStatus,
     OperationsOverview,
     OverviewMetrics,
@@ -24,11 +30,12 @@ from app.modules.operations.schemas import (
     ProviderEndpointMetric,
     ProviderMonitoring,
     QuotaSnapshot,
+    ReadinessStatus,
     RunRecordItem,
     ScheduledJobExecutionItem,
     ScheduledJobItem,
 )
-from app.modules.processing.models import DependencyStatus, ProcessingTaskStatus
+from app.modules.processing.models import ProcessingTaskStatus
 from app.scheduler.catalog import SCHEDULED_JOB_DEFINITIONS
 
 
@@ -127,6 +134,8 @@ class OperationsService:
         queue_position = 0
         for row in rows:
             status = _processing_status(cast(str, row["status"]))
+            task_name = cast(str, row["output_dataset"])
+            presentation = DATASET_PRESENTATION_BY_NAME.get(task_name)
             if status == "running":
                 position = 0
             else:
@@ -137,7 +146,13 @@ class OperationsService:
             items.append(
                 ProcessingQueueItem(
                     id=str(row["process_id"]),
-                    task_name=cast(str, row["output_dataset"]),
+                    task_name=task_name,
+                    task_display_name=presentation.display_name if presentation else task_name,
+                    task_description=(
+                        presentation.description
+                        if presentation
+                        else "执行该数据集的清洗、校验和发布。"
+                    ),
                     batch_code=str(row["source_batch_id"]),
                     data_cycle=_cycle(cast(date | None, row["business_date"])),
                     priority=_priority(cast(int, row["priority"])),
@@ -162,7 +177,7 @@ class OperationsService:
     async def dependencies(
         self,
         *,
-        status: str | None,
+        readiness: str,
         query: str | None,
         page: int,
         page_size: int,
@@ -170,35 +185,72 @@ class OperationsService:
         now = datetime.now(self._timezone)
         rows, total = await self._repository.dependencies(
             since=now - timedelta(days=30),
-            status=status,
+            readiness=readiness,
             query=query,
             offset=(page - 1) * page_size,
             limit=page_size,
         )
+        source_rows = await self._repository.dependency_source_summaries(
+            process_ids=tuple(cast(UUID, row["process_id"]) for row in rows)
+        )
+        sources_by_process: dict[str, list[DependencySourceSummary]] = {}
+        for row in source_rows:
+            process_id = str(row["process_id"])
+            source_name = cast(str, row["dependency_name"])
+            is_raw_asset = cast(str, row["dependency_type"]) == "RAW_ASSET"
+            presentation = (
+                TUSHARE_API_PRESENTATION_BY_NAME.get(source_name)
+                if is_raw_asset
+                else DATASET_PRESENTATION_BY_NAME.get(source_name)
+            )
+            ready_count = cast(int, row["ready_count"])
+            waiting_count = cast(int, row["waiting_count"])
+            blocked_count = cast(int, row["blocked_count"])
+            sources_by_process.setdefault(process_id, []).append(
+                DependencySourceSummary(
+                    source_type="raw_asset" if is_raw_asset else "dataset_release",
+                    source_name=source_name,
+                    source_display_name=(
+                        presentation.display_name if presentation else source_name
+                    ),
+                    required_count=cast(int, row["required_count"]),
+                    ready_count=ready_count,
+                    waiting_count=waiting_count,
+                    blocked_count=blocked_count,
+                    status=_readiness_status(waiting_count, blocked_count),
+                    reason=_localized_error(cast(str | None, row["blocked_reason"])),
+                )
+            )
         items: list[DependencyItem] = []
         for row in rows:
-            dependency_status = cast(str, row["status"])
-            source_batch_id = row["source_batch_id"]
-            resolved_batch_id = row["asset_batch_id"] or row["release_batch_id"]
-            asset_date = cast(date | None, row["asset_business_date"])
-            scope_key = cast(str, row["dependency_scope_key"])
+            process_id = str(row["process_id"])
+            task_name = cast(str, row["output_dataset"])
+            presentation = DATASET_PRESENTATION_BY_NAME.get(task_name)
+            ready_count = cast(int, row["ready_dependency_count"])
+            waiting_count = cast(int, row["waiting_dependency_count"])
+            blocked_count = cast(int, row["blocked_dependency_count"])
             items.append(
                 DependencyItem(
-                    id=(
-                        f"{row['process_id']}:{row['dependency_type']}:"
-                        f"{row['dependency_name']}:{scope_key}"
+                    id=process_id,
+                    processing_task_name=task_name,
+                    processing_task_display_name=(
+                        presentation.display_name if presentation else task_name
                     ),
-                    processing_task_name=cast(str, row["output_dataset"]),
-                    batch_code=str(source_batch_id),
-                    source_endpoint=cast(str, row["dependency_name"]),
-                    source_scope=scope_key,
-                    source_cycle=asset_date.isoformat() if asset_date else scope_key,
-                    source_policy=(
-                        "current_cycle" if resolved_batch_id == source_batch_id else "latest_valid"
+                    processing_task_description=(
+                        presentation.description
+                        if presentation
+                        else "完成该数据集的清洗、校验和正式发布。"
                     ),
-                    source_ready=dependency_status == DependencyStatus.READY.value,
-                    status=_dependency_status(dependency_status),
-                    reason=cast(str | None, row["blocked_reason"]),
+                    batch_code=str(row["source_batch_id"]),
+                    data_cycle=_cycle(cast(date | None, row["business_date"])),
+                    processing_status=_processing_status(cast(str, row["processing_status"])),
+                    dependency_count=cast(int, row["dependency_count"]),
+                    ready_dependency_count=ready_count,
+                    waiting_dependency_count=waiting_count,
+                    blocked_dependency_count=blocked_count,
+                    readiness_status=_readiness_status(waiting_count, blocked_count),
+                    reason=_localized_error(cast(str | None, row["error_message"])),
+                    sources=sources_by_process.get(process_id, []),
                 )
             )
         return PageResult[DependencyItem](
@@ -298,6 +350,8 @@ class OperationsService:
         *,
         run_type: str | None,
         status: str | None,
+        batch_id: UUID | None,
+        unresolved_only: bool,
         page: int,
         page_size: int,
     ) -> PageResult[RunRecordItem]:
@@ -306,6 +360,8 @@ class OperationsService:
             since=now - timedelta(days=30),
             run_type=run_type,
             status=status,
+            batch_id=batch_id,
+            unresolved_only=unresolved_only,
             offset=(page - 1) * page_size,
             limit=page_size,
         )
@@ -331,6 +387,7 @@ class OperationsService:
                 ScheduledJobItem(
                     job_id=definition.job_id,
                     name=definition.name,
+                    description=definition.description,
                     category=definition.category,
                     schedule=_job_schedule(definition.job_id, definition.schedule, self._settings),
                     enabled=controls.get(definition.job_id, True),
@@ -470,12 +527,22 @@ class OperationsService:
 
     def _run_item(self, row: dict[str, Any], now: datetime) -> RunRecordItem:
         run_type = cast(str, row["run_type"])
+        task_name = cast(str, row["task_name"])
+        presentation = (
+            TUSHARE_API_PRESENTATION_BY_NAME.get(task_name)
+            if run_type == "acquisition"
+            else DATASET_PRESENTATION_BY_NAME.get(task_name)
+        )
         started_at = cast(datetime | None, row["started_at"])
         finished_at = cast(datetime | None, row["finished_at"])
         return RunRecordItem(
             id=str(row["id"]),
             run_type=cast(Any, run_type),
-            task_name=cast(str, row["task_name"]),
+            task_name=task_name,
+            task_display_name=presentation.display_name if presentation else task_name,
+            task_description=(
+                presentation.description if presentation else "执行该任务的数据处理流程。"
+            ),
             scope_key=cast(str | None, row["scope_key"]),
             batch_code=str(row["batch_id"]),
             data_cycle=_cycle(cast(date | None, row["business_date"])),
@@ -488,7 +555,7 @@ class OperationsService:
             started_at=started_at,
             finished_at=finished_at,
             duration_ms=_duration_ms(started_at, finished_at, now),
-            error_summary=cast(str | None, row["error_message"]),
+            error_summary=_localized_error(cast(str | None, row["error_message"])),
         )
 
     @staticmethod
@@ -538,6 +605,12 @@ def _localized_error(message: str | None) -> str | None:
         "one or more required dependencies are unavailable": "一个或多个必要依赖不可用",
         "scheduler stopped while processing task was running": "调度器停止时加工任务仍在运行",
         "scheduler stopped while the collection task was running": "调度器停止时采集任务仍在运行",
+        "no complete raw asset was available when the batch closed": (
+            "批次关闭时没有可用的完整原始数据"
+        ),
+        "provider returned no rows for a required scope": "接口在该采集范围内未返回必要数据",
+        "release unavailable": "所依赖的数据集尚未发布",
+        "required asset is missing": "必要的原始数据缺失",
     }
     return translations.get(message, message)
 
@@ -619,12 +692,12 @@ def _processing_status(value: str) -> ExecutionStatus:
     )
 
 
-def _dependency_status(value: str) -> ExecutionStatus:
-    if value == DependencyStatus.READY.value:
-        return "succeeded"
-    if value == DependencyStatus.WAITING.value:
-        return "pending"
-    return "blocked"
+def _readiness_status(waiting_count: int, blocked_count: int) -> ReadinessStatus:
+    if blocked_count > 0:
+        return "blocked"
+    if waiting_count > 0:
+        return "waiting"
+    return "ready"
 
 
 def _priority(value: int) -> PriorityLevel:

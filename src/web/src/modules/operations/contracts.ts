@@ -41,6 +41,8 @@ export interface QuotaSnapshot {
 export interface ProcessingQueueItem {
   id: string
   taskName: string
+  taskDisplayName: string
+  taskDescription: string
   batchCode: string
   dataCycle: string
   priority: PriorityLevel
@@ -68,17 +70,36 @@ export interface AcquisitionBatchItem {
   durationMs: number | null
 }
 
+export type ReadinessStatus = 'ready' | 'waiting' | 'blocked'
+export type ReadinessFilter = 'attention' | 'waiting' | 'blocked' | 'ready' | 'all'
+
+export interface DependencySourceSummary {
+  sourceType: 'raw_asset' | 'dataset_release'
+  sourceName: string
+  sourceDisplayName: string
+  requiredCount: number
+  readyCount: number
+  waitingCount: number
+  blockedCount: number
+  status: ReadinessStatus
+  reason: string | null
+}
+
 export interface DependencyItem {
   id: string
   processingTaskName: string
+  processingTaskDisplayName: string
+  processingTaskDescription: string
   batchCode: string
-  sourceEndpoint: string
-  sourceScope: string
-  sourceCycle: string
-  sourcePolicy: 'current_cycle' | 'latest_valid'
-  sourceReady: boolean
-  status: ExecutionStatus
+  dataCycle: string
+  processingStatus: ExecutionStatus
+  dependencyCount: number
+  readyDependencyCount: number
+  waitingDependencyCount: number
+  blockedDependencyCount: number
+  readinessStatus: ReadinessStatus
   reason: string | null
+  sources: DependencySourceSummary[]
 }
 
 export interface ProviderEndpointMetric {
@@ -106,6 +127,8 @@ export interface RunRecordItem {
   id: string
   runType: 'acquisition' | 'processing'
   taskName: string
+  taskDisplayName: string
+  taskDescription: string
   scopeKey: string | null
   batchCode: string
   dataCycle: string
@@ -136,6 +159,8 @@ export interface AcquisitionBatchQuery {
 export interface RunRecordQuery {
   runType?: 'acquisition' | 'processing'
   status?: ExecutionStatus
+  batchId?: string
+  unresolvedOnly?: boolean
   page?: number
   pageSize?: number
 }
@@ -208,6 +233,8 @@ export type TaskTransition = 'retry' | 'skip' | 'cancel'
 
 export interface AcquisitionApiOption {
   apiName: string
+  displayName: string
+  description: string
   scheduleGroup: string
 }
 
@@ -225,7 +252,7 @@ export interface ProcessingQueueQuery {
 }
 
 export interface DependencyQuery {
-  status?: ExecutionStatus
+  readiness?: ReadinessFilter
   query?: string
   page?: number
   pageSize?: number
@@ -243,6 +270,7 @@ export type ScheduledJobAction = 'enable' | 'disable' | 'run'
 export interface ScheduledJobItem {
   jobId: string
   name: string
+  description: string
   category: string
   schedule: string
   enabled: boolean

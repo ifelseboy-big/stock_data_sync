@@ -241,6 +241,7 @@ install_services() {
     install -o root -g wheel -m 0644 \
       "$INSTALL_DIR/config/launchd/com.stockdatasync.$service.plist" \
       "/Library/LaunchDaemons/com.stockdatasync.$service.plist"
+    launchctl enable "system/$(label_for "$service")"
   done
 }
 
@@ -274,7 +275,7 @@ doctor_check_release() {
 
 run_doctor() {
   local phase="runtime" target="$INSTALL_DIR/current" require_running=1
-  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0
+  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services
   while (( $# > 0 )); do
     case "$1" in
       --phase) (( $# >= 2 )) || fail "--phase 缺少参数"; phase="$2"; shift 2 ;;
@@ -361,9 +362,15 @@ run_doctor() {
   fi
   local service services=(postgres server scheduler)
   [[ -n "${BACKUP_TARGET_DIR:-}" ]] && services+=(backup)
+  disabled_services="$(launchctl print-disabled system 2>/dev/null || true)"
   for service in "${services[@]}"; do
     [[ -f "$(plist_for "$service")" ]] && plutil -lint "$(plist_for "$service")" >/dev/null && \
       doctor_pass "launchd 配置有效：$service" || doctor_fail_check "launchd 配置无效：$service"
+    if [[ "$disabled_services" == *\"$(label_for "$service")\"*"=> disabled"* ]]; then
+      doctor_fail_check "launchd 服务处于禁用状态：$service"
+    else
+      doctor_pass "launchd 服务已启用：$service"
+    fi
   done
   if (( require_running == 1 )); then
     is_loaded postgres && doctor_pass "PostgreSQL 服务已加载" || doctor_fail_check "PostgreSQL 服务未加载"

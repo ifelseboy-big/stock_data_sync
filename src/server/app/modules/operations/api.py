@@ -7,6 +7,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.catalog.presentation import TUSHARE_API_PRESENTATION_BY_NAME
 from app.catalog.tushare import build_tushare_api_registry
 from app.db.session import get_db
 from app.modules.operations.command_service import (
@@ -98,13 +99,13 @@ async def processing_queue(
 @router.get("/dependencies", response_model=PageResult[DependencyItem])
 async def dependencies(
     db: DbSession,
-    status: ExecutionStatus | None = None,
+    readiness: Literal["attention", "waiting", "blocked", "ready", "all"] = "attention",
     query: Annotated[str | None, Query(max_length=100)] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=200)] = 20,
 ) -> PageResult[DependencyItem]:
     return await _service(db).dependencies(
-        status=status,
+        readiness=readiness,
         query=query,
         page=page,
         page_size=page_size,
@@ -146,12 +147,16 @@ async def run_records(
         Query(alias="runType"),
     ] = None,
     status: ExecutionStatus | None = None,
+    batch_id: Annotated[UUID | None, Query(alias="batchId")] = None,
+    unresolved_only: Annotated[bool, Query(alias="unresolvedOnly")] = False,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=200)] = 20,
 ) -> PageResult[RunRecordItem]:
     return await _service(db).run_records(
         run_type=run_type,
         status=status,
+        batch_id=batch_id,
+        unresolved_only=unresolved_only,
         page=page,
         page_size=page_size,
     )
@@ -205,6 +210,8 @@ async def command_options() -> ManualCommandOptions:
         acquisition_apis=[
             AcquisitionApiOption(
                 api_name=spec.api_name,
+                display_name=TUSHARE_API_PRESENTATION_BY_NAME[spec.api_name].display_name,
+                description=TUSHARE_API_PRESENTATION_BY_NAME[spec.api_name].description,
                 schedule_group=spec.schedule_group.value,
             )
             for spec in build_tushare_api_registry().all()

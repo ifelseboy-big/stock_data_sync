@@ -122,7 +122,15 @@ async function submitCommand(value: {
               row.runType === 'acquisition' ? '采集' : '加工'
             }}</template>
           </el-table-column>
-          <el-table-column prop="taskName" label="任务" min-width="180" />
+          <el-table-column label="任务" min-width="270">
+            <template #default="{ row }">
+              <div class="run-task-name">
+                <strong>{{ row.taskDisplayName }}</strong>
+                <span>{{ row.taskDescription }}</span>
+                <code>{{ row.taskName }}</code>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="scopeKey" label="任务范围" min-width="220" show-overflow-tooltip />
           <el-table-column prop="batchCode" label="批次" min-width="170" />
           <el-table-column prop="dataCycle" label="数据周期" min-width="120" />
@@ -192,3 +200,17 @@ async function submitCommand(value: {
     />
   </section>
 </template>
+
+<style scoped>
+.run-task-name {
+  display: grid;
+  gap: 3px;
+}
+
+.run-task-name span,
+.run-task-name code {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+</style>

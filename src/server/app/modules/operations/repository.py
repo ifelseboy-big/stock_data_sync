@@ -1,17 +1,19 @@
 from datetime import UTC, date, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import MetaData, String, Table, case, func, inspect, literal, or_, select, union_all
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.catalog.datasets import ALL_DATASET_SPECS
+from app.catalog.specs import ReleaseScope
 from app.modules.acquisition.models import (
     BatchStatus,
     CollectionBatch,
     CollectionTask,
     CollectionTaskStatus,
-    RawDataAsset,
 )
 from app.modules.operations.models import (
     ProviderRequestLog,
@@ -44,6 +46,9 @@ PROCESSING_FAILED = (
     ProcessingTaskStatus.CANCELLED.value,
 )
 PROCESSING_TERMINAL = (*PROCESSING_SUCCESS, *PROCESSING_FAILED)
+DATE_SCOPED_DATASETS = tuple(
+    spec.dataset_name for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
+)
 
 
 class OperationsRepository:
@@ -239,27 +244,49 @@ class OperationsRepository:
         self,
         *,
         since: datetime,
-        status: str | None,
+        readiness: str,
         query: str | None,
         offset: int,
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
-        asset_task = aliased(CollectionTask)
-        release_task = aliased(ProcessingTask)
+        searched_dependency = aliased(ProcessingDependency)
+        recovered_release = aliased(DatasetRelease)
         statement = (
             select(
                 ProcessingDependency.process_id,
-                ProcessingDependency.dependency_type,
-                ProcessingDependency.dependency_name,
-                ProcessingDependency.dependency_scope_key,
-                ProcessingDependency.status,
-                ProcessingDependency.blocked_reason,
                 ProcessingTask.output_dataset,
                 ProcessingTask.source_batch_id,
                 ProcessingTask.business_date,
-                RawDataAsset.business_date.label("asset_business_date"),
-                asset_task.batch_id.label("asset_batch_id"),
-                release_task.source_batch_id.label("release_batch_id"),
+                ProcessingTask.status.label("processing_status"),
+                ProcessingTask.error_message,
+                CollectionBatch.scheduled_at,
+                select(literal(1))
+                .where(
+                    recovered_release.dataset_name == ProcessingTask.output_dataset,
+                    or_(
+                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                        recovered_release.business_date.is_not_distinct_from(
+                            ProcessingTask.business_date
+                        ),
+                    ),
+                    recovered_release.published_at > CollectionBatch.scheduled_at,
+                )
+                .exists()
+                .label("recovered"),
+                func.count(ProcessingDependency.dependency_scope_key).label("dependency_count"),
+                func.count(ProcessingDependency.dependency_scope_key)
+                .filter(ProcessingDependency.status == DependencyStatus.READY.value)
+                .label("ready_dependency_count"),
+                func.count(ProcessingDependency.dependency_scope_key)
+                .filter(ProcessingDependency.status == DependencyStatus.WAITING.value)
+                .label("waiting_dependency_count"),
+                func.count(ProcessingDependency.dependency_scope_key)
+                .filter(
+                    ProcessingDependency.status.in_(
+                        (DependencyStatus.MISSING.value, DependencyStatus.FAILED.value)
+                    )
+                )
+                .label("blocked_dependency_count"),
             )
             .join(
                 ProcessingTask,
@@ -269,44 +296,124 @@ class OperationsRepository:
                 CollectionBatch,
                 CollectionBatch.batch_id == ProcessingTask.source_batch_id,
             )
-            .outerjoin(
-                RawDataAsset,
-                RawDataAsset.asset_id == ProcessingDependency.resolved_asset_id,
-            )
-            .outerjoin(asset_task, asset_task.task_id == RawDataAsset.task_id)
-            .outerjoin(
-                release_task,
-                release_task.process_id == ProcessingDependency.resolved_release_process_id,
-            )
             .where(CollectionBatch.scheduled_at >= since)
+            .group_by(
+                ProcessingDependency.process_id,
+                ProcessingTask.process_id,
+                CollectionBatch.batch_id,
+            )
         )
-        dependency_values = _dependency_status_values(status)
-        if dependency_values is not None:
-            statement = statement.where(ProcessingDependency.status.in_(dependency_values))
         if query:
             pattern = f"%{query}%"
             statement = statement.where(
                 or_(
                     ProcessingTask.output_dataset.ilike(pattern),
-                    ProcessingDependency.dependency_name.ilike(pattern),
-                    ProcessingDependency.dependency_scope_key.ilike(pattern),
                     sql_cast(ProcessingTask.source_batch_id, String).ilike(pattern),
+                    select(literal(1))
+                    .where(
+                        searched_dependency.process_id == ProcessingTask.process_id,
+                        or_(
+                            searched_dependency.dependency_name.ilike(pattern),
+                            searched_dependency.dependency_scope_key.ilike(pattern),
+                        ),
+                    )
+                    .exists(),
                 )
             )
-        total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))
+        summary = statement.subquery()
+        filtered = select(summary)
+        if readiness == "attention":
+            filtered = filtered.where(
+                summary.c.ready_dependency_count < summary.c.dependency_count,
+                summary.c.recovered.is_(False),
+                summary.c.processing_status.not_in(
+                    (
+                        ProcessingTaskStatus.SKIPPED.value,
+                        ProcessingTaskStatus.CANCELLED.value,
+                    )
+                ),
+            )
+        elif readiness == "waiting":
+            filtered = filtered.where(
+                summary.c.waiting_dependency_count > 0,
+                summary.c.blocked_dependency_count == 0,
+                summary.c.recovered.is_(False),
+            )
+        elif readiness == "blocked":
+            filtered = filtered.where(
+                summary.c.blocked_dependency_count > 0,
+                summary.c.recovered.is_(False),
+                summary.c.processing_status.not_in(
+                    (
+                        ProcessingTaskStatus.SKIPPED.value,
+                        ProcessingTaskStatus.CANCELLED.value,
+                    )
+                ),
+            )
+        elif readiness == "ready":
+            filtered = filtered.where(
+                summary.c.dependency_count > 0,
+                summary.c.ready_dependency_count == summary.c.dependency_count,
+            )
+        total = await self._session.scalar(select(func.count()).select_from(filtered.subquery()))
         rows = (
             await self._session.execute(
-                statement.order_by(
-                    CollectionBatch.scheduled_at.desc(),
-                    ProcessingTask.output_dataset,
-                    ProcessingDependency.dependency_name,
-                    ProcessingDependency.dependency_scope_key,
+                filtered.order_by(
+                    case((summary.c.blocked_dependency_count > 0, 0), else_=1),
+                    case((summary.c.waiting_dependency_count > 0, 0), else_=1),
+                    summary.c.scheduled_at.desc(),
+                    summary.c.output_dataset,
+                    summary.c.process_id,
                 )
                 .offset(offset)
                 .limit(limit)
             )
         ).mappings()
         return [dict(row) for row in rows], int(total or 0)
+
+    async def dependency_source_summaries(
+        self,
+        *,
+        process_ids: tuple[UUID, ...],
+    ) -> list[dict[str, Any]]:
+        if not process_ids:
+            return []
+        rows = (
+            await self._session.execute(
+                select(
+                    ProcessingDependency.process_id,
+                    ProcessingDependency.dependency_type,
+                    ProcessingDependency.dependency_name,
+                    func.count(ProcessingDependency.dependency_scope_key).label("required_count"),
+                    func.count(ProcessingDependency.dependency_scope_key)
+                    .filter(ProcessingDependency.status == DependencyStatus.READY.value)
+                    .label("ready_count"),
+                    func.count(ProcessingDependency.dependency_scope_key)
+                    .filter(ProcessingDependency.status == DependencyStatus.WAITING.value)
+                    .label("waiting_count"),
+                    func.count(ProcessingDependency.dependency_scope_key)
+                    .filter(
+                        ProcessingDependency.status.in_(
+                            (DependencyStatus.MISSING.value, DependencyStatus.FAILED.value)
+                        )
+                    )
+                    .label("blocked_count"),
+                    func.max(ProcessingDependency.blocked_reason).label("blocked_reason"),
+                )
+                .where(ProcessingDependency.process_id.in_(process_ids))
+                .group_by(
+                    ProcessingDependency.process_id,
+                    ProcessingDependency.dependency_type,
+                    ProcessingDependency.dependency_name,
+                )
+                .order_by(
+                    ProcessingDependency.process_id,
+                    ProcessingDependency.dependency_type,
+                    ProcessingDependency.dependency_name,
+                )
+            )
+        ).mappings()
+        return [dict(row) for row in rows]
 
     async def releases(
         self,
@@ -408,9 +515,13 @@ class OperationsRepository:
         since: datetime,
         run_type: str | None,
         status: str | None,
+        batch_id: UUID | None,
+        unresolved_only: bool,
         offset: int,
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
+        recovered_collection = aliased(CollectionTask)
+        recovered_release = aliased(DatasetRelease)
         collection = select(
             CollectionTask.task_id.label("id"),
             literal("acquisition").label("run_type"),
@@ -424,6 +535,15 @@ class OperationsRepository:
             CollectionTask.finished_at.label("finished_at"),
             CollectionTask.error_message.label("error_message"),
             CollectionBatch.scheduled_at.label("sort_time"),
+            select(literal(1))
+            .where(
+                recovered_collection.api_name == CollectionTask.api_name,
+                recovered_collection.scope_key == CollectionTask.scope_key,
+                recovered_collection.status.in_(COLLECTION_SUCCESS),
+                recovered_collection.finished_at > CollectionTask.finished_at,
+            )
+            .exists()
+            .label("recovered"),
         ).join(CollectionBatch, CollectionBatch.batch_id == CollectionTask.batch_id)
         processing = select(
             ProcessingTask.process_id.label("id"),
@@ -438,6 +558,19 @@ class OperationsRepository:
             ProcessingTask.finished_at.label("finished_at"),
             ProcessingTask.error_message.label("error_message"),
             CollectionBatch.scheduled_at.label("sort_time"),
+            select(literal(1))
+            .where(
+                recovered_release.dataset_name == ProcessingTask.output_dataset,
+                or_(
+                    ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                    recovered_release.business_date.is_not_distinct_from(
+                        ProcessingTask.business_date
+                    ),
+                ),
+                recovered_release.published_at > CollectionBatch.scheduled_at,
+            )
+            .exists()
+            .label("recovered"),
         ).join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
         statements = []
         if run_type in (None, "acquisition"):
@@ -446,6 +579,13 @@ class OperationsRepository:
             statements.append(processing.where(CollectionBatch.scheduled_at >= since))
         combined = union_all(*statements).subquery()
         filtered = select(combined)
+        if batch_id is not None:
+            filtered = filtered.where(combined.c.batch_id == batch_id)
+        if unresolved_only:
+            filtered = filtered.where(
+                combined.c.recovered.is_(False),
+                or_(combined.c.run_type == "acquisition", combined.c.attempt > 0),
+            )
         status_condition = _run_status_condition(combined, status)
         if status_condition is not None:
             filtered = filtered.where(status_condition)
@@ -581,29 +721,33 @@ class OperationsRepository:
             )
             .exists(),
         )
-        processing = select(
-            ProcessingTask.process_id.label("id"),
-            literal("processing").label("source"),
-            ProcessingTask.output_dataset.label("task_name"),
-            ProcessingTask.status.label("status"),
-            literal(None).label("error_code"),
-            ProcessingTask.error_message.label("error_message"),
-            processing_occurred_at.label("occurred_at"),
-        ).join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id).where(
-            ProcessingTask.status.in_(
-                (ProcessingTaskStatus.FAILED.value, ProcessingTaskStatus.BLOCKED.value)
-            ),
-            processing_occurred_at >= since,
-            ~select(literal(1))
-            .where(
-                recovered_processing.output_dataset == ProcessingTask.output_dataset,
-                recovered_processing.business_date.is_not_distinct_from(
-                    ProcessingTask.business_date
-                ),
-                recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
-                recovered_processing.finished_at > processing_occurred_at,
+        processing = (
+            select(
+                ProcessingTask.process_id.label("id"),
+                literal("processing").label("source"),
+                ProcessingTask.output_dataset.label("task_name"),
+                ProcessingTask.status.label("status"),
+                literal(None).label("error_code"),
+                ProcessingTask.error_message.label("error_message"),
+                processing_occurred_at.label("occurred_at"),
             )
-            .exists(),
+            .join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
+            .where(
+                ProcessingTask.status.in_(
+                    (ProcessingTaskStatus.FAILED.value, ProcessingTaskStatus.BLOCKED.value)
+                ),
+                processing_occurred_at >= since,
+                ~select(literal(1))
+                .where(
+                    recovered_processing.output_dataset == ProcessingTask.output_dataset,
+                    recovered_processing.business_date.is_not_distinct_from(
+                        ProcessingTask.business_date
+                    ),
+                    recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
+                    recovered_processing.finished_at > processing_occurred_at,
+                )
+                .exists(),
+            )
         )
         scheduler = select(
             ScheduledJobExecution.execution_id.label("id"),
@@ -689,9 +833,7 @@ def _processing_status_values(status: str | None) -> tuple[str, ...] | None:
     if status is None:
         return None
     return {
-        "pending": (
-            ProcessingTaskStatus.QUEUED.value,
-        ),
+        "pending": (ProcessingTaskStatus.QUEUED.value,),
         "waiting_dependency": (ProcessingTaskStatus.WAITING_DEPENDENCY.value,),
         "running": (ProcessingTaskStatus.RUNNING.value,),
         "waiting_retry": (ProcessingTaskStatus.RETRY_WAIT.value,),

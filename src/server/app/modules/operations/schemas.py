@@ -24,6 +24,7 @@ type PriorityLevel = Literal[
 ]
 type AlertLevel = Literal["critical", "warning", "info"]
 type ScheduledJobStatus = Literal["pending", "running", "success", "failed"]
+type ReadinessStatus = Literal["ready", "waiting", "blocked"]
 
 
 def _to_camel(value: str) -> str:
@@ -64,6 +65,8 @@ class QuotaSnapshot(OperationsModel):
 class ProcessingQueueItem(OperationsModel):
     id: str
     task_name: str
+    task_display_name: str
+    task_description: str
     batch_code: str
     data_cycle: str
     priority: PriorityLevel
@@ -91,17 +94,33 @@ class AcquisitionBatchItem(OperationsModel):
     duration_ms: int | None
 
 
+class DependencySourceSummary(OperationsModel):
+    source_type: Literal["raw_asset", "dataset_release"]
+    source_name: str
+    source_display_name: str
+    required_count: int
+    ready_count: int
+    waiting_count: int
+    blocked_count: int
+    status: ReadinessStatus
+    reason: str | None
+
+
 class DependencyItem(OperationsModel):
     id: str
     processing_task_name: str
+    processing_task_display_name: str
+    processing_task_description: str
     batch_code: str
-    source_endpoint: str
-    source_scope: str
-    source_cycle: str
-    source_policy: Literal["current_cycle", "latest_valid"]
-    source_ready: bool
-    status: ExecutionStatus
+    data_cycle: str
+    processing_status: ExecutionStatus
+    dependency_count: int
+    ready_dependency_count: int
+    waiting_dependency_count: int
+    blocked_dependency_count: int
+    readiness_status: ReadinessStatus
     reason: str | None
+    sources: list[DependencySourceSummary]
 
 
 class ProviderEndpointMetric(OperationsModel):
@@ -135,6 +154,8 @@ class RunRecordItem(OperationsModel):
     id: str
     run_type: Literal["acquisition", "processing"]
     task_name: str
+    task_display_name: str
+    task_description: str
     scope_key: str | None
     batch_code: str
     data_cycle: str
@@ -149,6 +170,7 @@ class RunRecordItem(OperationsModel):
 class ScheduledJobItem(OperationsModel):
     job_id: str
     name: str
+    description: str
     category: str
     schedule: str
     enabled: bool
@@ -239,6 +261,8 @@ class OperationCommandResult(OperationsModel):
 
 class AcquisitionApiOption(OperationsModel):
     api_name: str
+    display_name: str
+    description: str
     schedule_group: str
 
 

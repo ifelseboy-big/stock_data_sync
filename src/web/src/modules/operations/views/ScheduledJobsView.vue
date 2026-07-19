@@ -55,9 +55,9 @@ const commandDescription = computed(() => {
   const target = commandTarget.value
   if (!target) return ''
   if (target.action === 'run') {
-    return `任务：${target.job.name}。命令进入 PostgreSQL 队列，由独立调度器执行。`
+    return `任务：${target.job.name}。${target.job.description} 命令进入 PostgreSQL 队列，由独立调度器执行。`
   }
-  return `任务：${target.job.name}。${target.action === 'enable' ? '启用后恢复定时触发。' : '停用后跳过定时和启动补偿，仍允许人工执行。'}`
+  return `任务：${target.job.name}。${target.job.description} ${target.action === 'enable' ? '启用后恢复定时触发。' : '停用后跳过定时和启动补偿，仍允许人工执行。'}`
 })
 
 const categoryMap: Record<string, string> = {
@@ -76,9 +76,14 @@ const executionStatusMap: Record<
   failed: { label: '失败', type: 'danger' },
 }
 const triggerMap = { scheduled: '定时', manual: '人工', startup_catchup: '启动补偿' } as const
+const jobById = computed(() => new Map((jobs.value ?? []).map((job) => [job.jobId, job])))
 
 function statusMeta(status: unknown) {
   return executionStatusMap[status as ScheduledJobStatus] ?? executionStatusMap.pending
+}
+
+function jobName(jobId: string) {
+  return jobById.value.get(jobId)?.name ?? jobId
 }
 
 function openCommand(row: unknown, action: ScheduledJobAction) {
@@ -122,7 +127,7 @@ async function submitCommand(value: {
 
 <template>
   <section>
-    <PageHeader title="任务调度" description="查看任务计划、下次执行时间和实际执行结果。">
+    <PageHeader title="任务调度" description="查看每个任务具体处理的数据、执行计划和实际结果。">
       <template #actions>
         <el-button :loading="jobsLoading || executionsLoading" @click="refresh">刷新</el-button>
       </template>
@@ -145,7 +150,15 @@ async function submitCommand(value: {
         @retry="loadJobs"
       >
         <el-table :data="jobs ?? []" scrollbar-always-on>
-          <el-table-column prop="name" label="任务" min-width="210" fixed="left" />
+          <el-table-column label="任务与用途" min-width="380" fixed="left">
+            <template #default="{ row }">
+              <div class="job-summary">
+                <strong>{{ row.name }}</strong>
+                <span>{{ row.description }}</span>
+                <code>{{ row.jobId }}</code>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="分类" width="110">
             <template #default="{ row }">{{ categoryMap[row.category] ?? row.category }}</template>
           </el-table-column>
@@ -241,7 +254,14 @@ async function submitCommand(value: {
         @retry="loadExecutions"
       >
         <el-table :data="executions?.items ?? []" scrollbar-always-on>
-          <el-table-column prop="jobId" label="任务 ID" min-width="210" fixed="left" />
+          <el-table-column label="任务" min-width="260" fixed="left">
+            <template #default="{ row }">
+              <div class="execution-job">
+                <strong>{{ jobName(row.jobId) }}</strong>
+                <code>{{ row.jobId }}</code>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="触发方式" width="110">
             <template #default="{ row }">{{
               triggerMap[row.triggerType as keyof typeof triggerMap]
@@ -290,3 +310,31 @@ async function submitCommand(value: {
     />
   </section>
 </template>
+
+<style scoped>
+.job-summary,
+.execution-job {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 0;
+}
+
+.job-summary strong,
+.execution-job strong {
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+}
+
+.job-summary span {
+  color: var(--el-text-color-regular);
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.job-summary code,
+.execution-job code {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+</style>

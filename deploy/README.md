@@ -9,3 +9,5 @@
 - `../scripts/build-release.sh`：生成 GitHub Release 的安装器、manifest 和校验文件，不生成应用二进制包。
 
 首次安装目录、Web/API 监听 IPv4、Web/API 端口和 PostgreSQL 端口都没有默认值，必须由用户明确指定；后续通过 `~/.stock-data-sync/install.conf` 自动发现。普通升级只更换程序，不备份或迁移数据库。完整流程见 [Mac mini 安装、升级与运行](../docs/06-deployment.md)。
+
+PostgreSQL、Server、Scheduler 以及可选 Backup 会注册为系统级 launchd 服务，并显式执行 `launchctl enable`；前三者使用 `RunAtLoad` 和 `KeepAlive` 实现开机启动与异常退出自动拉起。
