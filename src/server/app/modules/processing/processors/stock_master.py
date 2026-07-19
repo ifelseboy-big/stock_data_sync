@@ -131,13 +131,9 @@ class StockCompanyProcessor:
     ) -> PublicationResult:
         rows = cast(tuple[PreparedRow, ...], prepared.payload)
         codes = {cast(str, row["ts_code"]) for row in rows}
-        existing = set(
-            session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes)))
-        )
+        existing = set(session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes))))
         values = tuple(
-            {**row, "synced_at": published_at}
-            for row in rows
-            if row["ts_code"] in existing
+            {**row, "synced_at": published_at} for row in rows if row["ts_code"] in existing
         )
         if not values:
             raise ProcessingError("stock_company has no rows matching the stock master")

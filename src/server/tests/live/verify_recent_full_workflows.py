@@ -59,6 +59,9 @@ from app.modules.topics.models import (
     StockLimitStepDaily,
     StockTopInstDaily,
     StockTopListDaily,
+    ThemeIndex,
+    ThemeIndexDaily,
+    ThemeIndexMember,
 )
 from tests.live.verify_recent_workflows import (
     TIMEZONE,
@@ -96,6 +99,7 @@ DATE_RELEASES = {
     "etf_daily",
     "etf_share_size_daily",
     "concept_board_daily",
+    "theme_index_daily",
     "stock_hot_rank_daily",
     "market_theme_daily",
     "market_theme_member_daily",
@@ -119,6 +123,9 @@ TABLE_MODELS = {
     "concept_board": ConceptBoard,
     "concept_board_daily": ConceptBoardDaily,
     "concept_board_member": ConceptBoardMember,
+    "theme_index": ThemeIndex,
+    "theme_index_daily": ThemeIndexDaily,
+    "theme_index_member": ThemeIndexMember,
     "stock_hot_rank_daily": StockHotRankDaily,
     "market_theme_daily": MarketThemeDaily,
     "market_theme_member_daily": MarketThemeMemberDaily,
@@ -328,10 +335,7 @@ def _run_processing_retry(api: OperationsApi, business_date: date) -> dict[str, 
         process_status = process.status
         process_attempt_count = process.attempt_count
         asset_path = _file_uri_path(asset.storage_uri)
-    if (
-        process_status == ProcessingTaskStatus.SUCCESS.value
-        and process_attempt_count >= 2
-    ):
+    if process_status == ProcessingTaskStatus.SUCCESS.value and process_attempt_count >= 2:
         retry = api.post(
             f"/api/v1/operations/commands/processing-tasks/{process_id}/retry",
             {"reason": "原始资产恢复，验证加工任务人工重试"},
@@ -471,6 +475,7 @@ def _verify_business_data(trading_dates: tuple[date, ...]) -> dict[str, object]:
                 "etfDaily": _count_date(session, EtfDaily, business_date),
                 "etfShareSize": _count_date(session, EtfShareSizeDaily, business_date),
                 "conceptDaily": _count_date(session, ConceptBoardDaily, business_date),
+                "themeIndexDaily": _count_date(session, ThemeIndexDaily, business_date),
                 "hotRank": _count_date(session, StockHotRankDaily, business_date),
                 "themeDaily": _count_date(session, MarketThemeDaily, business_date),
                 "themeMembers": _count_date(session, MarketThemeMemberDaily, business_date),

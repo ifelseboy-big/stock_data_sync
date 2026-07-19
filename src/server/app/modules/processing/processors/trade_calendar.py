@@ -46,9 +46,7 @@ class TradeCalendarProcessor:
 
         for dependency in matching:
             if dependency.schema_fingerprint != expected_fingerprint:
-                raise ProcessingError(
-                    f"trade_cal schema mismatch for asset {dependency.asset_id}"
-                )
+                raise ProcessingError(f"trade_cal schema mismatch for asset {dependency.asset_id}")
             try:
                 asset_store.verify(
                     RawAssetMetadata(
@@ -146,16 +144,13 @@ def _validate_calendar_coverage(
     years: set[int],
 ) -> None:
     if exchanges != {"SSE", "SZSE"}:
-        raise ProcessingError(
-            f"trade_calendar requires SSE and SZSE, got {sorted(exchanges)}"
-        )
+        raise ProcessingError(f"trade_calendar requires SSE and SZSE, got {sorted(exchanges)}")
     for exchange in exchanges:
         for year in years:
             dates = {
                 cast(date, row["cal_date"])
                 for row in rows
-                if row["exchange"] == exchange
-                and cast(date, row["cal_date"]).year == year
+                if row["exchange"] == exchange and cast(date, row["cal_date"]).year == year
             }
             expected = date(year, 12, 31).timetuple().tm_yday
             if len(dates) != expected:

@@ -50,4 +50,3 @@ def test_staging_publisher_copies_and_merges_rows() -> None:
         )
         assert saved is not None
         assert saved.is_open is True
-

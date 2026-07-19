@@ -39,6 +39,9 @@ from app.modules.processing.processors.topics import (
     StockLimitStepDailyProcessor,
     StockTopInstDailyProcessor,
     StockTopListDailyProcessor,
+    ThemeIndexDailyProcessor,
+    ThemeIndexMemberProcessor,
+    ThemeIndexProcessor,
 )
 from app.modules.processing.processors.trade_calendar import TradeCalendarProcessor
 
@@ -71,5 +74,8 @@ __all__ = [
     "StockTopInstDailyProcessor",
     "StockTopListDailyProcessor",
     "ThsBoardMoneyflowDailyProcessor",
+    "ThemeIndexDailyProcessor",
+    "ThemeIndexMemberProcessor",
+    "ThemeIndexProcessor",
     "TradeCalendarProcessor",
 ]

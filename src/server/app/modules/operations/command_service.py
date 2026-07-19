@@ -29,7 +29,7 @@ from app.modules.processing.models import (
     ProcessingTaskStatus,
 )
 from app.modules.stocks.models import TradeCalendar
-from app.modules.topics.models import ConceptBoard, MarketThemeDaily
+from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
 
 COLLECTION_RETRYABLE = frozenset(
     {
@@ -582,15 +582,23 @@ class OperationCommandService:
         business_date: date | None,
     ) -> tuple[RequestScope, ...]:
         if spec.api_name == "ths_member":
-            codes = tuple(
+            concept_codes = tuple(
                 await self._session.scalars(
                     select(ConceptBoard.ts_code)
                     .where(ConceptBoard.source == "THS")
                     .order_by(ConceptBoard.ts_code)
                 )
             )
+            theme_codes = tuple(
+                await self._session.scalars(
+                    select(ThemeIndex.ts_code)
+                    .where(ThemeIndex.source == "THS")
+                    .order_by(ThemeIndex.ts_code)
+                )
+            )
+            codes = tuple(sorted({*concept_codes, *theme_codes}))
             if not codes:
-                raise OperationCommandError("概念板块主数据尚未发布，不能采集概念成分")
+                raise OperationCommandError("同花顺概念和主题主数据尚未发布，不能采集板块成分")
             return ths_member_scopes(codes)
         if spec.api_name == "dc_concept_cons":
             if business_date is None:

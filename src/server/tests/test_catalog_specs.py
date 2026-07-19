@@ -91,3 +91,14 @@ def test_dataset_spec_and_registry_reject_duplicate_registration() -> None:
     assert registry.get("stock_daily.core") is spec
     with pytest.raises(ValueError, match="already registered"):
         registry.register(spec)
+
+
+def test_dataset_release_dependency_can_be_prerequisite_without_recompute_trigger() -> None:
+    dependency = DatasetDependencySpec(
+        kind=DependencyKind.DATASET_RELEASE,
+        name="theme_index",
+        scope=ReleaseScope.GLOBAL,
+        triggers_recompute=False,
+    )
+
+    assert dependency.triggers_recompute is False

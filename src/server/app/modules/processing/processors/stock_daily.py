@@ -135,9 +135,7 @@ class StockDailyCoreProcessor:
             asset_store,
             (DAILY_SPEC, DAILY_BASIC_SPEC, ADJ_FACTOR_SPEC),
         )
-        daily = _key_by_security_date(
-            raw.rows_by_api["daily"], task.business_date, self.name
-        )
+        daily = _key_by_security_date(raw.rows_by_api["daily"], task.business_date, self.name)
         daily_basic = _key_by_security_date(
             raw.rows_by_api["daily_basic"], task.business_date, self.name
         )
@@ -201,8 +199,7 @@ class StockDailyLimitProcessor:
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (STK_LIMIT_SPEC,))
         rows = tuple(
-            _stock_limit_row(source, task.business_date)
-            for source in raw.rows_by_api["stk_limit"]
+            _stock_limit_row(source, task.business_date) for source in raw.rows_by_api["stk_limit"]
         )
         if not rows:
             raise ProcessingError("stock_daily.limit cannot publish an empty trading day")
@@ -225,9 +222,7 @@ class StockDailyLimitProcessor:
                 )
             )
         }
-        matched_rows = tuple(
-            row for row in rows if cast(str, row["ts_code"]) in existing
-        )
+        matched_rows = tuple(row for row in rows if cast(str, row["ts_code"]) in existing)
         if not matched_rows:
             raise ProcessingError("stock_daily.limit has no rows matching stock_daily.core")
         for row in matched_rows:
@@ -342,8 +337,7 @@ class StockMoneyflowDailyProcessor:
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (MONEYFLOW_SPEC,))
         rows = tuple(
-            _moneyflow_row(source, task.business_date)
-            for source in raw.rows_by_api["moneyflow"]
+            _moneyflow_row(source, task.business_date) for source in raw.rows_by_api["moneyflow"]
         )
         if not rows:
             raise ProcessingError("stock_moneyflow_daily cannot publish an empty trading day")
@@ -389,8 +383,7 @@ class StockSuspendDailyProcessor:
             raise ProcessingError("stock_suspend_daily requires a task business date")
         raw = read_raw_assets(dependencies, asset_store, (SUSPEND_SPEC,))
         rows = tuple(
-            _suspend_row(source, task.business_date)
-            for source in raw.rows_by_api["suspend_d"]
+            _suspend_row(source, task.business_date) for source in raw.rows_by_api["suspend_d"]
         )
         return PreparedDataset(
             payload=(task.business_date, rows),
@@ -404,9 +397,7 @@ class StockSuspendDailyProcessor:
         *,
         published_at: datetime,
     ) -> PublicationResult:
-        business_date, raw_rows = cast(
-            tuple[date, tuple[PreparedRow, ...]], prepared.payload
-        )
+        business_date, raw_rows = cast(tuple[date, tuple[PreparedRow, ...]], prepared.payload)
         _validate_stock_codes(session, raw_rows)
         values = tuple({**row, "synced_at": published_at} for row in raw_rows)
         return PublicationResult(
@@ -459,9 +450,7 @@ def _require_key_coverage(
 ) -> None:
     missing = sorted(set(required) - set(superset))[:5]
     if missing:
-        raise ProcessingError(
-            f"{superset_name} does not cover {required_name}; missing={missing}"
-        )
+        raise ProcessingError(f"{superset_name} does not cover {required_name}; missing={missing}")
 
 
 def _stock_daily_core_row(
@@ -478,9 +467,7 @@ def _stock_daily_core_row(
         decimal_value(basic.get("close"), "daily_basic.close", required=True),
     )
     if abs(daily_close - basic_close) > Decimal("0.001"):
-        raise ProcessingError(
-            f"daily/daily_basic close mismatch for {daily.get('ts_code')}"
-        )
+        raise ProcessingError(f"daily/daily_basic close mismatch for {daily.get('ts_code')}")
     return {
         "ts_code": required_text(daily.get("ts_code"), "ts_code"),
         "trade_date": trade_date,
@@ -495,13 +482,9 @@ def _stock_daily_core_row(
         "amount": scaled_decimal(daily.get("amount"), "amount", 1_000, required=True),
         "after_hours_volume": scaled_decimal(daily.get("ah_vol"), "ah_vol", 100),
         "after_hours_amount": scaled_decimal(daily.get("ah_amount"), "ah_amount", 1_000),
-        "adj_factor": decimal_value(
-            factor.get("adj_factor"), "adj_factor", required=True
-        ),
+        "adj_factor": decimal_value(factor.get("adj_factor"), "adj_factor", required=True),
         "turnover_rate": decimal_value(basic.get("turnover_rate"), "turnover_rate"),
-        "turnover_rate_f": decimal_value(
-            basic.get("turnover_rate_f"), "turnover_rate_f"
-        ),
+        "turnover_rate_f": decimal_value(basic.get("turnover_rate_f"), "turnover_rate_f"),
         "volume_ratio": decimal_value(basic.get("volume_ratio"), "volume_ratio"),
         "pe": decimal_value(basic.get("pe"), "pe"),
         "pe_ttm": decimal_value(basic.get("pe_ttm"), "pe_ttm"),
@@ -527,9 +510,7 @@ def _stock_limit_row(source: RawRow, business_date: date | None) -> PreparedRow:
     return {
         "ts_code": required_text(source.get("ts_code"), "ts_code"),
         "trade_date": trade_date,
-        "source_pre_close": decimal_value(
-            source.get("pre_close"), "pre_close"
-        ),
+        "source_pre_close": decimal_value(source.get("pre_close"), "pre_close"),
         "up_limit": decimal_value(source.get("up_limit"), "up_limit"),
         "down_limit": decimal_value(source.get("down_limit"), "down_limit"),
     }
@@ -543,12 +524,7 @@ def _stock_technical_row(source: RawRow, business_date: date | None) -> Prepared
         "trade_date": trade_date,
         "source_close": decimal_value(source.get("close"), "close", required=True),
     }
-    row.update(
-        {
-            field: decimal_value(source.get(field), field)
-            for field in TECHNICAL_FIELDS
-        }
-    )
+    row.update({field: decimal_value(source.get(field), field) for field in TECHNICAL_FIELDS})
     return row
 
 

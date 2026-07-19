@@ -49,6 +49,9 @@ from app.modules.topics.models import (
     StockLimitStepDaily,
     StockTopInstDaily,
     StockTopListDaily,
+    ThemeIndex,
+    ThemeIndexDaily,
+    ThemeIndexMember,
 )
 from app.storage import RawAssetStore
 
@@ -75,10 +78,14 @@ class ConceptBoardProcessor:
     ) -> PreparedDataset:
         del task
         raw = read_raw_assets(dependencies, asset_store, (THS_INDEX_SPEC,))
-        rows = tuple(_concept_board_row(row) for row in raw.rows_by_api["ths_index"])
+        rows = tuple(
+            row
+            for source in raw.rows_by_api["ths_index"]
+            if (row := _concept_board_row(source)) is not None
+        )
         if not rows:
             raise ProcessingError("concept_board cannot be empty")
-        return PreparedDataset(rows, raw.row_count)
+        return PreparedDataset(rows, raw.row_count, raw.row_count - len(rows))
 
     def write(
         self, session: Session, prepared: PreparedDataset, *, published_at: datetime
@@ -192,6 +199,160 @@ class ConceptBoardMemberProcessor:
         written = self._publisher.publish(
             session,
             target=cast(Table, ConceptBoardMember.__table__),
+            rows=rows,
+            strategy=WriteStrategy.REPLACE_ENTITY,
+            key_columns=("source", "ts_code", "con_code"),
+            update_columns=(
+                "con_name",
+                "weight",
+                "in_date",
+                "out_date",
+                "is_current",
+                "observed_at",
+                "synced_at",
+            ),
+            replace_filters={"source": "THS"},
+        )
+        return PublicationResult(written, len(source_rows) - len(matched))
+
+
+class ThemeIndexProcessor:
+    name = "theme_index"
+
+    def __init__(self) -> None:
+        self._publisher = PostgresStagingPublisher()
+
+    def prepare(
+        self,
+        task: ClaimedProcessingTask,
+        dependencies: tuple[RawDependencyAsset, ...],
+        asset_store: RawAssetStore,
+    ) -> PreparedDataset:
+        del task
+        raw = read_raw_assets(dependencies, asset_store, (THS_INDEX_SPEC,))
+        rows = tuple(
+            row
+            for source in raw.rows_by_api["ths_index"]
+            if (row := _theme_index_row(source)) is not None
+        )
+        if not rows:
+            raise ProcessingError("theme_index cannot be empty")
+        return PreparedDataset(rows, raw.row_count, raw.row_count - len(rows))
+
+    def write(
+        self, session: Session, prepared: PreparedDataset, *, published_at: datetime
+    ) -> PublicationResult:
+        rows = _with_synced_at(cast(tuple[PreparedRow, ...], prepared.payload), published_at)
+        written = self._publisher.publish(
+            session,
+            target=cast(Table, ThemeIndex.__table__),
+            rows=rows,
+            strategy=WriteStrategy.MASTER_MERGE,
+            key_columns=("source", "ts_code"),
+            update_columns=(
+                "name",
+                "member_count",
+                "exchange",
+                "list_date",
+                "theme_type",
+                "synced_at",
+            ),
+        )
+        return PublicationResult(written)
+
+
+class ThemeIndexDailyProcessor:
+    name = "theme_index_daily"
+
+    def __init__(self) -> None:
+        self._publisher = PostgresStagingPublisher()
+
+    def prepare(
+        self,
+        task: ClaimedProcessingTask,
+        dependencies: tuple[RawDependencyAsset, ...],
+        asset_store: RawAssetStore,
+    ) -> PreparedDataset:
+        business_date = _business_date(task, self.name)
+        raw = read_raw_assets(dependencies, asset_store, (THS_DAILY_SPEC,))
+        rows = tuple(
+            _concept_board_daily_row(row, business_date) for row in raw.rows_by_api["ths_daily"]
+        )
+        return PreparedDataset(DatedRows(business_date, rows), raw.row_count)
+
+    def write(
+        self, session: Session, prepared: PreparedDataset, *, published_at: datetime
+    ) -> PublicationResult:
+        payload = cast(DatedRows, prepared.payload)
+        theme_codes = _theme_index_codes(session)
+        matched = tuple(row for row in payload.rows if row["ts_code"] in theme_codes)
+        if not matched:
+            raise ProcessingError("theme_index_daily has no rows matching theme_index")
+        rows = _with_synced_at(matched, published_at)
+        written = self._publisher.publish(
+            session,
+            target=cast(Table, ThemeIndexDaily.__table__),
+            rows=rows,
+            strategy=WriteStrategy.REPLACE_DATE,
+            key_columns=("source", "ts_code", "trade_date"),
+            update_columns=(
+                "close",
+                "open",
+                "high",
+                "low",
+                "pre_close",
+                "avg_price",
+                "change",
+                "pct_change",
+                "volume",
+                "turnover_rate",
+                "total_mv",
+                "float_mv",
+                "synced_at",
+            ),
+            replace_filters={"trade_date": payload.business_date},
+        )
+        return PublicationResult(written, len(payload.rows) - len(matched))
+
+
+class ThemeIndexMemberProcessor:
+    name = "theme_index_member"
+
+    def __init__(self) -> None:
+        self._publisher = PostgresStagingPublisher()
+
+    def prepare(
+        self,
+        task: ClaimedProcessingTask,
+        dependencies: tuple[RawDependencyAsset, ...],
+        asset_store: RawAssetStore,
+    ) -> PreparedDataset:
+        observed_at = _business_date(task, self.name)
+        raw = read_raw_assets(dependencies, asset_store, (THS_MEMBER_SPEC,))
+        rows = tuple(
+            row
+            for source in raw.rows_by_api["ths_member"]
+            if (row := _concept_board_member_row(source, observed_at)) is not None
+        )
+        return PreparedDataset(rows, raw.row_count, raw.row_count - len(rows))
+
+    def write(
+        self, session: Session, prepared: PreparedDataset, *, published_at: datetime
+    ) -> PublicationResult:
+        source_rows = cast(tuple[PreparedRow, ...], prepared.payload)
+        theme_codes = _theme_index_codes(session)
+        stocks = _stock_codes(session, {cast(str, row["con_code"]) for row in source_rows})
+        matched = tuple(
+            row
+            for row in source_rows
+            if row["ts_code"] in theme_codes and row["con_code"] in stocks
+        )
+        if not matched:
+            raise ProcessingError("theme_index_member has no rows matching theme_index")
+        rows = _with_synced_at(matched, published_at)
+        written = self._publisher.publish(
+            session,
+            target=cast(Table, ThemeIndexMember.__table__),
             rows=rows,
             strategy=WriteStrategy.REPLACE_ENTITY,
             key_columns=("source", "ts_code", "con_code"),
@@ -577,10 +738,10 @@ def _filter_daily_stocks(
     return payload, tuple(row for row in payload.rows if row["ts_code"] in stocks)
 
 
-def _concept_board_row(source: RawRow) -> PreparedRow:
+def _concept_board_row(source: RawRow) -> PreparedRow | None:
     board_type = required_text(source.get("type"), "type")
     if board_type != "N":
-        raise ProcessingError(f"unsupported concept board type: {board_type}")
+        return None
     return {
         "source": "THS",
         "ts_code": required_text(source.get("ts_code"), "ts_code"),
@@ -589,6 +750,21 @@ def _concept_board_row(source: RawRow) -> PreparedRow:
         "exchange": optional_text(source.get("exchange")),
         "list_date": optional_yyyymmdd(source.get("list_date"), "list_date"),
         "board_type": board_type,
+    }
+
+
+def _theme_index_row(source: RawRow) -> PreparedRow | None:
+    theme_type = required_text(source.get("type"), "type")
+    if theme_type != "TH":
+        return None
+    return {
+        "source": "THS",
+        "ts_code": required_text(source.get("ts_code"), "ts_code"),
+        "name": required_text(source.get("name"), "name"),
+        "member_count": integer_value(source.get("count"), "count"),
+        "exchange": optional_text(source.get("exchange")),
+        "list_date": optional_yyyymmdd(source.get("list_date"), "list_date"),
+        "theme_type": theme_type,
     }
 
 
@@ -800,6 +976,10 @@ def _business_date(task: ClaimedProcessingTask, dataset: str) -> date:
 
 def _concept_board_codes(session: Session) -> set[str]:
     return set(session.scalars(select(ConceptBoard.ts_code).where(ConceptBoard.source == "THS")))
+
+
+def _theme_index_codes(session: Session) -> set[str]:
+    return set(session.scalars(select(ThemeIndex.ts_code).where(ThemeIndex.source == "THS")))
 
 
 def _stock_codes(session: Session, codes: set[str]) -> set[str]:

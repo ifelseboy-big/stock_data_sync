@@ -6,12 +6,55 @@ from uuid import UUID, uuid4
 import pyarrow as pa
 
 from app.catalog import ApiSpec
-from app.catalog.tushare import TOP_LIST_SPEC
+from app.catalog.tushare import THS_INDEX_SPEC, TOP_LIST_SPEC
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
-from app.modules.processing.processors.topics import DatedRows, StockTopListDailyProcessor
+from app.modules.processing.processors.topics import (
+    ConceptBoardProcessor,
+    DatedRows,
+    StockTopListDailyProcessor,
+    ThemeIndexProcessor,
+)
 from app.storage import LocalRawAssetStore, RawAssetContext
 
 BUSINESS_DATE = date(2026, 7, 13)
+
+
+def test_ths_index_rows_are_split_between_concepts_and_themes(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        THS_INDEX_SPEC,
+        [
+            {
+                "ts_code": "885921.TI",
+                "name": "储能",
+                "count": 300,
+                "exchange": "A",
+                "list_date": "20200101",
+                "type": "N",
+            },
+            {
+                "ts_code": "700056.TI",
+                "name": "宁组合",
+                "count": None,
+                "exchange": "A",
+                "list_date": None,
+                "type": "TH",
+            },
+        ],
+    )
+
+    concept = ConceptBoardProcessor().prepare(_task(batch_id), (dependency,), store)
+    theme = ThemeIndexProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    concept_rows = cast(tuple[dict[str, object], ...], concept.payload)
+    theme_rows = cast(tuple[dict[str, object], ...], theme.payload)
+    assert [row["ts_code"] for row in concept_rows] == ["885921.TI"]
+    assert [row["ts_code"] for row in theme_rows] == ["700056.TI"]
+    assert concept.rows_rejected == 1
+    assert theme.rows_rejected == 1
 
 
 def test_top_list_processor_deduplicates_identical_provider_rows(tmp_path: Path) -> None:

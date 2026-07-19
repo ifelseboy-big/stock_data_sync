@@ -299,8 +299,79 @@ CONCEPT_BOARD_MEMBER_DATASET = DatasetSpec(
     processor_version="1",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_member", ReleaseScope.GLOBAL),
-        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "concept_board", ReleaseScope.GLOBAL),
-        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            "concept_board",
+            ReleaseScope.GLOBAL,
+            triggers_recompute=False,
+        ),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            "stock",
+            ReleaseScope.GLOBAL,
+            triggers_recompute=False,
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_ENTITY,
+    release_scope=ReleaseScope.GLOBAL,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code", "con_code")}),
+        QualityRuleSpec("filter_to_current_stock_members"),
+    ),
+)
+
+THEME_INDEX_DATASET = DatasetSpec(
+    dataset_name="theme_index",
+    processor="theme_index",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_index", ReleaseScope.GLOBAL),
+    ),
+    write_strategy=WriteStrategy.MASTER_MERGE,
+    release_scope=ReleaseScope.GLOBAL,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code")}),
+        QualityRuleSpec("theme_index_non_empty"),
+    ),
+)
+
+THEME_INDEX_DAILY_DATASET = DatasetSpec(
+    dataset_name="theme_index_daily",
+    processor="theme_index_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_daily", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "theme_index", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code", "trade_date")}),
+        QualityRuleSpec("filter_to_theme_index_master"),
+    ),
+)
+
+THEME_INDEX_MEMBER_DATASET = DatasetSpec(
+    dataset_name="theme_index_member",
+    processor="theme_index_member",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_member", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            "theme_index",
+            ReleaseScope.GLOBAL,
+            triggers_recompute=False,
+        ),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            "stock",
+            ReleaseScope.GLOBAL,
+            triggers_recompute=False,
+        ),
     ),
     write_strategy=WriteStrategy.REPLACE_ENTITY,
     release_scope=ReleaseScope.GLOBAL,
@@ -548,6 +619,9 @@ ALL_DATASET_SPECS = (
     CONCEPT_BOARD_DATASET,
     CONCEPT_BOARD_DAILY_DATASET,
     CONCEPT_BOARD_MEMBER_DATASET,
+    THEME_INDEX_DATASET,
+    THEME_INDEX_DAILY_DATASET,
+    THEME_INDEX_MEMBER_DATASET,
     STOCK_HOT_RANK_DAILY_DATASET,
     MARKET_THEME_DAILY_DATASET,
     MARKET_THEME_MEMBER_DAILY_DATASET,

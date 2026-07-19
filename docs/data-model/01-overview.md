@@ -1,12 +1,12 @@
 # 数据范围与全局约定
 
-最终设计包含 **25 张业务数据表**、**6 张控制面运行表**和 **2 张运维支撑表**。业务表服务研究、筛选和策略消费；控制面表服务采集、重试、依赖、原始数据追溯和原子发布；运维支撑表保存物理接口请求观测与幂等人工命令。
+最终设计包含 **28 张业务数据表**、**6 张控制面运行表**和 **2 张运维支撑表**。业务表服务研究、筛选和策略消费；控制面表服务采集、重试、依赖、原始数据追溯和原子发布；运维支撑表保存物理接口请求观测与幂等人工命令。
 
 | 分类 | 最终表 | 主要用途 |
 |-|-|-|
-| 基础主数据 | trade_calendar、stock、stock_company、concept_board | 交易日门禁，以及股票和概念的稳定标识 |
+| 基础主数据 | trade_calendar、stock、stock_company、concept_board、theme_index | 交易日门禁，以及股票、同花顺概念和同花顺主题指数的稳定标识 |
 | A股行情与资金 | stock_daily、stock_technical_daily、stock_moneyflow_daily、ths_board_moneyflow_daily、stock_suspend_daily | 日线、复权、估值、技术因子、资金和停复牌 |
-| 重点专题 | concept_board_daily、concept_board_member、stock_hot_rank_daily、market_theme_daily、market_theme_member_daily、stock_top_list_daily、stock_top_inst_daily、stock_limit_event_daily、stock_limit_step_daily | 概念、热榜、题材、龙虎榜、涨跌停和连板 |
+| 重点专题 | concept_board_daily、concept_board_member、theme_index_daily、theme_index_member、stock_hot_rank_daily、market_theme_daily、market_theme_member_daily、stock_top_list_daily、stock_top_inst_daily、stock_limit_event_daily、stock_limit_step_daily | 同花顺概念与主题指数、热榜、东方财富动态题材、龙虎榜、涨跌停和连板 |
 | 指数 | market_index、market_index_daily、index_daily_basic、market_index_weight | 指数主数据、行情、估值和月度成分权重 |
 | ETF | etf、etf_daily、etf_share_size_daily | ETF主数据、日线、复权、份额和规模 |
 | 系统运行 | collection_batch、collection_task、raw_data_asset、processing_task、processing_dependency、dataset_release | 保证多接口合并数据完整、可重试、可追溯 |
@@ -43,7 +43,7 @@
 | market_theme_member_daily | 按trade_date月分区 | 保存每日题材成员快照，预计是增长最快的数据集。 |
 | etf_daily | 按trade_date月分区 | 每个交易日持续追加ETF行情，历史回补和重算均以交易日为边界。 |
 | etf_share_size_daily | 按trade_date月分区 | 每个交易日持续更新ETF份额与规模，延迟补采仍按原交易日替换。 |
-| 其余19张业务表 | 普通表 | 主数据、当前快照或日增量较小；依靠主键和针对性索引即可。 |
+| 其余22张业务表 | 普通表 | 主数据、当前快照或日增量较小；依靠主键和针对性索引即可。 |
 | 6张控制面表和2张运维支撑表 | 普通表 | 通过运行记录归档控制规模；当前不承担大范围行情扫描。 |
 
 ```sql
@@ -106,6 +106,12 @@ CREATE INDEX idx_concept_daily_trade_board
 
 CREATE INDEX idx_concept_member_stock
     ON concept_board_member (con_code, source, ts_code);
+
+CREATE INDEX idx_theme_index_daily_trade
+    ON theme_index_daily (trade_date, source, ts_code);
+
+CREATE INDEX idx_theme_index_member_stock
+    ON theme_index_member (con_code, source, ts_code);
 
 CREATE INDEX idx_hot_rank_stock_history
     ON stock_hot_rank_daily (ts_code, trade_date, source, rank_type);

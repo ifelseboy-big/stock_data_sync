@@ -201,8 +201,7 @@ def test_processing_dependencies_and_global_slot_roundtrip() -> None:
     assert repaired_downstream is not None
     assert repaired_downstream.output_dataset == "downstream"
     repaired_raw_names = {
-        item.dependency_name
-        for item in repository.raw_dependencies(repaired_downstream.process_id)
+        item.dependency_name for item in repository.raw_dependencies(repaired_downstream.process_id)
     }
     assert repaired_raw_names == {"raw_downstream"}
 

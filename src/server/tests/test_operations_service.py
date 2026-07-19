@@ -35,9 +35,7 @@ async def test_provider_monitoring_lists_unrequested_configured_endpoints() -> N
     monitoring = await service.provider_monitoring()
 
     endpoints = {item.endpoint: item for item in monitoring.endpoints}
-    assert set(endpoints) == {
-        spec.api_name for spec in build_tushare_api_registry().all()
-    }
+    assert set(endpoints) == {spec.api_name for spec in build_tushare_api_registry().all()}
     assert endpoints["fund_daily"].request_count_today == 2
     assert endpoints["fund_daily"].success_rate_today == 1.0
     assert endpoints["daily"].request_count_today == 0

@@ -20,7 +20,6 @@ from app.scheduler.jobs import (
     dispatch_collection_tasks,
     dispatch_processing_task,
     ensure_future_partitions,
-    plan_concept_board_members,
     plan_daily_close,
     plan_daily_final,
     plan_daily_late,
@@ -34,6 +33,7 @@ from app.scheduler.jobs import (
     plan_special_master,
     plan_stock_master,
     plan_theme_members,
+    plan_ths_board_members,
     plan_trade_calendar,
     reconcile_collection_runtime,
     reconcile_processing_runtime,
@@ -124,14 +124,14 @@ def create_scheduler() -> BlockingScheduler:
         plan_special_master,
         trigger=CronTrigger(day=1, hour=8, minute=40),
         id="plan-special-master",
-        name="规划概念和指数主数据采集",
+        name="规划概念、主题和指数主数据采集",
         replace_existing=True,
     )
     scheduler.add_job(
-        plan_concept_board_members,
+        plan_ths_board_members,
         trigger=CronTrigger(day=1, hour=10),
         id="plan-concept-board-members",
-        name="规划概念板块成分采集",
+        name="规划同花顺概念和主题成分采集",
         replace_existing=True,
     )
     scheduler.add_job(

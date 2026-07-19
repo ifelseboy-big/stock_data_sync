@@ -98,6 +98,81 @@ class ConceptBoardMember(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ThemeIndex(Base):
+    __tablename__ = "theme_index"
+    __table_args__ = (
+        CheckConstraint("source = 'THS'", name="source"),
+        CheckConstraint("theme_type = 'TH'", name="theme_type"),
+    )
+
+    source: Mapped[str] = mapped_column(
+        String(8), primary_key=True, default="THS", server_default="THS"
+    )
+    ts_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    member_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exchange: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    theme_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ThemeIndexDaily(Base):
+    __tablename__ = "theme_index_daily"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source", "ts_code"],
+            ["theme_index.source", "theme_index.ts_code"],
+            name="fk_theme_index_daily_index",
+        ),
+        Index("idx_theme_index_daily_trade", "trade_date", "source", "ts_code"),
+    )
+
+    source: Mapped[str] = mapped_column(
+        String(8), primary_key=True, default="THS", server_default="THS"
+    )
+    ts_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    close: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    open: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    high: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    low: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    pre_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    avg_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    change: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    pct_change: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    turnover_rate: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    total_mv: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    float_mv: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ThemeIndexMember(Base):
+    __tablename__ = "theme_index_member"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source", "ts_code"],
+            ["theme_index.source", "theme_index.ts_code"],
+            name="fk_theme_index_member_index",
+        ),
+        Index("idx_theme_index_member_stock", "con_code", "source", "ts_code"),
+    )
+
+    source: Mapped[str] = mapped_column(
+        String(8), primary_key=True, default="THS", server_default="THS"
+    )
+    ts_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    con_code: Mapped[str] = mapped_column(String(16), ForeignKey("stock.ts_code"), primary_key=True)
+    con_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    weight: Mapped[Decimal | None] = mapped_column(Numeric(14, 8), nullable=True)
+    in_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    out_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    observed_at: Mapped[date] = mapped_column(Date, nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class StockHotRankDaily(Base):
     __tablename__ = "stock_hot_rank_daily"
     __table_args__ = (

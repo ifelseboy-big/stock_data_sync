@@ -649,6 +649,7 @@ THS_INDEX_SPEC = _master_spec(
     natural_key=("ts_code",),
     scope_builder=lambda business_date: (
         RequestScope("exchange=A;type=N", {"exchange": "A", "type": "N"}),
+        RequestScope("exchange=A;type=TH", {"exchange": "A", "type": "TH"}),
     ),
 )
 

@@ -156,7 +156,7 @@ def _validate_environment() -> str:
         alembic_version = session.scalar(text("SELECT version_num FROM alembic_version"))
     if database_name != "stock_data_sync":
         raise LiveWorkflowError(f"unexpected database: {database_name}")
-    if alembic_version != "20260719_0004":
+    if alembic_version != "20260719_0005":
         raise LiveWorkflowError(f"database migration is not current: {alembic_version}")
     _progress(f"database={database_name}, postgresql={version}, migration={alembic_version}")
     return database_name
@@ -285,6 +285,7 @@ def _plan_and_drain_processing(batch_ids: Sequence[UUID], label: str) -> int:
     result = repository.plan_closed_batches(
         get_dataset_specs().all(),
         now=datetime.now(TIMEZONE),
+        source_batch_ids=batch_ids,
     )
     _progress(
         f"{label} processing plan: created={result.created_task_count}, "
@@ -292,7 +293,10 @@ def _plan_and_drain_processing(batch_ids: Sequence[UUID], label: str) -> int:
     )
     transition_count = 0
     while True:
-        transition = get_processing_runtime().dispatch(now=datetime.now(TIMEZONE))
+        transition = get_processing_runtime().dispatch(
+            now=datetime.now(TIMEZONE),
+            source_batch_ids=batch_ids,
+        )
         if transition is None:
             break
         transition_count += 1

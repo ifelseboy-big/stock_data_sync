@@ -55,16 +55,24 @@ class ProcessingRepository:
         dataset_specs: Sequence[DatasetSpec],
         *,
         now: datetime,
+        source_batch_ids: Sequence[UUID] | None = None,
     ) -> ProcessingPlanResult:
         scanned_batch_count = 0
         created_task_count = 0
         queued_task_count = 0
         blocked_task_count = 0
         with self._session_factory() as session, session.begin():
+            batch_statement = select(CollectionBatch).where(
+                CollectionBatch.status == BatchStatus.CLOSED.value
+            )
+            if source_batch_ids is not None:
+                if not source_batch_ids:
+                    return ProcessingPlanResult(0, 0, 0, 0)
+                batch_statement = batch_statement.where(
+                    CollectionBatch.batch_id.in_(source_batch_ids)
+                )
             batches = session.scalars(
-                select(CollectionBatch)
-                .where(CollectionBatch.status == BatchStatus.CLOSED.value)
-                .order_by(CollectionBatch.closed_at, CollectionBatch.batch_id)
+                batch_statement.order_by(CollectionBatch.closed_at, CollectionBatch.batch_id)
             ).all()
             for batch in batches:
                 scanned_batch_count += 1
@@ -161,6 +169,7 @@ class ProcessingRepository:
         *,
         now: datetime,
         advisory_lock_id: int,
+        source_batch_ids: Sequence[UUID] | None = None,
     ) -> ClaimedProcessingTask | None:
         with self._session_factory() as session, session.begin():
             lock_acquired = session.scalar(
@@ -176,17 +185,22 @@ class ProcessingRepository:
             )
             if running_count:
                 return None
-            task = session.scalar(
-                select(ProcessingTask)
-                .where(
-                    or_(
-                        ProcessingTask.status == ProcessingTaskStatus.QUEUED.value,
-                        (ProcessingTask.status == ProcessingTaskStatus.RETRY_WAIT.value)
-                        & (ProcessingTask.next_retry_at.is_not(None))
-                        & (ProcessingTask.next_retry_at <= now),
-                    )
+            task_statement = select(ProcessingTask).where(
+                or_(
+                    ProcessingTask.status == ProcessingTaskStatus.QUEUED.value,
+                    (ProcessingTask.status == ProcessingTaskStatus.RETRY_WAIT.value)
+                    & (ProcessingTask.next_retry_at.is_not(None))
+                    & (ProcessingTask.next_retry_at <= now),
                 )
-                .order_by(
+            )
+            if source_batch_ids is not None:
+                if not source_batch_ids:
+                    return None
+                task_statement = task_statement.where(
+                    ProcessingTask.source_batch_id.in_(source_batch_ids)
+                )
+            task = session.scalar(
+                task_statement.order_by(
                     ProcessingTask.priority,
                     ProcessingTask.business_date.asc().nullsfirst(),
                     ProcessingTask.queued_at,
@@ -721,6 +735,7 @@ def _affected_dataset_specs(
                 continue
             if any(
                 dependency.kind == DependencyKind.DATASET_RELEASE
+                and dependency.triggers_recompute
                 and dependency.name in selected_names
                 and dependency.scope == spec.release_scope
                 for dependency in spec.dependencies

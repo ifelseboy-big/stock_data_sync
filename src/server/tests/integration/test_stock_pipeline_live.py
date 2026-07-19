@@ -58,9 +58,7 @@ def test_stock_master_and_daily_pipeline() -> None:
         now,
     )
     processing_repository = get_processing_repository()
-    calendar_plan = processing_repository.plan_closed_batches(
-        get_dataset_specs().all(), now=now
-    )
+    calendar_plan = processing_repository.plan_closed_batches(get_dataset_specs().all(), now=now)
     assert calendar_plan.created_task_count == 1
     _drain_processing(now)
 
@@ -71,9 +69,7 @@ def test_stock_master_and_daily_pipeline() -> None:
         MASTER_STOCK_SPECS,
         now,
     )
-    master_plan = processing_repository.plan_closed_batches(
-        get_dataset_specs().all(), now=now
-    )
+    master_plan = processing_repository.plan_closed_batches(get_dataset_specs().all(), now=now)
     assert master_plan.created_task_count == 2
     _drain_processing(now)
 
@@ -81,9 +77,7 @@ def test_stock_master_and_daily_pipeline() -> None:
         stock_count = session.scalar(select(func.count()).select_from(Stock))
         company_count = session.scalar(select(func.count()).select_from(StockCompany))
         stock_release = session.get(DatasetRelease, ("stock", "GLOBAL", "GLOBAL"))
-        company_release = session.get(
-            DatasetRelease, ("stock_company", "GLOBAL", "GLOBAL")
-        )
+        company_release = session.get(DatasetRelease, ("stock_company", "GLOBAL", "GLOBAL"))
     assert master_batch is not None
     assert stock_count is not None and stock_count > 5_000
     assert company_count is not None and company_count > 4_000
@@ -103,9 +97,7 @@ def test_stock_master_and_daily_pipeline() -> None:
         daily_specs,
         now,
     )
-    daily_plan = processing_repository.plan_closed_batches(
-        get_dataset_specs().all(), now=now
-    )
+    daily_plan = processing_repository.plan_closed_batches(get_dataset_specs().all(), now=now)
     assert daily_plan.created_task_count == 5
     _drain_processing(now)
 

@@ -1,10 +1,10 @@
 # 数据库落地设计
 
-数据库采用本目录定义的 33 张应用表；25 张业务表保持已定义的字段，6 张控制面运行表负责闭合状态机，`provider_request_log` 和 `operation_command` 分别负责物理请求观测与人工命令幂等审计。所有表使用默认 schema，避免 ORM、Alembic 和跨 schema 外键复杂化。
+数据库采用本目录定义的 36 张应用表；28 张业务表保持已定义的字段，6 张控制面运行表负责闭合状态机，`provider_request_log` 和 `operation_command` 分别负责物理请求观测与人工命令幂等审计。所有表使用默认 schema，避免 ORM、Alembic 和跨 schema 外键复杂化。
 
 | 数据库对象 | 落地规则 |
 |-|-|
-| 25张业务表 | 字段、类型、主外键、单位和 NULL 口径以本目录表定义为准 |
+| 28张业务表 | 字段、类型、主外键、单位和 NULL 口径以本目录表定义为准 |
 | 6张系统运行表 | 作为批次、任务、资产、依赖和发布的唯一事实来源 |
 | 2张运维支撑表 | 保存实际接口请求指标，以及人工命令的幂等键、操作者、原因、请求 ID 和结果 |
 | 6张分区事实表 | stock_daily、stock_technical_daily、stock_moneyflow_daily、market_theme_member_daily、etf_daily、etf_share_size_daily按trade_date月分区 |

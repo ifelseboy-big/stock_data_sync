@@ -530,9 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     restore_parser.add_argument("--backup-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.command == "create":
-        backup_dir = create_backup(
-            BackupConfig.from_environment(), args.target_dir, full=args.full
-        )
+        backup_dir = create_backup(BackupConfig.from_environment(), args.target_dir, full=args.full)
         result = verify_backup(backup_dir)
         print(json.dumps({"backupDir": str(backup_dir), **result}, ensure_ascii=False))
     elif args.command == "verify":

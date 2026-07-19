@@ -1,4 +1,4 @@
-.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check performance live-validation live-etf-validation live-full-validation release
+.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check performance live-validation live-etf-validation live-full-validation live-ths-theme-validation release
 
 server-install:
 	cd src/server && uv sync --all-groups
@@ -34,6 +34,9 @@ live-etf-validation:
 
 live-full-validation:
 	./scripts/run-live-full-workflow-validation.sh $(ARGS)
+
+live-ths-theme-validation:
+	./scripts/run-live-ths-theme-validation.sh $(ARGS)
 
 release:
 	@test -n "$(VERSION)" || (echo "用法: make release VERSION=0.1.0" && exit 1)

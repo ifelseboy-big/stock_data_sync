@@ -16,6 +16,9 @@ BUSINESS_TABLES = {
     "concept_board",
     "concept_board_daily",
     "concept_board_member",
+    "theme_index",
+    "theme_index_daily",
+    "theme_index_member",
     "stock_hot_rank_daily",
     "market_theme_daily",
     "market_theme_member_daily",
@@ -46,7 +49,7 @@ def test_all_business_tables_are_registered() -> None:
     import_all_models()
 
     assert BUSINESS_TABLES <= set(Base.metadata.tables)
-    assert len(BUSINESS_TABLES) == 25
+    assert len(BUSINESS_TABLES) == 28
 
 
 def test_expected_tables_are_monthly_partitioned() -> None:

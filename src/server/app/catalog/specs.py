@@ -127,6 +127,7 @@ class DatasetDependencySpec:
     kind: DependencyKind
     name: str
     scope: ReleaseScope
+    triggers_recompute: bool = True
 
     def __post_init__(self) -> None:
         if not self.name:

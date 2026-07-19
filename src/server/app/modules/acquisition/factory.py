@@ -52,9 +52,7 @@ def get_acquisition_runtime() -> AcquisitionRuntime:
     repository = get_acquisition_repository()
     executor = CollectionExecutor(
         repository=repository,
-        provider=TushareProvider(
-            call_recorder=PostgresProviderCallRecorder(SyncSessionFactory)
-        ),
+        provider=TushareProvider(call_recorder=PostgresProviderCallRecorder(SyncSessionFactory)),
         api_specs=get_api_specs(),
         asset_store=get_raw_asset_store(),
         timezone=ZoneInfo(settings.scheduler_timezone),

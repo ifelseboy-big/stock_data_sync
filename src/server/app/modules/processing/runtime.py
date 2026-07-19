@@ -1,4 +1,6 @@
+from collections.abc import Sequence
 from datetime import datetime
+from uuid import UUID
 
 import structlog
 
@@ -19,10 +21,16 @@ class ProcessingRuntime:
         self._executor = executor
         self._advisory_lock_id = advisory_lock_id
 
-    def dispatch(self, *, now: datetime) -> ProcessingTransition | None:
+    def dispatch(
+        self,
+        *,
+        now: datetime,
+        source_batch_ids: Sequence[UUID] | None = None,
+    ) -> ProcessingTransition | None:
         task = self._repository.claim_next(
             now=now,
             advisory_lock_id=self._advisory_lock_id,
+            source_batch_ids=source_batch_ids,
         )
         if task is None:
             return None

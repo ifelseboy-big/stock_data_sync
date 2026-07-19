@@ -183,9 +183,10 @@ def _validate_database(engine: Any) -> str:
 
 def _trading_range(engine: Any, profile: ScaleProfile) -> tuple[date, date]:
     with engine.connect() as connection:
-        rows = connection.execute(
-            text(
-                """
+        rows = (
+            connection.execute(
+                text(
+                    """
                 SELECT day::date
                 FROM generate_series(
                     DATE '2019-01-01', DATE '2035-12-31', INTERVAL '1 day'
@@ -194,9 +195,12 @@ def _trading_range(engine: Any, profile: ScaleProfile) -> tuple[date, date]:
                 ORDER BY day
                 LIMIT :trading_day_count
                 """
-            ),
-            {"trading_day_count": profile.trading_day_count},
-        ).scalars().all()
+                ),
+                {"trading_day_count": profile.trading_day_count},
+            )
+            .scalars()
+            .all()
+        )
     if len(rows) != profile.trading_day_count:
         raise RuntimeError("could not construct the requested trading-day range")
     return rows[0], rows[-1]
@@ -906,8 +910,7 @@ def run(profile: ScaleProfile, json_output: Path) -> int:
     expected_partition = f"stock_daily_p{last_day:%Y%m}"
     partition_pruning_passed = relations == [expected_partition]
     print(
-        f"partition pruning: {relations}, "
-        f"{'PASS' if partition_pruning_passed else 'FAIL'}",
+        f"partition pruning: {relations}, {'PASS' if partition_pruning_passed else 'FAIL'}",
         flush=True,
     )
     counts = _database_stats(engine)

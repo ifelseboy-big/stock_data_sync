@@ -112,9 +112,7 @@ class PostgresStagingPublisher:
         replace_filters: Mapping[str, object],
     ) -> None:
         _require_target_columns(target, tuple(replace_filters))
-        predicate = tuple(
-            target.c[column] == value for column, value in replace_filters.items()
-        )
+        predicate = tuple(target.c[column] == value for column, value in replace_filters.items())
         session.execute(delete(target).where(*predicate))
         if columns:
             session.execute(
@@ -134,9 +132,7 @@ class PostgresStagingPublisher:
     ) -> int:
         if not update_columns:
             raise ValueError("PATCH_COLUMNS requires update_columns")
-        join_predicate = tuple(
-            target.c[column] == stage.c[column] for column in key_columns
-        )
+        join_predicate = tuple(target.c[column] == stage.c[column] for column in key_columns)
         result = cast(
             CursorResult[tuple[object, ...]],
             session.execute(
@@ -202,10 +198,7 @@ def _copy_stage_rows(
         for offset in range(0, len(rows), chunk_size):
             for row in rows[offset : offset + chunk_size]:
                 copy.write_row(
-                    tuple(
-                        _copy_value(stage.c[column], row.get(column))
-                        for column in columns
-                    )
+                    tuple(_copy_value(stage.c[column], row.get(column)) for column in columns)
                 )
 
 

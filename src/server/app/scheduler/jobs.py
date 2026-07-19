@@ -43,7 +43,7 @@ from app.modules.processing.factory import (
     get_processing_runtime,
 )
 from app.modules.stocks.models import TradeCalendar
-from app.modules.topics.models import ConceptBoard, MarketThemeDaily
+from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
 
 
 def dispatch_collection_tasks() -> None:
@@ -199,20 +199,28 @@ def plan_special_master() -> None:
     )
 
 
-def plan_concept_board_members() -> None:
+def plan_ths_board_members() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
     business_date = date(now.year, now.month, 1)
     with SyncSessionFactory() as session:
-        codes = tuple(
+        concept_codes = tuple(
             session.scalars(
                 select(ConceptBoard.ts_code)
                 .where(ConceptBoard.source == "THS")
                 .order_by(ConceptBoard.ts_code)
             )
         )
+        theme_codes = tuple(
+            session.scalars(
+                select(ThemeIndex.ts_code)
+                .where(ThemeIndex.source == "THS")
+                .order_by(ThemeIndex.ts_code)
+            )
+        )
+    codes = tuple(sorted({*concept_codes, *theme_codes}))
     if not codes:
-        structlog.get_logger("scheduler").warning("concept_member_waiting_for_master")
+        structlog.get_logger("scheduler").warning("ths_member_waiting_for_master")
         return
     dynamic_spec = replace(
         MASTER_ENTITY_SPECS[0],
@@ -227,7 +235,7 @@ def plan_concept_board_members() -> None:
             finalize=True,
         ),
         now=now,
-        stage_name="concept_board_members",
+        stage_name="ths_board_members",
     )
 
 

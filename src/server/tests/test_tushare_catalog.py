@@ -18,6 +18,7 @@ from app.catalog.tushare import (
     MASTER_STOCK_SPECS,
     STK_FACTOR_SPEC,
     STK_LIMIT_SPEC,
+    THS_INDEX_SPEC,
     TRADE_CAL_SPEC,
     build_tushare_api_registry,
     next_year_trade_calendar_scopes,
@@ -127,6 +128,10 @@ def test_special_catalog_uses_explicit_entity_splitting() -> None:
     assert {spec.api_name for spec in MASTER_ENTITY_SPECS} == {"ths_member"}
     assert {spec.api_name for spec in DELAYED_THEME_SPECS} == {"dc_concept_cons"}
     assert {spec.api_name for spec in HOT_SPECS} == {"ths_hot", "dc_hot"}
+    assert [scope.scope_key for scope in THS_INDEX_SPEC.scope_builder(None)] == [
+        "exchange=A;type=N",
+        "exchange=A;type=TH",
+    ]
     assert [scope.scope_key for scope in ths_member_scopes(("885001.TI", "885002.TI"))] == [
         "ts_code=885001.TI",
         "ts_code=885002.TI",
