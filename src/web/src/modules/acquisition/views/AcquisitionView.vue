@@ -66,9 +66,11 @@ function search() {
   void load()
 }
 
+const backfillScheduleGroups = new Set(['DAILY', 'DELAYED', 'HOT'])
 const availableApis = computed(() =>
   (commandOptions.value?.acquisitionApis ?? []).filter(
-    (item) => manualMode.value !== 'backfill' || item.scheduleGroup === 'DAILY',
+    (item) =>
+      manualMode.value !== 'backfill' || backfillScheduleGroups.has(item.scheduleGroup),
   ),
 )
 const selectedAvailableCount = computed(
