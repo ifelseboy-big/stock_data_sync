@@ -226,7 +226,7 @@ umask 077
   printf '# 可选的数据目录外备份目标。[用户可修改]\n'; deploy_write_env_value BACKUP_TARGET_DIR "$BACKUP_DIR"
   printf '\n# =============================================================================\n# 访问密钥与 Tushare 配置\n# =============================================================================\n\n'
   printf '# Tushare API Token；安装后由用户填写。[用户填写，敏感信息]\n'; deploy_write_env_value TUSHARE_TOKEN ""
-  printf '# 管理写接口 Bearer Token。[安装器维护，可由管理员轮换，敏感信息]\n'; deploy_write_env_value ADMIN_API_TOKEN "$ADMIN_API_TOKEN"
+  printf '# 管理写接口 Bearer Token，管理页面自动读取。[安装器维护，可由管理员轮换]\n'; deploy_write_env_value ADMIN_API_TOKEN "$ADMIN_API_TOKEN"
   printf '# Tushare 每分钟供应方上限。[用户可修改]\n'; deploy_write_env_value TUSHARE_REQUEST_LIMIT_PER_MINUTE 500
   printf '# 应用每分钟请求预算，不得超过供应方上限。[用户可修改]\n'; deploy_write_env_value TUSHARE_REQUEST_BUDGET_PER_MINUTE 480
   printf '# 单次供应方请求超时秒数。[用户可修改]\n'; deploy_write_env_value TUSHARE_TIMEOUT_SECONDS 30

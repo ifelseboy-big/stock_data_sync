@@ -197,7 +197,6 @@ export interface DatasetReleaseQuery {
 }
 
 export interface AdminCommandOptions {
-  adminToken: string
   idempotencyKey: string
 }
 

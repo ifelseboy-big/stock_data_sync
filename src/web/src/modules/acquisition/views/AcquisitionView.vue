@@ -24,6 +24,7 @@ import type {
   RunRecordItem,
 } from '@/modules/operations/contracts'
 import { formatDateTime, formatDuration } from '@/modules/operations/presentation'
+import { createIdempotencyKey } from '@/utils/idempotency'
 
 const status = ref<ExecutionStatus | ''>('')
 const dataCycle = ref('')
@@ -48,7 +49,6 @@ const commandForm = reactive({
   businessDate: '',
   apiNames: [] as string[],
   reason: '',
-  adminToken: '',
 })
 let idempotencyKey = ''
 
@@ -69,8 +69,7 @@ function search() {
 const backfillScheduleGroups = new Set(['DAILY', 'DELAYED', 'HOT'])
 const availableApis = computed(() =>
   (commandOptions.value?.acquisitionApis ?? []).filter(
-    (item) =>
-      manualMode.value !== 'backfill' || backfillScheduleGroups.has(item.scheduleGroup),
+    (item) => manualMode.value !== 'backfill' || backfillScheduleGroups.has(item.scheduleGroup),
   ),
 )
 const selectedAvailableCount = computed(
@@ -105,7 +104,7 @@ function openManualCommand(mode: 'backfill' | 'repair') {
   commandForm.businessDate = ''
   commandForm.apiNames = []
   commandForm.reason = ''
-  idempotencyKey = crypto.randomUUID()
+  idempotencyKey = createIdempotencyKey()
 }
 
 function toggleAllApis(value: boolean | string | number) {
@@ -120,7 +119,7 @@ async function submitManualCommand() {
   }
   manualLoading.value = true
   try {
-    const options = { adminToken: commandForm.adminToken, idempotencyKey }
+    const options = { idempotencyKey }
     if (manualMode.value === 'backfill') {
       await createBackfill(
         {
@@ -151,7 +150,7 @@ async function submitManualCommand() {
   }
 }
 
-async function submitCancel(value: { reason: string; adminToken: string; idempotencyKey: string }) {
+async function submitCancel(value: { reason: string; idempotencyKey: string }) {
   if (!cancelTarget.value) return
   cancelLoading.value = true
   try {
@@ -205,11 +204,7 @@ function openTaskRetry(value: unknown) {
   retryTarget.value = value as RunRecordItem
 }
 
-async function submitTaskRetry(value: {
-  reason: string
-  adminToken: string
-  idempotencyKey: string
-}) {
+async function submitTaskRetry(value: { reason: string; idempotencyKey: string }) {
   if (!retryTarget.value) return
   retryLoading.value = true
   try {
@@ -525,19 +520,6 @@ async function submitTaskRetry(value: {
           ]"
         >
           <el-input v-model="commandForm.reason" type="textarea" :rows="3" maxlength="500" />
-        </el-form-item>
-        <el-form-item
-          label="管理 Token"
-          prop="adminToken"
-          :rules="[{ required: true, message: '请输入管理 Token', trigger: 'blur' }]"
-        >
-          <el-input
-            v-model="commandForm.adminToken"
-            type="password"
-            show-password
-            autocomplete="off"
-            placeholder="ADMIN_API_TOKEN"
-          />
         </el-form-item>
       </el-form>
       <template #footer>

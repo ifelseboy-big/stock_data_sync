@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue'
 
+import { createIdempotencyKey } from '@/utils/idempotency'
+
 const props = defineProps<{
   modelValue: boolean
   title: string
@@ -11,11 +13,11 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  submit: [value: { reason: string; adminToken: string; idempotencyKey: string }]
+  submit: [value: { reason: string; idempotencyKey: string }]
 }>()
 
 const formRef = ref()
-const form = reactive({ reason: '', adminToken: '' })
+const form = reactive({ reason: '' })
 let idempotencyKey = ''
 
 watch(
@@ -23,7 +25,7 @@ watch(
   (visible) => {
     if (visible) {
       form.reason = ''
-      idempotencyKey = crypto.randomUUID()
+      idempotencyKey = createIdempotencyKey()
     }
   },
 )
@@ -32,7 +34,6 @@ async function submit() {
   await formRef.value?.validate()
   emit('submit', {
     reason: form.reason.trim(),
-    adminToken: form.adminToken,
     idempotencyKey,
   })
 }
@@ -65,19 +66,6 @@ async function submit() {
           maxlength="500"
           show-word-limit
           placeholder="说明人工介入的依据"
-        />
-      </el-form-item>
-      <el-form-item
-        label="管理 Token"
-        prop="adminToken"
-        :rules="[{ required: true, message: '请输入管理 Token', trigger: 'blur' }]"
-      >
-        <el-input
-          v-model="form.adminToken"
-          type="password"
-          show-password
-          autocomplete="off"
-          placeholder="ADMIN_API_TOKEN"
         />
       </el-form-item>
     </el-form>

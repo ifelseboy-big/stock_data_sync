@@ -104,11 +104,7 @@ function refresh() {
   void Promise.all([loadJobs(), loadExecutions()])
 }
 
-async function submitCommand(value: {
-  reason: string
-  adminToken: string
-  idempotencyKey: string
-}) {
+async function submitCommand(value: { reason: string; idempotencyKey: string }) {
   const target = commandTarget.value
   if (!target) return
   commandLoading.value = true
@@ -138,7 +134,7 @@ async function submitCommand(value: {
         <div class="panel-card__header">
           <div>
             <h3>定时任务</h3>
-            <p>停用只影响定时触发和启动补偿；人工执行仍需管理 Token 和操作原因。</p>
+            <p>停用只影响定时触发和启动补偿；人工执行仍需填写操作原因。</p>
           </div>
         </div>
       </template>

@@ -53,11 +53,7 @@ function openCommand(value: unknown, transition: TaskTransition) {
   commandTarget.value = { row: value as RunRecordItem, transition }
 }
 
-async function submitCommand(value: {
-  reason: string
-  adminToken: string
-  idempotencyKey: string
-}) {
+async function submitCommand(value: { reason: string; idempotencyKey: string }) {
   const target = commandTarget.value
   if (!target) return
   commandLoading.value = true

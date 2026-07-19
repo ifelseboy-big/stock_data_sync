@@ -3,8 +3,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.session import get_db
-from app.modules.system.schemas import HealthResponse, SystemResources
+from app.modules.system.schemas import AdminConfigResponse, HealthResponse, SystemResources
 from app.modules.system.service import get_system_resources, is_database_ready
 
 router = APIRouter()
@@ -30,3 +31,8 @@ async def readiness(db: DbSession) -> HealthResponse:
 @resources_router.get("/resources", response_model=SystemResources)
 async def resources(db: DbSession) -> SystemResources:
     return await get_system_resources(db)
+
+
+@resources_router.get("/admin-config", response_model=AdminConfigResponse)
+async def admin_config() -> AdminConfigResponse:
+    return AdminConfigResponse(admin_api_token=settings.admin_api_token.get_secret_value())

@@ -30,9 +30,22 @@ import type {
   TaskTransition,
 } from './contracts'
 
-function commandHeaders(options: AdminCommandOptions) {
+let adminTokenPromise: Promise<string> | null = null
+
+async function getAdminToken(): Promise<string> {
+  adminTokenPromise ??= http
+    .get<{ admin_api_token: string }>('/system/admin-config')
+    .then((response) => response.data.admin_api_token)
+    .catch((error) => {
+      adminTokenPromise = null
+      throw error
+    })
+  return adminTokenPromise
+}
+
+async function commandHeaders(options: AdminCommandOptions) {
   return {
-    Authorization: `Bearer ${options.adminToken}`,
+    Authorization: `Bearer ${await getAdminToken()}`,
     'Idempotency-Key': options.idempotencyKey,
   }
 }
@@ -115,7 +128,7 @@ export async function createBackfill(
     '/operations/commands/backfills',
     payload,
     {
-      headers: commandHeaders(options),
+      headers: await commandHeaders(options),
     },
   )
   return response.data
@@ -129,7 +142,7 @@ export async function createRepair(
     '/operations/commands/repairs',
     payload,
     {
-      headers: commandHeaders(options),
+      headers: await commandHeaders(options),
     },
   )
   return response.data
@@ -146,7 +159,7 @@ export async function runTaskCommand(
   const response = await http.post<OperationCommandResult>(
     `/operations/commands/${taskType}/${taskId}/${transition}`,
     payload,
-    { headers: commandHeaders(options) },
+    { headers: await commandHeaders(options) },
   )
   return response.data
 }
@@ -159,7 +172,7 @@ export async function cancelAcquisitionBatch(
   const response = await http.post<OperationCommandResult>(
     `/operations/commands/acquisition-batches/${batchId}/cancel`,
     payload,
-    { headers: commandHeaders(options) },
+    { headers: await commandHeaders(options) },
   )
   return response.data
 }
@@ -193,7 +206,7 @@ export async function runScheduledJobCommand(
   const response = await http.post<OperationCommandResult>(
     `/operations/commands/scheduled-jobs/${jobId}/${action}`,
     payload,
-    { headers: commandHeaders(options) },
+    { headers: await commandHeaders(options) },
   )
   return response.data
 }

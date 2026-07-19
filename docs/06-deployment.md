@@ -171,6 +171,8 @@ sudo stock-data-sync config edit
 sudo stock-data-sync restart
 ```
 
+管理页面会从后端自动读取 `ADMIN_API_TOKEN` 并用于写操作，不要求用户在每个操作弹窗中输入。
+
 升级不会覆盖用户已有值。新程序必须为新增可选配置提供代码默认值；新增必填配置时，目标版本的 doctor 必须在切换前失败并提示用户处理。
 
 ## 7. 普通升级

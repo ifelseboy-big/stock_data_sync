@@ -60,7 +60,7 @@ function openRetry(value: unknown) {
   retryTarget.value = value as RunRecordItem
 }
 
-async function submitRetry(value: { reason: string; adminToken: string; idempotencyKey: string }) {
+async function submitRetry(value: { reason: string; idempotencyKey: string }) {
   if (!retryTarget.value) return
   retryLoading.value = true
   try {

@@ -8,6 +8,10 @@ class HealthResponse(BaseModel):
     database: str | None = None
 
 
+class AdminConfigResponse(BaseModel):
+    admin_api_token: str
+
+
 def _to_camel(value: str) -> str:
     first, *rest = value.split("_")
     return first + "".join(part.capitalize() for part in rest)

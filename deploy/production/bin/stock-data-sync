@@ -110,6 +110,7 @@ bootstrap_service() {
   local service="$1" plist
   plist="$(plist_for "$service")"
   [[ -f "$plist" ]] || fail "缺少 launchd 配置：$plist"
+  launchctl enable "system/$(label_for "$service")"
   is_loaded "$service" || launchctl bootstrap system "$plist"
 }
 
@@ -170,6 +171,32 @@ start_all() {
   bootstrap_service server
   bootstrap_service scheduler
   [[ -f "$(plist_for backup)" ]] && bootstrap_service backup
+}
+
+restart_selected() {
+  local service
+  service="$(canonical_service "$1")"
+  if [[ "$service" != "postgres" ]]; then
+    start_postgres
+    require_database_compatibility "$PROGRAM_DIR/current"
+  fi
+  launchctl enable "system/$(label_for "$service")"
+  if is_loaded "$service"; then
+    launchctl kickstart -k "system/$(label_for "$service")"
+  else
+    bootstrap_service "$service"
+  fi
+  if [[ "$service" == "postgres" ]]; then
+    wait_for_postgres
+    ensure_database
+  fi
+}
+
+restart_all() {
+  restart_selected postgres
+  restart_selected server
+  restart_selected scheduler
+  [[ -f "$(plist_for backup)" ]] && restart_selected backup
 }
 
 write_service_plist() {
@@ -487,19 +514,15 @@ run_upgrade() {
   require_database_compatibility "$target"
   refresh_stable_entries "$target"
   previous="$(cd "$PROGRAM_DIR/current" && pwd -P)"
-  stop_service scheduler
-  stop_service server
   ln -sfn "releases/$(basename "$previous")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
-  bootstrap_service server
-  bootstrap_service scheduler
+  restart_selected server
+  restart_selected scheduler
   if ! run_doctor --phase post-upgrade; then
     printf '升级后检查失败，正在切回旧程序。\n' >&2
-    stop_service scheduler
-    stop_service server
     deploy_switch_current "$PROGRAM_DIR" "$previous"
-    bootstrap_service server
-    bootstrap_service scheduler
+    restart_selected server
+    restart_selected scheduler
     run_doctor --phase rollback || true
     fail "程序升级失败，已切回旧版本"
   fi
@@ -529,16 +552,13 @@ run_rollback() {
   [[ -n "$target" && -d "$target" ]] || fail "找不到可回滚的已构建版本"
   [[ "$target" != "$current" ]] || fail "目标版本已经在运行"
   require_database_compatibility "$target"
-  stop_service scheduler
-  stop_service server
   ln -sfn "releases/$(basename "$current")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
-  bootstrap_service server
-  bootstrap_service scheduler
+  restart_selected server
+  restart_selected scheduler
   run_doctor --phase rollback || {
-    stop_service scheduler; stop_service server
     deploy_switch_current "$PROGRAM_DIR" "$current"
-    bootstrap_service server; bootstrap_service scheduler
+    restart_selected server; restart_selected scheduler
     fail "回滚后检查失败，已恢复原程序"
   }
   service_home="$(deploy_service_home "$SERVICE_USER")"
@@ -668,9 +688,9 @@ case "$command_name" in
     ;;
   restart)
     if (( $# == 0 )); then
-      stop_service backup; stop_service scheduler; stop_service server; stop_service postgres; start_all
+      restart_all
     else
-      for service in "$@"; do stop_service "$(canonical_service "$service")"; start_selected "$service"; done
+      for service in "$@"; do restart_selected "$service"; done
     fi
     ;;
   status)
