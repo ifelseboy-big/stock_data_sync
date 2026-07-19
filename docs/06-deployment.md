@@ -117,6 +117,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ├── current -> releases/1.2.3-<commit>
 ├── previous -> releases/1.2.2-<commit>
 ├── bin/                      # 不随版本变化的薄入口
+├── logs/launchd/             # launchd 启动阶段日志
 └── config/
     ├── app.env               # 唯一运行配置文件
     └── launchd/
@@ -133,7 +134,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 └── backups/
 ```
 
-launchd 直接执行 macOS 自带的 `/bin/bash`，并将系统盘上的 `/usr/local/libexec/stock-data-sync/run-service` 作为受信任脚本参数，再启动主程序目录中的当前版本。它不会直接 `posix_spawn` 未签名的项目脚本，也不会执行关闭 ownership 的外接盘文件。
+launchd 直接执行 macOS 自带的 `/bin/bash`，并将系统盘上的 `/usr/local/libexec/stock-data-sync/run-service` 作为受信任脚本参数，再启动主程序目录中的当前版本。launchd 自身的 stdout/stderr 位于主程序目录，避免它在启动进程前访问关闭 ownership 的外接盘；PostgreSQL 和应用日志仍位于数据目录。
 
 服务用户主目录另有：
 

@@ -176,8 +176,8 @@ write_service_plist() {
   local service="$1" label plist stdout_log stderr_log xml_run xml_program xml_data xml_user xml_stdout xml_stderr
   label="$(label_for "$service")"
   plist="$PROGRAM_DIR/config/launchd/$label.plist"
-  stdout_log="$DATA_DIR/logs/$service/launchd.out.log"
-  stderr_log="$DATA_DIR/logs/$service/launchd.err.log"
+  stdout_log="$PROGRAM_DIR/logs/launchd/$service.out.log"
+  stderr_log="$PROGRAM_DIR/logs/launchd/$service.err.log"
   xml_run="$(deploy_xml_escape "$SYSTEM_RUN_SERVICE")"
   xml_program="$(deploy_xml_escape "$PROGRAM_DIR")"
   xml_data="$(deploy_xml_escape "$DATA_DIR")"
@@ -210,8 +210,8 @@ write_backup_plist() {
   xml_program="$(deploy_xml_escape "$PROGRAM_DIR")"
   xml_data="$(deploy_xml_escape "$DATA_DIR")"
   xml_user="$(deploy_xml_escape "$SERVICE_USER")"
-  xml_stdout="$(deploy_xml_escape "$DATA_DIR/logs/backup/launchd.out.log")"
-  xml_stderr="$(deploy_xml_escape "$DATA_DIR/logs/backup/launchd.err.log")"
+  xml_stdout="$(deploy_xml_escape "$PROGRAM_DIR/logs/launchd/backup.out.log")"
+  xml_stderr="$(deploy_xml_escape "$PROGRAM_DIR/logs/launchd/backup.err.log")"
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -340,6 +340,7 @@ run_doctor() {
   fi
   [[ -x "$POSTGRES_BIN_DIR/postgres" ]] && doctor_pass "PostgreSQL 可执行文件存在" || doctor_fail_check "PostgreSQL 可执行文件缺失"
   /usr/bin/sudo -u "$SERVICE_USER" test -r "$ENV_FILE" && doctor_pass "服务用户可读取配置" || doctor_fail_check "服务用户不能读取配置"
+  /usr/bin/sudo -u "$SERVICE_USER" test -w "$PROGRAM_DIR/logs/launchd" && doctor_pass "服务用户可写 launchd 日志目录" || doctor_fail_check "服务用户不能写 launchd 日志目录"
   /usr/bin/sudo -u "$SERVICE_USER" test -w "$DATA_DIR" && doctor_pass "服务用户可写数据目录" || doctor_fail_check "服务用户不能写数据目录"
   /usr/bin/sudo -u "$SERVICE_USER" test -w "$RAW_DATA_DIR" && doctor_pass "服务用户可写原始数据目录" || doctor_fail_check "服务用户不能写原始数据目录"
   if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then

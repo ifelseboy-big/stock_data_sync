@@ -170,6 +170,7 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0755 \
 install -d -o root -g wheel -m 0755 \
   "$PROGRAM_DIR/bin" "$PROGRAM_DIR/config" "$PROGRAM_DIR/config/launchd" \
   "$PROGRAM_DIR/source" "$PROGRAM_DIR/releases" "$PROGRAM_DIR/.build"
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0755 "$PROGRAM_DIR/logs/launchd"
 if [[ -n "$BACKUP_DIR" ]]; then
   install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$BACKUP_DIR"
 fi
