@@ -9,6 +9,8 @@ uv run uvicorn app.main:app --reload
 uv run python -m app.scheduler.runner
 ```
 
+生产环境设置 `WEB_DIST_DIR` 后，FastAPI 同一端口提供 Vue 构建文件和 SPA 路由；开发环境不设置该变量，Vue 继续由 Vite 独立运行。
+
 APScheduler 只允许启动一个实例。其持久化 JobStore 与业务运行记录均使用 PostgreSQL，
 不依赖 Redis。
 

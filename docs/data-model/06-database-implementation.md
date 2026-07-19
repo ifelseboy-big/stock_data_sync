@@ -1,15 +1,13 @@
-<!-- 来源：https://tcnq6fudd3wh.feishu.cn/docx/WoYqdWMeJoqcOtxUVJxccyjenTe；飞书修订版：88 -->
+# 数据库落地设计
 
-# 4. 数据库落地设计
-
-数据库沿用确认稿的31张表；25张业务表字段不变，系统运行表仅补充闭合状态机所必需的字段：collection_batch增加计划冻结信息，processing_task增加自动重试信息，processing_dependency增加多资产及数据集发布依赖信息。所有表继续使用默认schema，避免ORM、Alembic和跨schema外键复杂化。
+数据库采用本目录定义的 31 张表；25 张业务表保持已定义的字段，系统运行表补充闭合状态机所必需的字段：`collection_batch` 增加计划冻结信息，`processing_task` 增加自动重试信息，`processing_dependency` 增加多资产及数据集发布依赖信息。所有表使用默认 schema，避免 ORM、Alembic 和跨 schema 外键复杂化。
 
 | 数据库对象 | 落地规则 |
 |-|-|
-| 25张业务表 | 字段、类型、主外键、单位和NULL口径严格使用确认稿 |
+| 25张业务表 | 字段、类型、主外键、单位和 NULL 口径以本目录表定义为准 |
 | 6张系统运行表 | 作为批次、任务、资产、依赖和发布的唯一事实来源 |
 | 4张分区事实表 | stock_daily、stock_technical_daily、stock_moneyflow_daily、market_theme_member_daily按trade_date月分区 |
-| 其余表 | 普通表；仅建立确认稿列出的访问路径索引 |
+| 其余表 | 普通表；仅建立[全局约定](01-overview.md)定义的访问路径索引 |
 | APScheduler JobStore | 使用独立apscheduler_jobs表，只保存系统触发器，不保存业务任务结果 |
 
 **collection_batch必要字段修正。**批次必须证明最终计划已经完整生成，不能只根据“当前任务都已终态”关闭。最终阶段在同一事务内写完全部任务后冻结计划：
@@ -21,7 +19,7 @@ ALTER TABLE collection_batch
     ADD COLUMN planning_completed_at timestamptz NULL;
 ```
 
-**processing_task必要字段修正。**该表已有RETRY_WAIT状态，但确认稿缺少自动重试所需的次数和到期时间。必须补充以下3个字段，语义与collection_task一致；否则只能人工重试，无法满足已确认的加工重试流程。
+**processing_task 必要字段。**该表存在 `RETRY_WAIT` 状态，必须同时具备自动重试所需的次数和到期时间。以下 3 个字段与 `collection_task` 保持相同语义；缺少它们将无法执行自动重试。
 
 ```sql
 ALTER TABLE processing_task
@@ -76,4 +74,3 @@ WHERE resolved_release_process_id IS NOT NULL;
 **分区维护。**启动时和每日08:30检查四张分区表，至少预建当前月及未来3个月；历史回填先按请求区间建分区。分区缺失使对应加工任务进入BLOCKED并告警，禁止DEFAULT分区。大批量回填完成后对受影响分区执行ANALYZE；清理或重写后依据膨胀情况执行VACUUM，不在高峰期自动VACUUM FULL。
 
 **连接与权限。**迁移账号负责DDL，应用账号只具有DML和序列权限，查询消费者使用只读账号。API和Scheduler分别配置连接池，连接总数必须小于PostgreSQL max_connections的70%，为迁移、备份、内置状态查询和人工诊断保留余量。
-

@@ -1,9 +1,8 @@
 # 部署配置
 
-部署相关文件与业务源码分开存放：
+- `production/install.sh`：Mac mini 首次安装入口。
+- `production/bin/run-service`：`launchd` 使用的内部进程入口。
+- `production/bin/stock-data-sync`：统一的启动、停止、重启、状态和日志命令。
+- `../scripts/build-release.sh`：生成包含服务端源码、Vue 构建产物和安装器的发布包。
 
-- `local/compose.yaml`：仅用于本地启动 PostgreSQL。
-- `docker/`：后端、前端镜像和 Nginx 配置。
-- `production/`：单机安装器、生产 Compose 配置和服务管理命令。
-
-生产安装目录不在代码中预设，由用户首次安装时明确指定。完整流程见 [`docs/deployment.md`](../docs/deployment.md)。
+安装目录不在代码中预设，由用户首次安装时明确指定。完整流程见 [Mac mini 发布与部署](../docs/06-deployment.md)。

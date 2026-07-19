@@ -1,6 +1,4 @@
-<!-- 来源：https://tcnq6fudd3wh.feishu.cn/docx/NJXndRs7eoRq7KxWPQ0cCyycnPc；飞书修订版：78 -->
-
-# 1. 目标与最终范围
+# 数据范围与全局约定
 
 最终设计包含 **25 张业务数据表**和 **6 张系统运行表**。业务表服务研究、筛选和策略消费；系统运行表服务采集、重试、依赖、原始数据追溯和原子发布，两者用途不同。
 
@@ -13,9 +11,9 @@
 | ETF | etf、etf_daily、etf_share_size_daily | ETF主数据、日线、复权、份额和规模 |
 | 系统运行 | collection_batch、collection_task、raw_data_asset、processing_task、processing_dependency、dataset_release | 保证多接口合并数据完整、可重试、可追溯 |
 
-本稿明确不包含实时、分钟、周线、月线和财务报表接口。周/月线可由日线派生；股票名称历史等低频能力暂不进入最终核心表。DC题材、THS概念成员和涨跌停数据的历史范围限制在第11章单独声明。
+本期不包含实时、分钟、周线、月线和财务报表接口。周/月线可由日线派生；股票名称历史等低频能力暂不进入最终核心表。供应方数据覆盖边界见顶层[Tushare 采集设计](../03-tushare-collection.md)。
 
-# 2. 全局设计约定
+## 全局设计约定
 
 | 项目 | 最终口径 |
 |-|-|
@@ -32,7 +30,7 @@
 
 正式表的分区和索引按下述物理设计执行：4张大事实表按trade_date月分区，其余表保持普通表；索引只覆盖明确访问路径，不为每个字段机械建索引。所有外键只约束正式表，原始数据资产不设置业务外键，避免供应方异常数据无法留痕。
 
-## 2.1 物理分区设计
+### 物理分区设计
 
 分区只用于持续增长且补采、重算、清理均以交易日为边界的大事实表。依据[PostgreSQL 16声明式分区规则](https://www.postgresql.org/docs/16/ddl-partitioning.html)，采用trade_date月度RANGE分区；范围左闭右开，主键必须包含trade_date。其他表保持普通表，避免无收益的分区数量、DDL和查询规划成本。
 
@@ -61,7 +59,7 @@ FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
 
 四张分区表统一使用“表名_pYYYYMM”命名。系统启动和每日调度前检查分区，至少预建当前月及未来3个月；历史回填先创建覆盖区间的分区。禁止DEFAULT分区，分区缺失必须使加工任务BLOCKED并报警，不能把数据静默写入兜底分区。暂不设置自动删除历史分区，也不做按股票代码的二级分区。
 
-## 2.2 索引设计原则
+### 索引设计原则
 
 | 规则 | 最终口径 |
 |-|-|
@@ -73,7 +71,7 @@ FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
 | 技术指标 | MACD、RSI、KDJ等不逐字段建索引。单日筛选先通过trade_date缩小到约5500只股票，再扫描指标列。 |
 | BRIN | 当前月分区无需BRIN。只有未分区追加表达到较大规模且字段与物理写入顺序高度相关时再评估。 |
 
-### 2.2.1 分区事实表必建索引
+#### 分区事实表必建索引
 
 ```sql
 CREATE INDEX idx_stock_daily_trade_code
@@ -91,7 +89,7 @@ CREATE INDEX idx_theme_member_stock
 
 各表主键继续服务“单证券/单题材历史查询”；上述反向索引服务“单日全市场截面”和“某股票当日所属题材”查询。四个索引均在分区父表创建。
 
-### 2.2.2 概念、热榜、题材与龙虎榜索引
+#### 概念、热榜、题材与龙虎榜索引
 
 ```sql
 CREATE INDEX idx_concept_daily_trade_board
@@ -139,7 +137,7 @@ CREATE INDEX idx_ths_board_flow_day_amount
 
 stock_hot_rank_daily已有按日期和排名的唯一索引，stock_top_list_daily已有以trade_date开头的唯一索引，因此不重复创建同方向索引。GIN索引按PostgreSQL的[JSONB索引规则](https://www.postgresql.org/docs/16/datatype-json.html#JSON-INDEXING)支持concept标签存在和包含查询。
 
-### 2.2.3 股票、指数与ETF索引
+#### 股票、指数与 ETF 索引
 
 ```sql
 CREATE UNIQUE INDEX uq_stock_exchange_symbol
@@ -160,7 +158,7 @@ CREATE INDEX idx_etf_share_trade_code
 
 trade_calendar、stock_company、concept_board、market_index、index_daily_basic和etf的数据量较小，现有主键已覆盖主要访问路径，不额外建低收益索引。
 
-### 2.2.4 系统运行表索引
+#### 系统运行表索引
 
 ```sql
 CREATE UNIQUE INDEX uq_collection_batch_slot
@@ -216,7 +214,7 @@ CREATE INDEX idx_release_business_date
 
 运行表部分索引只覆盖少量活动状态，减少索引体积和状态更新开销。processing_task约定priority数值越小优先级越高，队列SQL固定使用ORDER BY priority, queued_at, process_id。所有部分索引的查询条件必须与调度SQL保持一致，否则PostgreSQL无法使用对应索引。
 
-## 2.3 分区与索引运维验收
+### 分区与索引运维验收
 
 | 环节 | 验收规则 |
 |-|-|
@@ -228,4 +226,3 @@ CREATE INDEX idx_release_business_date
 | 新增索引 | 必须对应已存在的慢查询或稳定查询模式，并在同等数据量下验证写入开销和查询收益。 |
 
 本设计不承诺“分区一定让所有查询更快”。分区的主要价值是日期裁剪、历史补采和批量维护；索引负责具体访问路径。两者必须通过真实SQL执行计划验收。
-

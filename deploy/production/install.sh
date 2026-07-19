@@ -3,27 +3,113 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-
 INSTALL_DIR=""
 HTTP_PORT=""
+HTTP_BIND="0.0.0.0"
+POSTGRES_PORT="5432"
+SERVICE_USER="${SUDO_USER:-}"
 START_AFTER_INSTALL=1
+PASSWORD_FILE=""
 
 fail() {
   printf '安装失败：%s\n' "$*" >&2
   exit 1
 }
 
+cleanup() {
+  if [[ -n "$PASSWORD_FILE" && -f "$PASSWORD_FILE" ]]; then
+    rm -f -- "$PASSWORD_FILE"
+  fi
+}
+trap cleanup EXIT
+
 usage() {
   cat <<'EOF'
 用法：sudo ./deploy/production/install.sh [选项]
 
 选项：
-  --install-dir PATH  安装目录，必填，不提供默认值
-  --http-port PORT    Web 访问端口，未传入时交互输入
-  --no-start          完成安装和镜像构建，但不启动服务
-  -h, --help          显示帮助
+  --install-dir PATH    安装目录，必填且不提供默认值
+  --http-port PORT      Web/API 访问端口，未传入时交互输入
+  --http-bind ADDRESS   监听地址，默认 0.0.0.0
+  --postgres-port PORT  PostgreSQL 本机端口，默认 5432
+  --service-user USER   运行服务的 macOS 用户，默认使用 sudo 发起用户
+  --no-start            完成安装但不启动服务
+  -h, --help            显示帮助
 
-也可以不传参数并按提示输入。安装目录输入为空时安装立即终止。
+安装目录输入为空时立即终止。数据库、原始数据、日志、备份、配置和应用环境
+全部位于用户指定的安装目录。
+EOF
+}
+
+validate_port() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$name 必须是数字"
+  (( value >= 1 && value <= 65535 )) || fail "$name 必须在 1-65535 之间"
+}
+
+find_executable() {
+  local name="$1"
+  local service_home="$2"
+  local candidate
+  for candidate in \
+    "$(command -v "$name" 2>/dev/null || true)" \
+    "$service_home/.local/bin/$name" \
+    "/opt/homebrew/bin/$name" \
+    "/usr/local/bin/$name"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  return 1
+}
+
+write_env_value() {
+  local key="$1"
+  local value="$2"
+  printf '%s=' "$key"
+  printf '%q' "$value"
+  printf '\n'
+}
+
+write_launchd_plist() {
+  local service="$1"
+  local label="com.stockdatasync.$service"
+  local plist="$INSTALL_DIR/config/launchd/$label.plist"
+  local stdout_log="$INSTALL_DIR/logs/$service/launchd.out.log"
+  local stderr_log="$INSTALL_DIR/logs/$service/launchd.err.log"
+
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$INSTALL_DIR/bin/run-service</string>
+    <string>$service</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$INSTALL_DIR</string>
+  <key>UserName</key>
+  <string>$SERVICE_USER</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$stdout_log</string>
+  <key>StandardErrorPath</key>
+  <string>$stderr_log</string>
+</dict>
+</plist>
 EOF
 }
 
@@ -37,6 +123,21 @@ while (( $# > 0 )); do
     --http-port)
       (( $# >= 2 )) || fail "--http-port 缺少端口"
       HTTP_PORT="$2"
+      shift 2
+      ;;
+    --http-bind)
+      (( $# >= 2 )) || fail "--http-bind 缺少地址"
+      HTTP_BIND="$2"
+      shift 2
+      ;;
+    --postgres-port)
+      (( $# >= 2 )) || fail "--postgres-port 缺少端口"
+      POSTGRES_PORT="$2"
+      shift 2
+      ;;
+    --service-user)
+      (( $# >= 2 )) || fail "--service-user 缺少用户名"
+      SERVICE_USER="$2"
       shift 2
       ;;
     --no-start)
@@ -53,7 +154,8 @@ while (( $# > 0 )); do
   esac
 done
 
-(( EUID == 0 )) || fail "请使用 sudo 或 root 用户执行安装"
+[[ "$(uname -s)" == "Darwin" ]] || fail "生产安装器仅支持 macOS"
+(( EUID == 0 )) || fail "请使用 sudo 执行安装"
 
 if [[ -z "$INSTALL_DIR" ]]; then
   [[ -t 0 ]] || fail "非交互安装必须传入 --install-dir"
@@ -66,10 +168,18 @@ fi
 
 if [[ -z "$HTTP_PORT" ]]; then
   [[ -t 0 ]] || fail "非交互安装必须传入 --http-port"
-  read -r -p "请输入 Web 访问端口（无默认值）: " HTTP_PORT
+  read -r -p "请输入 Web/API 访问端口（无默认值）: " HTTP_PORT
 fi
-[[ "$HTTP_PORT" =~ ^[0-9]+$ ]] || fail "Web 端口必须是数字"
-(( HTTP_PORT >= 1 && HTTP_PORT <= 65535 )) || fail "Web 端口必须在 1-65535 之间"
+validate_port "Web/API 端口" "$HTTP_PORT"
+validate_port "PostgreSQL 端口" "$POSTGRES_PORT"
+[[ "$HTTP_BIND" =~ ^[A-Za-z0-9.:_-]+$ ]] || fail "监听地址格式不正确"
+
+[[ -n "$SERVICE_USER" ]] || fail "无法确定服务用户，请传入 --service-user"
+[[ "$SERVICE_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "服务用户名格式不正确"
+id "$SERVICE_USER" >/dev/null 2>&1 || fail "服务用户不存在：$SERVICE_USER"
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+SERVICE_HOME="$(dscl . -read "/Users/$SERVICE_USER" NFSHomeDirectory | awk '{print $2}')"
+[[ -d "$SERVICE_HOME" ]] || fail "服务用户主目录不存在：$SERVICE_HOME"
 
 if [[ -d "$INSTALL_DIR" ]]; then
   shopt -s nullglob dotglob
@@ -78,12 +188,32 @@ if [[ -d "$INSTALL_DIR" ]]; then
   (( ${#existing_files[@]} == 0 )) || fail "安装目录不是空目录：$INSTALL_DIR"
 fi
 
-for required_command in docker openssl tar; do
-  command -v "$required_command" >/dev/null 2>&1 || fail "缺少命令：$required_command"
+for command_name in openssl tar plutil launchctl; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "缺少命令：$command_name"
 done
-docker compose version >/dev/null 2>&1 || fail "需要 Docker Compose v2"
+
+UV_BIN="$(find_executable uv "$SERVICE_HOME" || true)"
+[[ -n "$UV_BIN" ]] || fail "未安装 uv，请先执行：brew install uv"
+BREW_BIN="$(find_executable brew "$SERVICE_HOME" || true)"
+[[ -n "$BREW_BIN" ]] || fail "未安装 Homebrew"
+POSTGRES_PREFIX="$(/usr/bin/sudo -u "$SERVICE_USER" -H "$BREW_BIN" --prefix postgresql@16 2>/dev/null || true)"
+[[ -n "$POSTGRES_PREFIX" ]] || fail "未安装 PostgreSQL 16，请先执行：brew install postgresql@16"
+POSTGRES_BIN_DIR="$POSTGRES_PREFIX/bin"
+[[ -x "$POSTGRES_BIN_DIR/postgres" ]] || fail "未安装 PostgreSQL 16，请先执行：brew install postgresql@16"
+"$POSTGRES_BIN_DIR/postgres" --version | grep -q ' 16\.' || fail "必须使用 PostgreSQL 16"
+
 [[ -d "$PROJECT_ROOT/src/server" ]] || fail "发布包缺少 src/server"
-[[ -d "$PROJECT_ROOT/src/web" ]] || fail "发布包缺少 src/web"
+[[ -f "$PROJECT_ROOT/src/web/dist/index.html" ]] || fail "发布包缺少 Web 构建产物 src/web/dist"
+
+for label in com.stockdatasync.postgres com.stockdatasync.server com.stockdatasync.scheduler; do
+  launchctl print "system/$label" >/dev/null 2>&1 && fail "服务已经注册：$label"
+  [[ ! -e "/Library/LaunchDaemons/$label.plist" ]] || fail "launchd 配置已经存在：$label"
+done
+
+if command -v lsof >/dev/null 2>&1; then
+  lsof -nP -iTCP:"$HTTP_PORT" -sTCP:LISTEN >/dev/null 2>&1 && fail "Web/API 端口已被占用：$HTTP_PORT"
+  lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >/dev/null 2>&1 && fail "PostgreSQL 端口已被占用：$POSTGRES_PORT"
+fi
 
 TUSHARE_VALUE="${TUSHARE_TOKEN:-}"
 if [[ -z "$TUSHARE_VALUE" && -t 0 ]]; then
@@ -93,6 +223,7 @@ fi
 [[ "$TUSHARE_VALUE" != *$'\n'* ]] || fail "Tushare Token 不能包含换行"
 
 POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+ADMIN_API_TOKEN="$(openssl rand -hex 32)"
 if [[ -f "$PROJECT_ROOT/VERSION" ]]; then
   APP_VERSION="$(tr -d '[:space:]' < "$PROJECT_ROOT/VERSION")"
 else
@@ -101,75 +232,108 @@ fi
 [[ "$APP_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || fail "发布版本号格式不正确"
 
 install -d -m 0755 \
-  "$INSTALL_DIR/app" \
+  "$INSTALL_DIR/app/server" \
+  "$INSTALL_DIR/app/web" \
+  "$INSTALL_DIR/backups" \
   "$INSTALL_DIR/bin" \
-  "$INSTALL_DIR/config" \
+  "$INSTALL_DIR/config/launchd" \
   "$INSTALL_DIR/data/postgres" \
-  "$INSTALL_DIR/logs/server" \
-  "$INSTALL_DIR/logs/scheduler" \
-  "$INSTALL_DIR/logs/nginx" \
+  "$INSTALL_DIR/data/raw" \
   "$INSTALL_DIR/logs/postgres" \
-  "$INSTALL_DIR/backups"
+  "$INSTALL_DIR/logs/scheduler" \
+  "$INSTALL_DIR/logs/server"
 
-tar -C "$PROJECT_ROOT" \
-  --exclude='src/server/.venv' \
-  --exclude='src/server/.pytest_cache' \
-  --exclude='src/server/.ruff_cache' \
-  --exclude='src/server/.mypy_cache' \
-  --exclude='src/server/**/__pycache__' \
-  --exclude='src/server/tests' \
-  --exclude='src/web/node_modules' \
-  --exclude='src/web/dist' \
-  --exclude='src/web/.vite' \
-  --exclude='src/web/coverage' \
-  -cf - src/server src/web deploy/docker \
-  | tar -C "$INSTALL_DIR/app" -xf -
+tar -C "$PROJECT_ROOT/src/server" \
+  --exclude='.venv' \
+  --exclude='.pytest_cache' \
+  --exclude='.ruff_cache' \
+  --exclude='.mypy_cache' \
+  --exclude='**/__pycache__' \
+  --exclude='tests' \
+  -cf - . \
+  | tar -C "$INSTALL_DIR/app/server" -xf -
+tar -C "$PROJECT_ROOT/src/web/dist" -cf - . | tar -C "$INSTALL_DIR/app/web" -xf -
 
-install -m 0644 "$SCRIPT_DIR/compose.yaml" "$INSTALL_DIR/compose.yaml"
 install -m 0755 "$SCRIPT_DIR/bin/stock-data-sync" "$INSTALL_DIR/bin/stock-data-sync"
-install -m 0644 "$PROJECT_ROOT/deploy/docker/app.dockerignore" "$INSTALL_DIR/app/.dockerignore"
+install -m 0755 "$SCRIPT_DIR/bin/run-service" "$INSTALL_DIR/bin/run-service"
 
 umask 077
 {
-  printf 'INSTALL_DIR=%s\n' "$INSTALL_DIR"
-  printf 'APP_VERSION=%s\n' "$APP_VERSION"
-  printf 'HTTP_BIND=0.0.0.0\n'
-  printf 'HTTP_PORT=%s\n' "$HTTP_PORT"
-  printf 'POSTGRES_DB=stock_data_sync\n'
-  printf 'POSTGRES_USER=stock_sync\n'
-  printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD"
-  printf 'TUSHARE_TOKEN=%s\n' "$TUSHARE_VALUE"
-  printf 'TUSHARE_REQUEST_LIMIT_PER_MINUTE=500\n'
-  printf 'TUSHARE_REQUEST_BUDGET_PER_MINUTE=480\n'
-  printf 'TUSHARE_TIMEOUT_SECONDS=30\n'
-  printf 'TUSHARE_MAX_ATTEMPTS=3\n'
-  printf 'TUSHARE_RETRY_WAIT_SECONDS=2\n'
-  printf 'SCHEDULER_TIMEZONE=Asia/Shanghai\n'
-  printf 'SCHEDULER_JOBSTORE_TABLE=apscheduler_jobs\n'
-  printf 'SCHEDULER_ADVISORY_LOCK_ID=731500001\n'
-  printf 'SCHEDULER_MAX_WORKERS=4\n'
-  printf 'SCHEDULER_POLL_SECONDS=30\n'
-  printf 'APP_LOG_MAX_BYTES=52428800\n'
-  printf 'APP_LOG_BACKUP_COUNT=10\n'
+  write_env_value INSTALL_DIR "$INSTALL_DIR"
+  write_env_value APP_VERSION "$APP_VERSION"
+  write_env_value SERVICE_USER "$SERVICE_USER"
+  write_env_value APP_ENV production
+  write_env_value APP_NAME "Stock Data Sync"
+  write_env_value APP_DEBUG false
+  write_env_value APP_API_PREFIX /api/v1
+  write_env_value APP_CORS_ORIGINS '[]'
+  write_env_value APP_LOG_MAX_BYTES 52428800
+  write_env_value APP_LOG_BACKUP_COUNT 10
+  write_env_value HTTP_BIND "$HTTP_BIND"
+  write_env_value HTTP_PORT "$HTTP_PORT"
+  write_env_value POSTGRES_BIN_DIR "$POSTGRES_BIN_DIR"
+  write_env_value POSTGRES_PORT "$POSTGRES_PORT"
+  write_env_value POSTGRES_DB stock_data_sync
+  write_env_value POSTGRES_USER stock_sync
+  write_env_value POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
+  write_env_value DATABASE_URL "postgresql+psycopg://stock_sync:$POSTGRES_PASSWORD@127.0.0.1:$POSTGRES_PORT/stock_data_sync"
+  write_env_value RAW_DATA_DIR "$INSTALL_DIR/data/raw"
+  write_env_value WEB_DIST_DIR "$INSTALL_DIR/app/web"
+  write_env_value TUSHARE_TOKEN "$TUSHARE_VALUE"
+  write_env_value ADMIN_API_TOKEN "$ADMIN_API_TOKEN"
+  write_env_value TUSHARE_REQUEST_LIMIT_PER_MINUTE 500
+  write_env_value TUSHARE_REQUEST_BUDGET_PER_MINUTE 480
+  write_env_value TUSHARE_TIMEOUT_SECONDS 30
+  write_env_value TUSHARE_MAX_ATTEMPTS 3
+  write_env_value TUSHARE_RETRY_WAIT_SECONDS 2
+  write_env_value SCHEDULER_TIMEZONE Asia/Shanghai
+  write_env_value SCHEDULER_JOBSTORE_TABLE apscheduler_jobs
+  write_env_value SCHEDULER_ADVISORY_LOCK_ID 731500001
+  write_env_value SCHEDULER_MAX_WORKERS 4
+  write_env_value SCHEDULER_POLL_SECONDS 30
 } > "$INSTALL_DIR/config/app.env"
+
+chown root:wheel "$INSTALL_DIR"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" \
+  "$INSTALL_DIR/app" \
+  "$INSTALL_DIR/backups" \
+  "$INSTALL_DIR/data" \
+  "$INSTALL_DIR/logs"
+chown -R root:wheel "$INSTALL_DIR/bin" "$INSTALL_DIR/config"
 chmod 0600 "$INSTALL_DIR/config/app.env"
+chmod +a "$SERVICE_USER allow read" "$INSTALL_DIR/config/app.env"
 
-COMPOSE=(
-  docker compose
-  --project-directory "$INSTALL_DIR"
-  --env-file "$INSTALL_DIR/config/app.env"
-  -f "$INSTALL_DIR/compose.yaml"
-)
+/usr/bin/sudo -u "$SERVICE_USER" -H \
+  "$UV_BIN" --directory "$INSTALL_DIR/app/server" sync \
+  --frozen --no-dev --no-install-project
 
-"${COMPOSE[@]}" config >/dev/null
-"${COMPOSE[@]}" pull postgres
+PASSWORD_FILE="$INSTALL_DIR/config/.postgres-password"
+printf '%s\n' "$POSTGRES_PASSWORD" > "$PASSWORD_FILE"
+chown "$SERVICE_USER:$SERVICE_GROUP" "$PASSWORD_FILE"
+chmod 0600 "$PASSWORD_FILE"
+/usr/bin/sudo -u "$SERVICE_USER" -H \
+  "$POSTGRES_BIN_DIR/initdb" \
+  --pgdata="$INSTALL_DIR/data/postgres" \
+  --encoding=UTF8 \
+  --username=stock_sync \
+  --pwfile="$PASSWORD_FILE" \
+  --auth-local=scram-sha-256 \
+  --auth-host=scram-sha-256
+rm -f -- "$PASSWORD_FILE"
+PASSWORD_FILE=""
 
-POSTGRES_UID="$(docker run --rm --entrypoint sh postgres:16-alpine -c 'id -u postgres')"
-POSTGRES_GID="$(docker run --rm --entrypoint sh postgres:16-alpine -c 'id -g postgres')"
-chown -R "$POSTGRES_UID:$POSTGRES_GID" "$INSTALL_DIR/data/postgres" "$INSTALL_DIR/logs/postgres"
-chown -R 10001:10001 "$INSTALL_DIR/logs/server" "$INSTALL_DIR/logs/scheduler"
+write_launchd_plist postgres
+write_launchd_plist server
+write_launchd_plist scheduler
+chown -R root:wheel "$INSTALL_DIR/config/launchd"
+chmod 0644 "$INSTALL_DIR/config/launchd"/*.plist
+plutil -lint "$INSTALL_DIR/config/launchd"/*.plist >/dev/null
 
-"${COMPOSE[@]}" build --pull server web
+for service in postgres server scheduler; do
+  install -o root -g wheel -m 0644 \
+    "$INSTALL_DIR/config/launchd/com.stockdatasync.$service.plist" \
+    "/Library/LaunchDaemons/com.stockdatasync.$service.plist"
+done
 
 if (( START_AFTER_INSTALL == 1 )); then
   "$INSTALL_DIR/bin/stock-data-sync" start
@@ -177,5 +341,6 @@ fi
 
 printf '\n安装完成。\n'
 printf '安装目录：%s\n' "$INSTALL_DIR"
-printf '管理命令：%s/bin/stock-data-sync\n' "$INSTALL_DIR"
-printf '服务地址：http://<服务器IP>:%s\n' "$HTTP_PORT"
+printf '服务用户：%s\n' "$SERVICE_USER"
+printf '管理命令：sudo %s/bin/stock-data-sync\n' "$INSTALL_DIR"
+printf '访问地址：http://<Mac-mini-IP>:%s\n' "$HTTP_PORT"

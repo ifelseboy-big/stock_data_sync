@@ -1,10 +1,4 @@
-.PHONY: db-up db-down server-install server-dev scheduler-dev server-check web-install web-dev web-check check release
-
-db-up:
-	docker compose --env-file .env -f deploy/local/compose.yaml up -d postgres
-
-db-down:
-	docker compose --env-file .env -f deploy/local/compose.yaml down
+.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check release
 
 server-install:
 	cd src/server && uv sync --all-groups

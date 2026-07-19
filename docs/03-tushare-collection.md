@@ -1,0 +1,163 @@
+# Tushare 采集设计
+
+## 1. 职责边界
+
+```text
+阶段计划器
+   ↓ 根据 ApiSpec 展开范围
+collection_task
+   ↓
+TushareProvider：字段选择、限流、超时、物理请求重试和指标
+   ↓
+Tushare API
+   ↓
+完整性检查与 Parquet 原子封存
+```
+
+采集任务只表达接口、请求范围和完整性要求。限流、超时和物理请求重试统一位于 `integrations` 的 Provider 层；跨接口关联、单位换算和正式表写入属于加工层。
+
+每个接口通过 `ApiSpec` 集中声明，不能把接口规则散落在 APScheduler job 中：
+
+| 属性 | 含义 |
+| --- | --- |
+| `api_name`、`provider` | 接口名和供应方 |
+| `fields` | 明确请求的源字段及顺序，用于结构指纹 |
+| `schedule_group` | MASTER、DAILY、HOT、DELAYED 或 BACKFILL |
+| `scope_builder` | 根据日期、证券、板块、题材、指数或月份生成请求范围 |
+| `split_policy`、`row_limit` | 拆分、分页和疑似截断处理 |
+| `empty_policy` | ALLOWED、RETRY_UNTIL_CUTOFF、FORBIDDEN 或 UNSUPPORTED |
+| `retry_policy` | 尝试次数、退避、截止时间和错误分类 |
+| `date_extractor` | 返回数据的业务日期校验 |
+
+## 2. 限流策略
+
+1. Tushare 账户硬限制按 500 次/分钟配置，应用默认预算为 480 次/分钟，保留安全余量。
+2. 采用平滑限流，每约 125ms 释放一个全局请求槽，不在分钟边界突发发送。
+3. Scheduler 最多同时运行 4 个采集任务；所有线程和 Provider 实例共享同一个进程级额度。
+4. `ApiSpec` 可以声明更低的接口预算和日配额，每个物理请求必须同时取得全局及接口请求槽。
+5. Scheduler 使用 PostgreSQL advisory lock 保证单实例，避免多个进程分别计算 480 次预算。
+6. 手工补采、历史回填和自动任务使用同一数据库队列及同一额度，Web API 不直接调用 Tushare。
+
+当前限流器以单 Scheduler 进程为边界。如果以后部署多个执行节点，必须改为 PostgreSQL 全局配额或专用分布式限流方案，不能直接增加实例。
+
+## 3. 超时与两级重试
+
+物理请求层处理连接超时、临时网络错误和供应方 5xx。单次请求默认超时 30 秒，最多尝试 3 次，使用指数退避和随机抖动；每次重试都必须重新申请请求额度。
+
+任务层处理“数据尚未发布”等跨分钟或跨阶段问题。任务进入 `RETRY_WAIT` 并持久化下次时间，不占用采集线程。Token 失效、权限不足、参数错误、未知字段或结构变化属于不可恢复错误，直接失败并告警。
+
+这两级不能混用：短暂网络抖动不创建新的业务任务；业务数据未就绪不能在 Provider 内长时间阻塞。
+
+## 4. 完整性与原始资产
+
+HTTP 200 不代表采集成功。每个任务必须校验字段集合和顺序、业务日期、代码范围、自然键重复、分页连续性和返回行数。返回行数等于接口上限时一律视为疑似截断，继续拆分或分页；无法证明完整时不能进入成功状态。
+
+空结果按接口和业务日期判定：合法空结果封存零行 Parquet 并记为 `EMPTY_VALID`；按规则应有数据但为空时进入任务重试；超出供应方覆盖范围记为 `UNSUPPORTED`，不能伪装成正常空数据。
+
+成功任务必须先完成 Parquet 文件写入、`fsync`、哈希与结构校验、原子改名，再在短数据库事务中登记 `raw_data_asset` 和更新任务状态。字段变化时可以保留原始文件用于排查，但不能将资产解析为 READY。
+
+## 5. 幂等和禁止事项
+
+`scope_key` 必须可读、稳定并唯一表达本次范围；同一批次通过 `(batch_id, api_name, scope_key)` 防止重复任务。分页或拆分结果最终合并为该任务唯一的原始资产。
+
+采集任务不得写正式业务表、执行跨接口 Join、计算技术指标、换算单位，或因为请求成功直接判定任务成功。API 请求线程不得同步等待补采或回填完成。
+
+## 6. 观测口径
+
+指标必须区分物理请求耗时、逻辑查询总耗时、限流等待、重试次数、空结果和物理请求成功率。接口耗时不包含限流器排队时间；任务耗时单独记录从领取到封存终态的墙钟时间。
+
+## 7. 接口与数据集依赖
+
+接口依赖分为采集范围依赖和正式加工依赖。主数据已经存在后，同一批次的原始接口可以并行采集；正式加工必须等待所有必要资产就绪。
+
+| 输出数据集 | 必需原始接口 | 主数据或加工依赖 | 发布规则 |
+| --- | --- | --- | --- |
+| `stock` | `stock_basic`：L/D/P/G，按交易所拆分 | 无 | 完整集合合并后发布 |
+| `stock_company` | `stock_company` | `stock` | 只接受 `stock` 中存在的代码 |
+| `stock_daily.core` | `daily`、`daily_basic`、`adj_factor` | `stock`、`trade_calendar` | 三个资产全部 READY 后原子发布 |
+| `stock_daily.limit` | `stk_limit` | 已发布的 `stock_daily.core`、`stock` | 只补充 `up_limit`、`down_limit` |
+| `stock_technical_daily` | `stk_factor` | `stock`；`stock_daily` 只做核对 | 保持 Tushare 历史快照语义 |
+| `stock_moneyflow_daily` | `moneyflow` | `stock`、`trade_calendar` | 按交易日发布 |
+| `ths_board_moneyflow_daily` | `moneyflow_cnt_ths`、`moneyflow_ind_ths` | `trade_calendar`；与 `concept_board` 核对 | 两个接口可并行，分别按 `board_type` 发布 |
+| `concept_board` | `ths_index` | 无 | 筛选 `exchange=A`、`type=N` |
+| `concept_board_daily` | `ths_daily` | `concept_board` | 代码不存在时阻塞，不静默丢弃 |
+| `concept_board_member` | `ths_member`，按板块完整获取 | `concept_board`、`stock` | 只发布 `is_new=Y` 当前快照，按板块完整替换 |
+| `stock_hot_rank_daily` | `ths_hot`、`dc_hot`，`is_new=Y` | `stock`、`trade_calendar` | 22:30 最终批次单独发布 |
+| `market_theme_daily` | `dc_concept` | `trade_calendar` | 按交易日发布 |
+| `market_theme_member_daily` | `dc_concept_cons` | `market_theme_daily`、`stock` | 加工时先保证父题材存在 |
+| 龙虎榜 | `top_list`、`top_inst` | `stock`、`trade_calendar` | 两个正式表分别按交易日原子替换 |
+| 涨跌停与连板 | `limit_list_d`、`limit_step` | `stock`、`trade_calendar` | 分别发布，不互相推导 |
+| `market_index_daily` | `index_daily` | `market_index`、目标指数配置 | 按指数代码获取 |
+| `index_daily_basic` | `index_dailybasic` | `market_index` | 仅发布官方支持指数 |
+| `market_index_weight` | `index_weight` | `market_index`、`stock` | 按指数、月份发布快照 |
+| `etf_daily` | `fund_daily`、`fund_adj` | `etf`、`trade_calendar` | 只保留 `etf` 主表代码 |
+| `etf_share_size_daily` | `etf_share_size` | `etf`、目标交易日 D | D+1 独立发布，不阻塞 `etf_daily` |
+
+如果以后本地计算 MACD 等指标，应新增本地计算数据集，其依赖为完整 `stock_daily` 历史、计算规则版本和复权锚点，不能覆盖直接同步的 `stock_technical_daily`。
+
+## 8. 每日调用时间线
+
+时间均为 `Asia/Shanghai`。官方未明确发布时间的接口，以建议触发时刻配合空结果重试和补采机制吸收延迟。
+
+| 时间 | 流程 | 关键规则 |
+| --- | --- | --- |
+| 系统启动或每月 | 检查本地 `trade_calendar` 是否覆盖当前年份和下一年份 | 日常接口只查本地日历 |
+| 每日 08:45 | 处理 `etf_share_size(D-1)` 及延迟补采；交易日采集 `stk_limit(D)` | ETF 份额即使休市也要执行 |
+| 交易日 09:25 | 采集 `adj_factor(D)` | 原始资产先落地，正式 `stock_daily` 等待盘后接口 |
+| 交易日 16:10 | 创建 DAILY 批次，采集 `daily`、`fund_daily` 和配置内指数行情 | 空结果不能立即视为成功 |
+| 交易日 17:30 | 采集 `daily_basic`、`moneyflow`、`fund_adj`、指数基本指标、龙虎榜、涨跌停、连板、停复牌、概念行情和板块资金 | 使用延迟重试处理供应方未完成发布 |
+| 交易日 19:00 | 采集 `stk_factor`、`dc_concept`、`dc_concept_cons`，刷新 `ths_member` 完整快照 | 按板块或题材拆分范围 |
+| 批次任务全部终态 | 关闭批次、封存资产、解析依赖并生成加工计划 | 允许部分失败关闭；缺失依赖的加工任务进入 BLOCKED |
+| 加工阶段 | 从全局串行入口逐个加工并发布 | 加工失败重试不再调用 Tushare |
+| 交易日 22:35 | 创建 HOT 批次，调用 `ths_hot`、`dc_hot` | 只发布 `is_new=Y` 的 22:30 最终版本 |
+| 次日 08:45 起 | 继续检查 `etf_share_size(D)` 和海外 ETF 延迟数据 | 创建 DELAYED 或 REPAIR 批次，不重新打开原批次 |
+
+休市日跳过当日 A 股行情、题材、龙虎榜和热榜批次，但仍执行交易日历补全、主数据刷新、上一交易日延迟数据、自动补采和人工历史回填。
+
+历史回填先由本地 `trade_calendar` 枚举开市日，再按业务日期创建 BACKFILL 批次。不同数据集起始日期不同，超出供应方覆盖范围的日期记为 `UNSUPPORTED`，不能记为空数据成功。
+
+## 9. 接口拆分规则
+
+| 接口类型 | 拆分策略 |
+| --- | --- |
+| `stock_basic`、`etf_basic` | 按 `list_status` 和 `exchange` 拆分，合并后去重并核对状态集合 |
+| `daily`、`daily_basic`、`adj_factor`、`moneyflow` | 优先按交易日获取全市场；达到或接近上限时按股票主数据拆分代码范围 |
+| `stk_limit` | 达到 5800 行上限时按目标股票代码拆分，不能先截断再过滤 |
+| `ths_member` | 先取得概念板块代码，再逐板块采集并完整发布当前成员快照 |
+| `dc_concept_cons` | 按 `theme_code` 拆分，不能用单次 3000 行结果覆盖全市场 |
+| `index_daily`、`index_weight` | 按配置内 `index_code` 获取；权重按指数和月份获取 |
+| `fund_adj` | 使用 `offset/limit` 分页或按 ETF 代码分批，再与 ETF 主表核对 |
+| 热榜 | 按 `source`、`market_type`、`rank_type` 拆分，只接收 `is_new=Y` 最终版本 |
+
+## 10. 跨接口校验
+
+| 校验 | 处理 |
+| --- | --- |
+| `daily.close` 与 `daily_basic.close` | 允许精度差，不允许实质冲突；冲突时阻塞 `stock_daily` 发布 |
+| `daily.pre_close` 与 `stk_limit.pre_close` | 只核对，不重复存列 |
+| `fund_daily` 代码 | 只允许 ETF 主表中存在的代码进入 `etf_daily` |
+| 题材和概念成员代码 | 必须存在于包含 L/D/P/G 的股票主表，否则先刷新主数据 |
+| 热榜排名 | 同一榜单 `rank` 唯一且为正整数，`rank_time` 必须属于最终批次 |
+| 成交量和金额 | 换算前后保留任务级统计，抽样反算必须与源值一致 |
+
+## 11. 供应方能力边界
+
+| 接口或数据集 | 明确边界 | 系统处理 |
+| --- | --- | --- |
+| `ths_member` | `weight`、`in_date`、`out_date` 当前不可用 | 只表达当前观察快照，不生成真实成员有效期 |
+| `dc_concept`、`dc_concept_cons` | 数据从 2026-02-03 开始 | 更早日期标记 `UNSUPPORTED` |
+| `limit_list_d` | 数据从 2020 年开始且不含 ST 股票 | 不能作为全量涨跌停历史真值 |
+| `limit_list_d` 金额和市值 | 官方未明确五个字段单位 | 以 `_raw` 字段保存，验证前不进入统一金额计算 |
+| `index_weight` | 官方定义为月度数据 | 使用 `snapshot_date`，不解释为每日生效权重 |
+| `index_dailybasic` | 只覆盖官方列出的少数大盘指数 | 与指数行情并存，不能替代指数行情 |
+| `index_daily` | 不覆盖申万指数 | 指数主表范围与可用行情范围分别管理 |
+| `stk_factor` | 历史前复权为历史当日快照 | 保留源快照语义，本地动态复权另建数据集 |
+| `daily.ah_vol`、`daily.ah_amount` | 2026-07-06 起有数据 | 此前保持 `NULL` |
+| `trade_cal` | 公开参数明确支持 SSE、SZSE，未明确 BSE | A 股日流程以本地 SSE 日历为统一门禁 |
+| `etf_basic.mgt_fee` | 官方未明确数值单位 | 保存原值并标记待验证，不参与费率计算 |
+
+按当前接口范围，生产账号需要至少 8000 积分档，主要门槛来自 ETF 基础与份额规模、DC 热榜和连板等接口；上线前仍需按账号实际权限复核。权限不足属于不可恢复错误，任务直接失败并告警。
+
+## 12. 当前实施状态
+
+表结构、接口范围、请求策略和任务语义已经确定。交易日门禁、完整采集批次、依赖解析、22:30 热榜和 D+1 补录尚未全部实现；后续实现必须落在独立的 `acquisition` 与 `processing` 模块，不能继续扩展过渡性的通用 `tasking` 模块。

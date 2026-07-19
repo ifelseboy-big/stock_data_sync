@@ -3,48 +3,176 @@ set -Eeuo pipefail
 
 BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
-COMPOSE_FILE="$INSTALL_DIR/compose.yaml"
 ENV_FILE="$INSTALL_DIR/config/app.env"
+PLIST_DIR="/Library/LaunchDaemons"
 
 fail() {
   printf '错误：%s\n' "$*" >&2
   exit 1
 }
 
-require_installation() {
-  command -v docker >/dev/null 2>&1 || fail "未安装 Docker"
-  docker compose version >/dev/null 2>&1 || fail "未安装 Docker Compose v2"
-  [[ -f "$COMPOSE_FILE" ]] || fail "缺少 $COMPOSE_FILE"
-  [[ -f "$ENV_FILE" ]] || fail "缺少 $ENV_FILE"
+require_root() {
+  (( EUID == 0 )) || fail "请使用 sudo 执行服务管理命令"
 }
 
-compose() {
-  docker compose \
-    --project-directory "$INSTALL_DIR" \
-    --env-file "$ENV_FILE" \
-    -f "$COMPOSE_FILE" \
-    "$@"
+require_installation() {
+  [[ "$(uname -s)" == "Darwin" ]] || fail "生产服务管理仅支持 macOS"
+  [[ -f "$ENV_FILE" ]] || fail "缺少 $ENV_FILE"
+  [[ -x "$BIN_DIR/run-service" ]] || fail "缺少 $BIN_DIR/run-service"
+}
+
+load_environment() {
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  export PGPASSWORD="$POSTGRES_PASSWORD"
+}
+
+label_for() {
+  case "$1" in
+    postgres) printf 'com.stockdatasync.postgres\n' ;;
+    server|web) printf 'com.stockdatasync.server\n' ;;
+    scheduler) printf 'com.stockdatasync.scheduler\n' ;;
+    *) fail "不支持的服务：$1" ;;
+  esac
+}
+
+canonical_service() {
+  [[ "$1" == "web" ]] && printf 'server\n' || printf '%s\n' "$1"
+}
+
+plist_for() {
+  printf '%s/%s.plist\n' "$PLIST_DIR" "$(label_for "$1")"
+}
+
+is_loaded() {
+  launchctl print "system/$(label_for "$1")" >/dev/null 2>&1
+}
+
+bootstrap_service() {
+  local service="$1"
+  local plist
+  plist="$(plist_for "$service")"
+  [[ -f "$plist" ]] || fail "缺少 launchd 配置：$plist"
+  if ! is_loaded "$service"; then
+    launchctl bootstrap system "$plist"
+  fi
+}
+
+stop_service() {
+  local service="$1"
+  if is_loaded "$service"; then
+    launchctl bootout "system/$(label_for "$service")"
+  fi
+}
+
+wait_for_postgres() {
+  local attempt
+  for attempt in {1..30}; do
+    if "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+  fail "PostgreSQL 启动超时，请检查 $INSTALL_DIR/logs/postgres"
+}
+
+ensure_database() {
+  local exists
+  exists="$(
+    "$POSTGRES_BIN_DIR/psql" \
+      -h 127.0.0.1 \
+      -p "$POSTGRES_PORT" \
+      -U "$POSTGRES_USER" \
+      -d postgres \
+      -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB'"
+  )"
+  if [[ "$exists" != "1" ]]; then
+    "$POSTGRES_BIN_DIR/createdb" \
+      -h 127.0.0.1 \
+      -p "$POSTGRES_PORT" \
+      -U "$POSTGRES_USER" \
+      -O "$POSTGRES_USER" \
+      "$POSTGRES_DB"
+  fi
+}
+
+run_migrations() {
+  /usr/bin/sudo -u "$SERVICE_USER" -H "$BIN_DIR/run-service" migrate
+}
+
+start_all() {
+  bootstrap_service postgres
+  wait_for_postgres
+  ensure_database
+  run_migrations
+  bootstrap_service server
+  bootstrap_service scheduler
+}
+
+start_selected() {
+  local requested="$1"
+  local service
+  service="$(canonical_service "$requested")"
+  if [[ "$service" == "postgres" ]]; then
+    bootstrap_service postgres
+    wait_for_postgres
+    ensure_database
+    return
+  fi
+  bootstrap_service postgres
+  wait_for_postgres
+  ensure_database
+  run_migrations
+  bootstrap_service "$service"
+}
+
+print_service_status() {
+  local service="$1"
+  local label
+  local pid
+  label="$(label_for "$service")"
+  if is_loaded "$service"; then
+    pid="$(launchctl print "system/$label" | awk '/pid =/ {print $3; exit}')"
+    printf '%-10s 运行中%s\n' "$service" "${pid:+ (PID $pid)}"
+  else
+    printf '%-10s 已停止\n' "$service"
+  fi
+}
+
+show_logs() {
+  local service="$1"
+  case "$service" in
+    postgres) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/postgres/*.log ;;
+    server|web) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/server/*.log ;;
+    scheduler) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/scheduler/*.log ;;
+    *) fail "不支持的服务：$service" ;;
+  esac
 }
 
 usage() {
   cat <<'EOF'
-用法：stock-data-sync <command> [service...]
+用法：sudo stock-data-sync <command> [service...]
 
 命令：
   start [service...]    启动全部服务或指定服务
   stop [service...]     停止全部服务或指定服务
   restart [service...]  重启全部服务或指定服务
-  status                查看服务状态
-  logs [service...]     持续查看最近日志
+  status                查看 PostgreSQL、API/Web 和 Scheduler 状态
+  logs [service]        持续查看指定服务日志
   migrate               执行数据库迁移
-  build                 重新构建应用镜像
-  config                校验并显示最终部署配置
+  doctor                检查安装目录和运行依赖
+  config                显示非敏感部署配置
 
-服务名：postgres、server、scheduler、web
+服务名：postgres、server、scheduler；web 是 server 的别名。
 EOF
 }
 
+require_root
 require_installation
+load_environment
+
 command_name="${1:-}"
 [[ -n "$command_name" ]] || {
   usage
@@ -54,42 +182,67 @@ shift
 
 case "$command_name" in
   start)
-    if (( $# > 0 )); then
-      compose up -d "$@"
+    if (( $# == 0 )); then
+      start_all
     else
-      compose up -d postgres
-      compose run --rm migrate
-      compose up -d server scheduler web
+      for service in "$@"; do
+        start_selected "$service"
+      done
     fi
     ;;
   stop)
-    compose stop "$@"
+    if (( $# == 0 )); then
+      stop_service scheduler
+      stop_service server
+      stop_service postgres
+    else
+      for service in "$@"; do
+        stop_service "$(canonical_service "$service")"
+      done
+    fi
     ;;
   restart)
-    if (( $# > 0 )); then
-      compose restart "$@"
+    if (( $# == 0 )); then
+      stop_service scheduler
+      stop_service server
+      stop_service postgres
+      start_all
     else
-      compose stop
-      compose up -d postgres
-      compose run --rm migrate
-      compose up -d server scheduler web
+      for service in "$@"; do
+        canonical="$(canonical_service "$service")"
+        stop_service "$canonical"
+        start_selected "$canonical"
+      done
     fi
     ;;
   status)
-    compose ps
+    print_service_status postgres
+    print_service_status server
+    print_service_status scheduler
     ;;
   logs)
-    compose logs --follow --tail "${LOG_TAIL_LINES:-200}" "$@"
+    show_logs "${1:-server}"
     ;;
   migrate)
-    compose up -d postgres
-    compose run --rm migrate
+    bootstrap_service postgres
+    wait_for_postgres
+    ensure_database
+    run_migrations
     ;;
-  build)
-    compose build --pull server web
+  doctor)
+    [[ -d "$INSTALL_DIR/app/server/.venv" ]] || fail "服务端虚拟环境不存在"
+    [[ -f "$INSTALL_DIR/app/web/index.html" ]] || fail "Web 构建产物不存在"
+    [[ -x "$POSTGRES_BIN_DIR/postgres" ]] || fail "PostgreSQL 可执行文件不存在"
+    [[ -d "$RAW_DATA_DIR" && -w "$RAW_DATA_DIR" ]] || fail "原始数据目录不可写"
+    plutil -lint "$(plist_for postgres)" "$(plist_for server)" "$(plist_for scheduler)"
+    printf '安装检查通过\n'
     ;;
   config)
-    compose config
+    printf '安装目录：%s\n' "$INSTALL_DIR"
+    printf '服务用户：%s\n' "$SERVICE_USER"
+    printf '访问地址：http://%s:%s\n' "$HTTP_BIND" "$HTTP_PORT"
+    printf 'PostgreSQL：127.0.0.1:%s/%s\n' "$POSTGRES_PORT" "$POSTGRES_DB"
+    printf '原始数据：%s\n' "$RAW_DATA_DIR"
     ;;
   help|-h|--help)
     usage
@@ -99,4 +252,3 @@ case "$command_name" in
     fail "不支持的命令：$command_name"
     ;;
 esac
-

@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     app_log_backup_count: int = Field(default=10, ge=1, le=100)
 
     database_url: str = "postgresql+psycopg://stock_sync:stock_sync@localhost:5432/stock_data_sync"
+    raw_data_dir: Path = ROOT_DIR / "data" / "raw"
+    web_dist_dir: Path | None = None
 
     tushare_token: SecretStr = SecretStr("")
     tushare_request_limit_per_minute: int = Field(default=500, ge=1)
