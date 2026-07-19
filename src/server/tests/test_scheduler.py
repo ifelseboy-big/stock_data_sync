@@ -1,4 +1,6 @@
+from app.scheduler.catalog import SCHEDULED_JOB_BY_ID
 from app.scheduler.factory import create_scheduler
+from app.scheduler.jobs import registered_job_functions
 
 
 def test_scheduler_registers_dispatch_job() -> None:
@@ -47,3 +49,13 @@ def test_scheduler_registers_global_processing_jobs() -> None:
     assert scheduler.get_job("plan-processing-tasks") is not None
     assert scheduler.get_job("dispatch-processing-task") is not None
     assert scheduler.get_job("reconcile-processing-runtime") is not None
+
+
+def test_scheduler_catalog_registry_and_visible_jobs_stay_in_sync() -> None:
+    scheduler = create_scheduler()
+    visible_job_ids = {
+        job.id for job in scheduler.get_jobs() if job.id != "dispatch-manual-scheduled-jobs"
+    }
+
+    assert visible_job_ids == set(SCHEDULED_JOB_BY_ID)
+    assert set(registered_job_functions()) == set(SCHEDULED_JOB_BY_ID)

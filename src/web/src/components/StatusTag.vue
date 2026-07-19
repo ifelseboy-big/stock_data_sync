@@ -10,6 +10,7 @@ const statusMap: Record<
   { label: string; type: 'info' | 'primary' | 'success' | 'warning' | 'danger' }
 > = {
   pending: { label: '待执行', type: 'info' },
+  waiting_dependency: { label: '等待依赖', type: 'warning' },
   running: { label: '运行中', type: 'primary' },
   waiting_retry: { label: '等待重试', type: 'warning' },
   succeeded: { label: '成功', type: 'success' },

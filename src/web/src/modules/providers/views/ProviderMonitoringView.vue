@@ -37,7 +37,7 @@ const quotaPercent = computed(() => {
             <el-progress :percentage="quotaPercent" :stroke-width="12" />
             <div class="quota-panel__meta">
               <span>剩余额度 {{ data.quota.remainingInCurrentWindow }}</span>
-              <span>限流等待 {{ data.quota.delayedRequestCount }}</span>
+              <span>发生限流等待的请求 {{ data.quota.delayedRequestCount }}</span>
               <span>采集时间 {{ formatDateTime(data.quota.capturedAt) }}</span>
             </div>
           </div>
@@ -54,10 +54,10 @@ const quotaPercent = computed(() => {
             </div>
           </div>
         </template>
-        <el-table :data="data?.endpoints ?? []" empty-text="暂无接口调用数据">
+        <el-table :data="data?.endpoints ?? []" empty-text="暂无接口调用数据" scrollbar-always-on>
           <el-table-column prop="endpoint" label="接口" min-width="170" fixed="left" />
           <el-table-column prop="requestCountToday" label="今日请求" width="110" />
-          <el-table-column label="成功率" width="110">
+          <el-table-column label="请求成功率" width="120">
             <template #default="{ row }">{{ formatPercent(row.successRateToday) }}</template>
           </el-table-column>
           <el-table-column label="P50 耗时" width="120">
@@ -66,7 +66,7 @@ const quotaPercent = computed(() => {
           <el-table-column label="P95 耗时" width="120">
             <template #default="{ row }">{{ formatDuration(row.p95DurationMs) }}</template>
           </el-table-column>
-          <el-table-column prop="throttledCountToday" label="限流等待" width="110" />
+          <el-table-column prop="throttledCountToday" label="限流等待请求" width="130" />
           <el-table-column prop="emptyResponseCountToday" label="空响应" width="100" />
           <el-table-column label="最近调用" min-width="170">
             <template #default="{ row }">{{ formatDateTime(row.lastRequestedAt) }}</template>

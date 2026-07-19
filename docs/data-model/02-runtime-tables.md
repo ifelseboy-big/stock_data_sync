@@ -1,6 +1,6 @@
 # 系统运行与数据发布表
 
-这6张表不是新增行情业务概念，而是实现“先采集、封存版本、检查依赖、再发布”的最小运行模型。缺少它们，stock_daily等多接口合并表无法判断是否为半成品。
+本文件描述采集、加工、发布和调度管理运行表。它们不是新增行情业务概念，而是实现“先采集、封存版本、检查依赖、再发布”和可追溯调度的控制面模型。
 
 ## collection_batch
 
@@ -122,3 +122,33 @@ primary key (dataset_name, scope_type, scope_key) -- 每个数据集和发布范
 ```
 
 保存每个数据集范围的完成性、血缘和当前加工结果。主数据使用GLOBAL/GLOBAL，日事实使用DATE/YYYY-MM-DD，指数权重使用MONTH/指数代码:YYYY-MM；按实体发布时使用ENTITY/实体代码。business_date只在存在明确业务日期时填写。正式表写入与release更新在同一事务提交。业务表不保存历史version_id，因此旧版本只用于追溯，不能通过切换指针即时回滚；恢复历史结果必须重新加工并发布新的版本。
+
+## scheduled_job_control
+
+```sql
+job_id varchar(96) primary key -- 代码目录中的稳定调度任务 ID
+enabled boolean not null default true -- 是否接受定时触发和启动补偿
+updated_at timestamptz not null -- 最近修改时间
+updated_by varchar(64) null -- 最近操作人
+```
+
+只保存运维控制状态，Cron/Interval 定义仍由代码目录统一声明，防止数据库配置与可执行函数漂移。停用不删除 APScheduler 任务，执行包装器在触发时跳过；人工执行仍需单独鉴权和审计。
+
+## scheduled_job_execution
+
+```sql
+execution_id uuid primary key
+job_id varchar(96) not null
+trigger_type varchar(24) not null check (trigger_type in ('SCHEDULED','MANUAL','STARTUP_CATCHUP'))
+status varchar(16) not null check (status in ('PENDING','RUNNING','SUCCESS','FAILED'))
+requested_by varchar(64) null
+reason varchar(500) null
+scheduled_at timestamptz null
+started_at timestamptz null
+finished_at timestamptz null
+duration_ms integer null
+error_message varchar(2000) null
+created_at timestamptz not null
+```
+
+记录可管理调度任务的实际执行结果。人工命令先写入 `PENDING`，由 Scheduler 领取并执行；定时和启动补偿直接创建 `RUNNING` 记录，结束后写入耗时与失败原因。`job_id, created_at` 索引服务最近结果和历史分页，`PENDING` 部分索引服务人工执行队列。终态执行记录默认保留 30 天，由每日维护任务清理；保留天数可配置，`PENDING` 和 `RUNNING` 记录不参与清理。

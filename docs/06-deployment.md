@@ -1,232 +1,266 @@
-# Mac mini 发布与部署
+# Mac mini 安装、升级与运行
 
-生产环境是单台 Mac mini。PostgreSQL、FastAPI/Web 和 Scheduler 直接作为 macOS 进程运行，由 `launchd` 管理开机启动、异常拉起和进程生命周期。
+生产环境是单台 Mac。PostgreSQL、FastAPI/Web 和 Scheduler 作为原生 macOS 进程运行，由 `launchd` 管理。程序源码来自 GitHub 正式版本标签，并在目标 Mac 本地构建。
 
-这里的“原生进程”仅表示程序直接运行在 macOS 上。用户只面对一个统一安装目录和一套 `start`、`stop`、`restart`、`status`、`logs` 命令。
+## 1. 基本原则
 
-## 1. 部署不变量
+- 首次安装目录、Web/API 监听 IPv4、Web/API 端口和 PostgreSQL 端口都没有默认值，必须由用户明确传入。
+- 安装成功后，安装位置记录在服务用户的 `~/.stock-data-sync/install.conf`；后续升级不再要求目录。
+- Git 只拉取不可变的 `vX.Y.Z` 正式标签，不部署 `main`。
+- 每个版本独立构建，使用 `current` 软链接原子切换。
+- 配置、PostgreSQL、Parquet 和日志位于安装根目录，不随版本切换。
+- 普通升级只更换程序，不备份、不恢复、不迁移数据库。
+- 目标程序需要不同数据库 revision 时，doctor 在停止服务前拒绝普通升级。
+- 首次初始化空数据库时允许执行 Alembic 初始迁移。
 
-安装目录必须由用户首次安装时明确指定，不提供默认值。输入为空时安装立即终止。应用、Python 环境、PostgreSQL 数据、Parquet 原始资产、日志和配置全部位于该目录。有效备份目标也必须由用户指定，但为避免与生产磁盘同时损坏，必须位于安装目录之外；安装目录内的 `backups/` 仅作临时工作区。
+## 2. 目标 Mac 要求
 
-安装器不能自行选择 `/Applications`、`/opt`、用户主目录或其他路径。Homebrew 只提供 PostgreSQL 和 uv 的可执行文件，不使用 Homebrew 默认数据库目录，也不通过 `brew services` 管理生产数据库。
-
-## 2. Mac mini 要求
-
-- macOS，Apple Silicon 与 Intel 均可。
-- 管理员权限，首次安装和服务管理命令使用 `sudo`。
+- macOS，Apple Silicon 或 Intel。
+- 管理员权限。
 - Homebrew。
-- PostgreSQL 18：`brew install postgresql@18`。
-- uv：`brew install uv`。
-- 首次安装 Python 依赖时能够访问 Python 包源。
+- Git。
+- Node.js 22 和 npm 10+。
+- uv。
+- PostgreSQL 18。
+- 能访问 GitHub、npm 和 Python 包源。
 
-Node.js 只在生成发布包的开发机器上使用。发布包已经包含 Vue 构建产物，Mac mini 运行时不需要 Node.js 或 Nginx。
-
-如果执行过 `brew services start postgresql@18`，应先停止，或者安装时通过 `--postgres-port` 选择未占用端口。本项目使用独立数据库目录和独立 launchd 服务，不能与 Homebrew 默认实例共用同一个数据目录。
-
-## 3. 生成发布包
-
-在开发机器的项目根目录执行：
+安装依赖：
 
 ```bash
-make release VERSION=0.1.0
+brew install node@22 uv postgresql@18
 ```
 
-发布脚本先执行 Vue 类型检查和生产构建，再生成：
+首次安装时应为项目选择一个未占用的 `--postgres-port`。项目使用独立 PostgreSQL 数据目录，不使用 Homebrew 默认数据目录；doctor 会拒绝使用已被其他 PostgreSQL 实例占用的端口。
+
+## 3. GitHub 发布
+
+正式发布使用语义化版本标签：
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+`.github/workflows/release.yml` 会在干净的 macOS runner 上执行后端和前端检查，然后创建 GitHub Release。Release 只发布小型安装入口和版本元数据：
 
 ```text
-dist/stock-data-sync-0.1.0.tar.gz
-dist/stock-data-sync-0.1.0.tar.gz.sha256
+install.sh
+release-manifest.json
+SHA256SUMS
 ```
 
-将两个文件传到 Mac mini，校验并解压：
+应用本身不在 GitHub Actions 中预编译。目标 Mac 会从标签拉取源码，再执行 `npm ci`、`npm run build` 和 `uv sync --frozen --no-dev`。
 
-```bash
-shasum -a 256 -c stock-data-sync-0.1.0.tar.gz.sha256
-tar -xzf stock-data-sync-0.1.0.tar.gz
-cd stock-data-sync-0.1.0
-```
+仓库应在 GitHub 设置中启用 immutable releases。安装器资产会内置当前 Release 的仓库地址和版本号。
 
 ## 4. 首次安装
 
-交互安装：
+首次安装必须在命令中明确指定安装目录：
 
 ```bash
-sudo ./deploy/production/install.sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/ORG/stock-data-sync/releases/latest/download/install.sh \
+  | sudo bash -s -- \
+      --install-dir /Users/stockops/stock-data-sync \
+      --http-bind 0.0.0.0 \
+      --http-port 18080 \
+      --postgres-port 15432
 ```
 
-安装器要求输入安装目录和 Web/API 端口，两项均不能为空。服务用户默认采用发起 `sudo` 的 macOS 用户。
+缺少 `--install-dir`、`--http-bind`、`--http-port` 或 `--postgres-port` 时安装立即终止。目录必须是绝对路径且为空；监听地址必须是有效 IPv4；两个端口必须在 1-65535 之间且不能相同。doctor 还会在安装前确认端口未被占用。
 
-非交互安装：
-
-```bash
-sudo ./deploy/production/install.sh \
-  --install-dir /Users/stockops/stock-data-sync \
-  --http-port 8080
-```
-
-示例路径仅表示参数格式，不是默认安装目录。可选参数：
+首次安装必填参数：
 
 ```text
---http-bind ADDRESS    Web/API 监听地址，默认 0.0.0.0
---postgres-port PORT   PostgreSQL 本机端口，默认 5432
---service-user USER    实际运行服务的 macOS 用户
---backup-dir PATH      安装目录外的备份目标；配置后每日 03:00 自动备份
---no-start             安装完成后暂不启动
+--install-dir PATH      安装目录
+--http-bind IPv4        Web/API 监听 IPv4，例如 127.0.0.1 或 0.0.0.0
+--http-port PORT        Web/API 监听端口
+--postgres-port PORT    PostgreSQL 本机监听端口
 ```
 
-安装过程会：
+常用可选参数：
 
-1. 校验 macOS、Homebrew PostgreSQL 18、uv、端口及空安装目录。
-2. 复制服务端和已构建的 Web 文件。
-3. 使用 uv 在安装目录内创建 Python 虚拟环境。
-4. 在安装目录初始化独立 PostgreSQL 18 数据目录和随机密码。
-5. 生成权限为 `0600` 的运行配置。
-6. 生成并注册 PostgreSQL、API/Web、Scheduler 三个 launchd 服务。
-7. 启动 PostgreSQL、创建数据库、执行 Alembic 迁移，再启动应用服务。
+```text
+--version VERSION       安装指定版本
+--service-user USER     服务用户，默认使用发起 sudo 的用户
+--backup-dir PATH       可选的安装目录外备份目标
+--no-start              初始化完成后暂不启动 Server 和 Scheduler
+```
+
+安装过程固定执行：
+
+1. `pre-install doctor` 检查系统、用户、目录、依赖、端口和服务冲突。
+2. 克隆正式 Git 标签到本地源码镜像。
+3. 在独立版本目录执行前端和 Python 构建。
+4. 生成带逐项注释的 `config/app.env`。
+5. 初始化独立 PostgreSQL 18 数据目录和空数据库。
+6. 对空数据库执行 Alembic 初始迁移。
+7. 注册 launchd，启动服务。
+8. `post-install doctor` 检查版本、配置、数据库、进程和 HTTP 健康接口。
+
+任何安装前检查失败都不会开始安装。
 
 ## 5. 安装目录
 
-假设用户明确指定 `/Users/stockops/stock-data-sync`：
+假设用户选择 `/Users/stockops/stock-data-sync`：
 
 ```text
 /Users/stockops/stock-data-sync/
-├── app/
-│   ├── server/               # FastAPI、Scheduler 及安装目录内的 .venv
-│   └── web/                  # Vue 生产构建文件
-├── backups/                  # 数据库及原始资产备份暂存
-├── bin/
-│   ├── run-service           # launchd 使用的内部进程入口
-│   └── stock-data-sync       # 统一服务管理命令
+├── source/
+│   └── repository.git/       # Git bare mirror
+├── releases/
+│   ├── 1.2.2-<commit>/
+│   └── 1.2.3-<commit>/
+├── current -> releases/1.2.3-<commit>
+├── previous -> releases/1.2.2-<commit>
+├── bin/                      # 不随版本变化的薄入口
 ├── config/
-│   ├── app.env               # 密钥和运行配置，权限 0600
-│   └── launchd/              # 当前安装对应的 launchd 配置副本
+│   ├── app.env               # 唯一运行配置文件
+│   └── launchd/
 ├── data/
-│   ├── postgres/             # 独立 PostgreSQL 18 数据目录
-│   └── raw/                  # 不可变 Parquet 原始资产
-└── logs/
-    ├── postgres/
-    ├── backup/
-    ├── scheduler/
-    └── server/
+│   ├── postgres/
+│   └── raw/
+├── logs/
+└── backups/
 ```
 
-launchd 注册时会把三个 plist 复制到 `/Library/LaunchDaemons`。这里仅保存系统服务注册信息；所有业务持久数据仍在用户指定目录内。
+服务用户主目录另有：
 
-## 6. 进程模型
-
-| 服务 | 运行方式 | 网络与数据边界 |
-| --- | --- | --- |
-| PostgreSQL 18 | Homebrew 可执行文件 + 自有数据目录 | 只监听 `127.0.0.1`，不对外暴露 |
-| API/Web | 安装目录 `.venv` 中的 Uvicorn | 同一端口提供 Vue、`/api/v1`、健康检查和指标 |
-| Scheduler | 安装目录 `.venv` 中的独立 Python 进程 | 读写 PostgreSQL 和 `data/raw`，统一调用 Tushare |
-| Backup | launchd 每日 03:00 触发的短进程（可选） | 读取 PostgreSQL 和 `data/raw`，只写用户指定的外部备份目录 |
-
-API 与 Scheduler 使用相同代码版本但不同进程。只有 Scheduler 读写原始资产；浏览器不能直接访问文件目录。launchd 设置 `RunAtLoad` 和 `KeepAlive`，Mac mini 重启后自动恢复服务。
-
-## 7. 服务管理
-
-先把变量设为用户实际选择的安装目录：
-
-```bash
-INSTALL_DIR=/Users/stockops/stock-data-sync
-sudo "$INSTALL_DIR/bin/stock-data-sync" start
-sudo "$INSTALL_DIR/bin/stock-data-sync" stop
-sudo "$INSTALL_DIR/bin/stock-data-sync" restart
-sudo "$INSTALL_DIR/bin/stock-data-sync" status
-sudo "$INSTALL_DIR/bin/stock-data-sync" logs server
+```text
+~/.stock-data-sync/install.conf
 ```
 
-可以操作指定服务：
+它只记录安装目录、Git 仓库、渠道和当前版本，不保存 Token、数据库密码或业务配置。全局 `/usr/local/bin/stock-data-sync` 通过该文件找到真实安装目录。
 
-```bash
-sudo "$INSTALL_DIR/bin/stock-data-sync" restart server
-sudo "$INSTALL_DIR/bin/stock-data-sync" restart scheduler
-sudo "$INSTALL_DIR/bin/stock-data-sync" logs postgres
-sudo "$INSTALL_DIR/bin/stock-data-sync" logs backup
-sudo "$INSTALL_DIR/bin/stock-data-sync" doctor
-sudo "$INSTALL_DIR/bin/stock-data-sync" migrate
+## 6. 配置
+
+唯一配置文件为：
+
+```text
+<INSTALL_DIR>/config/app.env
 ```
 
-Web 由 `server` 提供，因此 `web` 是 `server` 的别名，不存在第四个长期进程。`stop` 只卸载 launchd 服务，不删除数据库、原始资产或日志。
+文件权限为 `0600`、root 持有，并通过只读 ACL 允许服务用户读取。配置使用注释分组，每个 Key 上方说明含义以及“用户可修改”或“安装器维护”。
 
-## 8. 修改配置
-
-使用管理员权限编辑 `$INSTALL_DIR/config/app.env`，然后重启受影响服务。配置文件由 root 持有、权限为 `0600`，并通过只读 ACL 授权服务用户读取。首次安装时允许暂不填写 Tushare Token；后续设置 `TUSHARE_TOKEN` 并执行：
+查看、校验和编辑：
 
 ```bash
-sudo "$INSTALL_DIR/bin/stock-data-sync" restart server scheduler
+sudo stock-data-sync config path
+sudo stock-data-sync config show
+sudo stock-data-sync config validate
+sudo stock-data-sync config edit
 ```
 
-配置文件是可执行的受限 Shell 环境文件，只能由服务用户和管理员读取。不得把 Token、数据库密码或完整配置输出到日志。
-
-若只允许 Mac mini 本机访问，将 `HTTP_BIND` 改为 `127.0.0.1`。局域网访问使用 `0.0.0.0`，同时应通过 macOS 防火墙限制来源；公网访问必须增加受信任 TLS 反向代理和管理员鉴权。
-
-## 9. 备份与恢复
-
-备份目标必须由管理员明确指定为安装目录之外的绝对路径，建议使用挂载在 `/Volumes` 下的外置磁盘或已同步到异机的目录。程序会拒绝把有效备份写到统一安装目录内部。首次安装传入 `--backup-dir` 后，launchd 每日 03:00 执行增量备份；未配置时仍可使用下述命令手工指定目标。
+修改完成后按需重启：
 
 ```bash
-sudo "$INSTALL_DIR/bin/stock-data-sync" backup /Volumes/StockBackup/daily
-sudo "$INSTALL_DIR/bin/stock-data-sync" backup /Volumes/StockBackup/weekly --full
-sudo "$INSTALL_DIR/bin/stock-data-sync" verify-backup \
-  /Volumes/StockBackup/daily/stock-data-sync-backup-YYYYMMDDTHHMMSSZ-ID
+sudo stock-data-sync restart
 ```
 
-每次备份都包含 PostgreSQL custom-format 逻辑备份和完整资产清单。默认模式只复制相对上一个有效清单新增或变化的 Parquet，但清单仍覆盖当时全部资产；`--full` 会重新复制全部 Parquet，用作新的独立保留基线。增量链中的目录必须整体保留，不能单独删除仍被后续清单 `storedIn` 引用的备份集。
+升级不会覆盖用户已有值。新程序必须为新增可选配置提供代码默认值；新增必填配置时，目标版本的 doctor 必须在切换前失败并提示用户处理。
 
-恢复会替换当前数据库和原始资产，必须先停止 API 与 Scheduler，并显式提交破坏性确认参数：
+## 7. 普通升级
+
+升级不需要再次指定安装目录：
 
 ```bash
-sudo "$INSTALL_DIR/bin/stock-data-sync" stop server scheduler
-sudo "$INSTALL_DIR/bin/stock-data-sync" restore \
-  /Volumes/StockBackup/daily/stock-data-sync-backup-YYYYMMDDTHHMMSSZ-ID \
+sudo stock-data-sync upgrade
+```
+
+指定版本：
+
+```bash
+sudo stock-data-sync upgrade --version 1.2.3
+```
+
+升级流程：
+
+1. 获取升级锁并启动 PostgreSQL（如尚未运行）。
+2. 执行 `pre-upgrade doctor`。
+3. `git fetch --tags`，解析目标正式标签。
+4. 在新的 release 目录本地构建。
+5. 执行 `build doctor`，验证 Python、Web、配置和 Alembic head。
+6. 比较生产数据库 revision 与目标程序要求；不一致立即终止。
+7. 停止 Server 和 Scheduler。
+8. 原子切换 `current`，启动新程序。
+9. 执行 `post-upgrade doctor`。
+10. 检查失败时自动切回旧程序并重新检查。
+
+普通升级不会调用 `backup`、`restore` 或 `migrate`，PostgreSQL 和 Parquet 不会被修改。
+
+## 8. 回滚
+
+回滚也只切换程序：
+
+```bash
+sudo stock-data-sync rollback
+sudo stock-data-sync rollback --version 1.2.2
+```
+
+回滚前必须确认目标程序要求的数据库 revision 与当前生产数据库一致。数据库不兼容时回滚被拒绝。
+
+## 9. Doctor
+
+手工执行：
+
+```bash
+sudo stock-data-sync doctor
+```
+
+安装和升级会自动执行对应阶段的 doctor。输出分为：
+
+```text
+PASS  检查通过
+WARN  非阻断问题
+FAIL  阻断安装、升级或切换
+```
+
+检查内容包括配置权限与语法、程序构建完整性、版本/commit、Python 导入、Web 产物、PostgreSQL、数据库 revision、launchd、服务状态和 API 健康接口。日志不会输出 Token、密码或完整数据库连接地址。
+
+## 10. 服务管理
+
+```bash
+sudo stock-data-sync start
+sudo stock-data-sync stop
+sudo stock-data-sync restart
+sudo stock-data-sync status
+sudo stock-data-sync version
+sudo stock-data-sync logs server
+sudo stock-data-sync logs scheduler
+```
+
+普通 `start` 和 `restart` 只检查数据库兼容性，不执行 Alembic 迁移。
+
+## 11. 数据库结构升级
+
+数据库 revision 变化不属于普通程序升级。当前只保留显式管理员入口：
+
+```bash
+sudo stock-data-sync migrate
+```
+
+该命令不会被 `start`、`restart` 或 `upgrade` 自动调用。涉及数据库结构或 PostgreSQL 大版本的正式升级，应单独设计确认、验证和恢复方案后再执行。
+
+## 12. 手工备份与恢复
+
+备份能力保留给管理员使用，但普通程序升级不会自动调用：
+
+```bash
+sudo stock-data-sync backup /Volumes/StockBackup/daily
+sudo stock-data-sync backup /Volumes/StockBackup/full --full
+sudo stock-data-sync verify-backup /Volumes/StockBackup/full/stock-data-sync-backup-...
+```
+
+恢复会替换数据库和原始资产，必须显式停止应用服务并提交确认：
+
+```bash
+sudo stock-data-sync stop server scheduler
+sudo stock-data-sync restore /Volumes/StockBackup/full/stock-data-sync-backup-... \
   --confirm-database-replace
-sudo "$INSTALL_DIR/bin/stock-data-sync" doctor
-sudo "$INSTALL_DIR/bin/stock-data-sync" start server scheduler
 ```
 
-恢复过程先校验清单、数据库和增量链中每个 Parquet 的 SHA-256，再恢复到临时数据库；全部成功后才切换数据库名称和原始目录。恢复前数据库与原始目录会保留为 `*_before_restore_*`，验证完成后由管理员单独清理。跨安装目录恢复时会同步改写 `raw_data_asset.storage_uri` 的根路径。
+恢复不会自动执行数据库迁移。
 
-| 备份项 | 频率 | 保留规则 | 恢复验证 |
-| --- | --- | --- | --- |
-| PostgreSQL 自定义格式逻辑备份 | 每日一次 | 7 个日备、4 个周备、12 个月备 | 每月在隔离库恢复并核对行数 |
-| Parquet 原始资产 | 每日增量 | 与生产资产同生命周期 | 抽样核对 SHA-256 并重放一个数据集 |
-| 配置和监控规则 | 每次发布 | 跟随发布版本，密钥只保存加密副本 | 新环境从发布包和密钥恢复 |
+## 13. 网络安全
 
-备份清单必须包含 SHA-256 并复制到 Mac mini 之外的存储；只保存在同一磁盘不能视为有效备份。单机部署目标为 RPO 不超过 24 小时、RTO 不超过 4 小时。
-
-恢复顺序为 PostgreSQL、Parquet 原始资产、数据库迁移校验、只读 API、Scheduler、Web。Scheduler 启动后必须先执行状态协调，不能立即无界追赶历史任务。
-
-## 10. 故障恢复
-
-| 故障场景 | 系统行为 | 恢复依据 |
-| --- | --- | --- |
-| Scheduler 进程退出 | advisory lock 自动释放；重启后先协调再恢复派发 | 数据库任务状态、封存资产和 `dataset_release` |
-| 采集运行中崩溃 | 核对临时文件、最终文件、资产记录和任务状态 | `task_id` 唯一资产和最终文件 |
-| 加工运行中崩溃 | 已发布则补记成功；未发布则由 PostgreSQL 回滚后重新排队 | `dataset_release`、事务原子性和加工锁 |
-| 数据库暂不可用 | 停止领取新任务，不在内存中宣称任务完成 | 数据库恢复后重试 |
-| Parquet 磁盘写满 | 当前采集失败且不创建资产，触发容量反压 | 临时目录、任务错误和磁盘监控 |
-| Tushare 数据迟到或为空 | 截止时间前退避重试；原批次关闭后创建 REPAIR 批次 | `ApiSpec.empty_policy` 和业务发布时间 |
-| 供应方修订历史数据 | 创建新资产和输出版本，只重算受影响范围 | 资产哈希、处理器版本和依赖图 |
-| 分区缺失 | 加工任务进入 BLOCKED 并告警 | 预建分区配置和状态协调器 |
-
-启动恢复顺序固定为：取得调度单例锁、检查迁移版本和分区、清理超过 24 小时的临时原始文件、核对 RUNNING 采集与加工任务、重新计算可关闭批次、补建已关闭批次的加工计划，最后才恢复任务领取。
-
-自动补采只处理可恢复失败，并受次数和截止时间限制。原批次关闭前在原任务上重试；关闭后新建 REPAIR 批次。修复成功后只解除受影响依赖，不重跑无关数据集。
-
-## 11. 安全与权限
-
-本期按内部单管理员系统设计。Tushare Token、管理 Token 和数据库密码不得写入数据库、日志或前端响应。对公网开放前必须完成 TLS、访问控制和管理员鉴权。
-
-| 角色或配置 | 权限与规则 |
-| --- | --- |
-| 数据库迁移账号 | 拥有 DDL 和对象所有权，只在迁移时使用 |
-| 应用读写账号 | API 和 Scheduler 使用，只允许所需 DML、序列和函数 |
-| 研究只读账号 | 只读正式业务表和 `dataset_release` |
-| `TUSHARE_TOKEN` | 只存在权限 `0600` 的 `app.env` 或外部密钥系统 |
-| `ADMIN_API_TOKEN` | 与 Tushare Token 分离并支持轮换，只保护管理写接口 |
-| `DATABASE_URL` | 日志只显示数据库主机和库名，不输出完整值 |
-
-PostgreSQL 只监听本机回环地址。API/Web 根据安装配置绑定本机或局域网地址；管理写接口不允许跨域通配。服务启动时必须校验 Tushare 请求预算、时区、加工并发数、原始目录权限、分区和数据库迁移版本，关键配置无效时直接退出。
-
-研究消费者不能读取 `collection_task.request_params` 和 `raw_data_asset.storage_uri`。取消、跳过、重试和回填必须提交原因并记录操作者与 `request_id`。删除原始资产、删除分区、覆盖备份和回滚迁移不通过普通 Web API 提供。
+PostgreSQL 只监听 `127.0.0.1`。HTTP 默认监听 `0.0.0.0` 供局域网访问；只允许本机访问时将 `HTTP_BIND` 改为 `127.0.0.1`。公网开放前必须增加 TLS、访问控制和防火墙限制。

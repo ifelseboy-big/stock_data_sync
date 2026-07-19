@@ -40,4 +40,4 @@ live-ths-theme-validation:
 
 release:
 	@test -n "$(VERSION)" || (echo "用法: make release VERSION=0.1.0" && exit 1)
-	./scripts/build-release.sh "$(VERSION)"
+	./scripts/build-release.sh "$(VERSION)" "$(REPOSITORY)"

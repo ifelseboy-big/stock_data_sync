@@ -8,7 +8,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getOperationsOverview } from '@/modules/operations/api'
-import { formatDateTime, formatPercent } from '@/modules/operations/presentation'
+import { formatDateTime, formatDuration, formatPercent } from '@/modules/operations/presentation'
 
 const { data, loading, error, load } = useApiResource(getOperationsOverview)
 
@@ -53,9 +53,16 @@ const quotaPercent = computed(() => {
           tone="danger"
         />
         <MetricCard
-          label="今日接口成功率"
+          label="今日任务成功率"
+          :value="formatPercent(data?.metrics.taskSuccessRateToday)"
+          note="采集与加工终态任务"
+          :icon="SetUp"
+          tone="success"
+        />
+        <MetricCard
+          label="今日接口请求成功率"
           :value="formatPercent(data?.metrics.providerSuccessRateToday)"
-          :note="`P95 ${data?.metrics.providerP95DurationMs ?? '--'} ms`"
+          :note="`仅统计接口请求 · P95 ${formatDuration(data?.metrics.providerP95DurationMs)}`"
           :icon="Connection"
           tone="warning"
         />
@@ -113,7 +120,7 @@ const quotaPercent = computed(() => {
             <el-progress :percentage="quotaPercent" :stroke-width="10" :show-text="false" />
             <div class="quota-panel__meta">
               <span>剩余 {{ data.quota.remainingInCurrentWindow }}</span>
-              <span>限流等待 {{ data.quota.delayedRequestCount }}</span>
+              <span>发生限流等待的请求 {{ data.quota.delayedRequestCount }}</span>
             </div>
           </div>
           <el-empty v-else description="尚未上报接口额度" :image-size="72" />

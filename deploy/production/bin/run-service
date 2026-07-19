@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RELEASE_DIR="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
+INSTALL_DIR="${STOCK_DATA_SYNC_INSTALL_DIR:-}"
+[[ -n "$INSTALL_DIR" ]] || {
+  printf '缺少 STOCK_DATA_SYNC_INSTALL_DIR\n' >&2
+  exit 1
+}
 ENV_FILE="$INSTALL_DIR/config/app.env"
-
+ACTUAL_INSTALL_DIR="$INSTALL_DIR"
 [[ -f "$ENV_FILE" ]] || {
   printf '缺少运行配置：%s\n' "$ENV_FILE" >&2
   exit 1
@@ -14,6 +19,10 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+export STOCK_DATA_SYNC_INSTALL_DIR="$ACTUAL_INSTALL_DIR"
+export INSTALL_DIR="$ACTUAL_INSTALL_DIR"
+export APP_VERSION="$(tr -d '[:space:]' < "$RELEASE_DIR/VERSION")"
+export WEB_DIST_DIR="$RELEASE_DIR/web"
 export PGPASSWORD="$POSTGRES_PASSWORD"
 
 service_name="${1:-}"
@@ -32,45 +41,34 @@ case "$service_name" in
     ;;
   server)
     export APP_LOG_FILE="$INSTALL_DIR/logs/server/server.log"
-    cd "$INSTALL_DIR/app/server"
-    exec .venv/bin/uvicorn app.main:app \
-      --host "$HTTP_BIND" \
-      --port "$HTTP_PORT" \
-      --no-access-log
+    cd "$RELEASE_DIR/server"
+    exec .venv/bin/python -m uvicorn app.main:app \
+      --host "$HTTP_BIND" --port "$HTTP_PORT" --no-access-log
     ;;
   scheduler)
     export APP_LOG_FILE="$INSTALL_DIR/logs/scheduler/scheduler.log"
-    cd "$INSTALL_DIR/app/server"
+    cd "$RELEASE_DIR/server"
     exec .venv/bin/python -m app.scheduler.runner
     ;;
   migrate)
-    cd "$INSTALL_DIR/app/server"
-    exec .venv/bin/alembic upgrade head
+    cd "$RELEASE_DIR/server"
+    exec .venv/bin/python -m alembic upgrade head
     ;;
   backup)
-    [[ -n "${2:-}" ]] || {
-      printf '缺少备份目标目录\n' >&2
-      exit 1
-    }
-    cd "$INSTALL_DIR/app/server"
+    [[ -n "${2:-}" ]] || { printf '缺少备份目标目录\n' >&2; exit 1; }
+    cd "$RELEASE_DIR/server"
     backup_args=(create --target-dir "$2")
     [[ "${3:-}" == "--full" ]] && backup_args+=(--full)
     exec .venv/bin/python -m app.maintenance.backup "${backup_args[@]}"
     ;;
   verify-backup)
-    [[ -n "${2:-}" ]] || {
-      printf '缺少备份目录\n' >&2
-      exit 1
-    }
-    cd "$INSTALL_DIR/app/server"
+    [[ -n "${2:-}" ]] || { printf '缺少备份目录\n' >&2; exit 1; }
+    cd "$RELEASE_DIR/server"
     exec .venv/bin/python -m app.maintenance.backup verify --backup-dir "$2"
     ;;
   restore)
-    [[ -n "${2:-}" ]] || {
-      printf '缺少备份目录\n' >&2
-      exit 1
-    }
-    cd "$INSTALL_DIR/app/server"
+    [[ -n "${2:-}" ]] || { printf '缺少备份目录\n' >&2; exit 1; }
+    cd "$RELEASE_DIR/server"
     exec .venv/bin/python -m app.maintenance.backup restore --backup-dir "$2"
     ;;
   *)

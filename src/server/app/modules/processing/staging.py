@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from typing import cast
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from sqlalchemy.sql.schema import Column as SchemaColumn
 
 from app.catalog import WriteStrategy
 from app.common.errors import ProcessingError
+from app.modules.partitions.service import PARTITIONED_TABLES, ensure_partitions_for_write
 
 type PreparedRow = dict[str, object]
 
@@ -38,6 +40,7 @@ class PostgresStagingPublisher:
             column for column in update_columns if column not in key_columns
         )
         _require_target_columns(target, columns)
+        _ensure_target_partitions(session, target, rows, replace_filters)
 
         stage = _create_stage_table(session, target, columns)
         _copy_stage_rows(session, stage, columns, rows, chunk_size=chunk_size)
@@ -150,6 +153,35 @@ class PostgresStagingPublisher:
                 f"patch target mismatch: expected {stage_count}, updated {row_count}"
             )
         return row_count
+
+
+def _ensure_target_partitions(
+    session: Session,
+    target: Table,
+    rows: Sequence[PreparedRow],
+    replace_filters: Mapping[str, object] | None,
+) -> None:
+    if target.name not in PARTITIONED_TABLES:
+        return
+
+    values = [row.get("trade_date") for row in rows]
+    if replace_filters is not None and "trade_date" in replace_filters:
+        values.append(replace_filters["trade_date"])
+    if not values:
+        raise ProcessingError(f"partitioned target {target.name} requires trade_date")
+
+    business_dates: list[date] = []
+    for value in values:
+        if not isinstance(value, date) or isinstance(value, datetime):
+            raise ProcessingError(
+                f"partitioned target {target.name} has invalid trade_date {value!r}"
+            )
+        business_dates.append(value)
+    ensure_partitions_for_write(
+        session.connection(),
+        parent_table=target.name,
+        business_dates=tuple(business_dates),
+    )
 
 
 def _create_stage_table(

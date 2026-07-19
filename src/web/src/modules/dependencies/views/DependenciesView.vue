@@ -63,7 +63,7 @@ function search() {
         empty-description="加工计划生成后会建立必要依赖检查记录。"
         @retry="load"
       >
-        <el-table :data="data?.items ?? []" row-key="id">
+        <el-table :data="data?.items ?? []" row-key="id" scrollbar-always-on>
           <el-table-column
             prop="processingTaskName"
             label="加工任务"
@@ -72,6 +72,12 @@ function search() {
           />
           <el-table-column prop="batchCode" label="批次" min-width="170" />
           <el-table-column prop="sourceEndpoint" label="原始数据接口" min-width="150" />
+          <el-table-column
+            prop="sourceScope"
+            label="接口范围"
+            min-width="220"
+            show-overflow-tooltip
+          />
           <el-table-column prop="sourceCycle" label="来源周期" min-width="120" />
           <el-table-column label="取数策略" width="130">
             <template #default="{ row }">

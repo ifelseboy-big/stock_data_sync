@@ -5,11 +5,11 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.common.errors import BatchPlanningError
+from app.common.errors import BatchPlanningError, ClosedBatchPlanMismatchError
 from app.modules.acquisition.domain import (
     TERMINAL_TASK_STATUSES,
     AssetSnapshot,
@@ -204,7 +204,7 @@ class AcquisitionRepository:
                 blueprint.max_attempts,
             )
             if persisted.get(key) != expected:
-                raise BatchPlanningError(
+                raise ClosedBatchPlanMismatchError(
                     "closed batches only accept an exact replay of persisted tasks"
                 )
         return BatchPlanResult(
@@ -251,6 +251,22 @@ class AcquisitionRepository:
                     ),
                 )
                 .order_by(
+                    case(
+                        (CollectionBatch.batch_type == BatchType.REPAIR.value, 50),
+                        (
+                            CollectionBatch.batch_type.in_(
+                                (
+                                    BatchType.DAILY.value,
+                                    BatchType.MASTER.value,
+                                    BatchType.HOT.value,
+                                    BatchType.DELAYED.value,
+                                )
+                            ),
+                            100,
+                        ),
+                        (CollectionBatch.batch_type == BatchType.BACKFILL.value, 400),
+                        else_=500,
+                    ),
                     CollectionBatch.scheduled_at,
                     CollectionTask.api_name,
                     CollectionTask.scope_key,

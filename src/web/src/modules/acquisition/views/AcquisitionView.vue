@@ -175,7 +175,7 @@ function openCancel(value: unknown) {
         empty-description="采集调度产生批次后会显示在这里。"
         @retry="load"
       >
-        <el-table :data="data?.items ?? []">
+        <el-table :data="data?.items ?? []" scrollbar-always-on>
           <el-table-column prop="batchCode" label="批次" min-width="180" fixed="left" />
           <el-table-column prop="themeName" label="业务主题" min-width="150" />
           <el-table-column prop="dataCycle" label="数据周期" min-width="120" />

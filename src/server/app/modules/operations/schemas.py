@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 type ExecutionStatus = Literal[
     "pending",
+    "waiting_dependency",
     "running",
     "waiting_retry",
     "succeeded",
@@ -22,6 +23,7 @@ type PriorityLevel = Literal[
     "historical",
 ]
 type AlertLevel = Literal["critical", "warning", "info"]
+type ScheduledJobStatus = Literal["pending", "running", "success", "failed"]
 
 
 def _to_camel(value: str) -> str:
@@ -94,6 +96,7 @@ class DependencyItem(OperationsModel):
     processing_task_name: str
     batch_code: str
     source_endpoint: str
+    source_scope: str
     source_cycle: str
     source_policy: Literal["current_cycle", "latest_valid"]
     source_ready: bool
@@ -132,6 +135,7 @@ class RunRecordItem(OperationsModel):
     id: str
     run_type: Literal["acquisition", "processing"]
     task_name: str
+    scope_key: str | None
     batch_code: str
     data_cycle: str
     status: ExecutionStatus
@@ -140,6 +144,35 @@ class RunRecordItem(OperationsModel):
     finished_at: datetime | None
     duration_ms: int | None
     error_summary: str | None
+
+
+class ScheduledJobItem(OperationsModel):
+    job_id: str
+    name: str
+    category: str
+    schedule: str
+    enabled: bool
+    manual_allowed: bool
+    next_run_at: datetime | None
+    last_status: ScheduledJobStatus | None
+    last_started_at: datetime | None
+    last_finished_at: datetime | None
+    last_duration_ms: int | None
+    last_error: str | None
+
+
+class ScheduledJobExecutionItem(OperationsModel):
+    execution_id: str
+    job_id: str
+    trigger_type: Literal["scheduled", "manual", "startup_catchup"]
+    status: ScheduledJobStatus
+    requested_by: str | None
+    reason: str | None
+    scheduled_at: datetime | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: int | None
+    error_message: str | None
 
 
 class DatasetReleaseItem(OperationsModel):
@@ -152,6 +185,13 @@ class DatasetReleaseItem(OperationsModel):
     processor_version: str
     row_count: int
     published_at: datetime
+
+
+class DatasetReleaseCoverageItem(OperationsModel):
+    business_date: date
+    expected_count: int
+    published_count: int
+    missing_datasets: list[str]
 
 
 class OperationsOverview(OperationsModel):
@@ -179,6 +219,10 @@ class CreateRepairCommand(ManualCommandBase):
 
 
 class TaskCommand(ManualCommandBase):
+    pass
+
+
+class ScheduledJobCommand(ManualCommandBase):
     pass
 
 

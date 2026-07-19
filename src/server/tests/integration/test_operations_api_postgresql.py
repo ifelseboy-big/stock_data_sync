@@ -15,7 +15,7 @@ from app.modules.acquisition.models import (
     CollectionTask,
     CollectionTaskStatus,
 )
-from app.modules.operations.models import ProviderRequestLog
+from app.modules.operations.models import ProviderRequestLog, ScheduledJobExecution
 from app.modules.processing.models import (
     DatasetRelease,
     DependencyStatus,
@@ -40,6 +40,10 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     collection_task_id = uuid4()
     published_process_id = uuid4()
     blocked_process_id = uuid4()
+    recovered_failure_id = uuid4()
+    recovered_success_id = uuid4()
+    scheduler_failure_id = uuid4()
+    scheduler_success_id = uuid4()
     with SyncSessionFactory() as session, session.begin():
         session.add(
             CollectionBatch(
@@ -121,6 +125,35 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     queued_at=now - timedelta(minutes=5),
                     error_message="required asset is missing",
                 ),
+                ProcessingTask(
+                    process_id=recovered_failure_id,
+                    source_batch_id=batch_id,
+                    process_type="recovered@1",
+                    business_date=now.date(),
+                    output_dataset="recovered_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    error_message="temporary failure",
+                ),
+                ProcessingTask(
+                    process_id=recovered_success_id,
+                    source_batch_id=batch_id,
+                    process_type="recovered@1",
+                    business_date=now.date(),
+                    output_dataset="recovered_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=3),
+                    finished_at=now - timedelta(minutes=2),
+                ),
             )
         )
         session.flush()
@@ -145,6 +178,29 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                 process_id=published_process_id,
                 row_count=10,
                 published_at=now - timedelta(minutes=6),
+            )
+        )
+        session.add_all(
+            (
+                ScheduledJobExecution(
+                    execution_id=scheduler_failure_id,
+                    job_id="test-recovered-job",
+                    trigger_type="SCHEDULED",
+                    status="FAILED",
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    error_message="temporary failure",
+                    created_at=now - timedelta(minutes=5),
+                ),
+                ScheduledJobExecution(
+                    execution_id=scheduler_success_id,
+                    job_id="test-recovered-job",
+                    trigger_type="SCHEDULED",
+                    status="SUCCESS",
+                    started_at=now - timedelta(minutes=3),
+                    finished_at=now - timedelta(minutes=2),
+                    created_at=now - timedelta(minutes=3),
+                ),
             )
         )
 
@@ -184,6 +240,12 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert any(item["endpoint"] == "daily" for item in provider.json()["endpoints"])
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
     assert any(item["id"] == f"processing:{blocked_process_id}" for item in alerts.json()["items"])
+    assert all(
+        item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]
+    )
+    assert all(
+        item["id"] != f"scheduler:{scheduler_failure_id}" for item in alerts.json()["items"]
+    )
     assert any(item["apiName"] == "daily" for item in command_options.json()["acquisitionApis"])
     assert resources.json()["database"]["status"] == "ok"
     assert resources.json()["storage"]["totalBytes"] > 0

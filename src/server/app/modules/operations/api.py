@@ -22,6 +22,7 @@ from app.modules.operations.schemas import (
     AlertItem,
     CreateBackfillCommand,
     CreateRepairCommand,
+    DatasetReleaseCoverageItem,
     DatasetReleaseItem,
     DependencyItem,
     ExecutionStatus,
@@ -32,6 +33,10 @@ from app.modules.operations.schemas import (
     ProcessingQueueItem,
     ProviderMonitoring,
     RunRecordItem,
+    ScheduledJobCommand,
+    ScheduledJobExecutionItem,
+    ScheduledJobItem,
+    ScheduledJobStatus,
     TaskCommand,
 )
 from app.modules.operations.security import AdminPrincipal, require_admin
@@ -120,6 +125,14 @@ async def releases(
     )
 
 
+@router.get("/release-coverage", response_model=list[DatasetReleaseCoverageItem])
+async def release_coverage(
+    db: DbSession,
+    day_count: Annotated[int, Query(alias="dayCount", ge=1, le=30)] = 5,
+) -> list[DatasetReleaseCoverageItem]:
+    return await _service(db).release_coverage(day_count=day_count)
+
+
 @router.get("/providers/tushare", response_model=ProviderMonitoring)
 async def provider_monitoring(db: DbSession) -> ProviderMonitoring:
     return await _service(db).provider_monitoring()
@@ -144,11 +157,35 @@ async def run_records(
     )
 
 
+@router.get("/scheduled-jobs", response_model=list[ScheduledJobItem])
+async def scheduled_jobs(db: DbSession) -> list[ScheduledJobItem]:
+    return await _service(db).scheduled_jobs()
+
+
+@router.get(
+    "/scheduled-job-executions",
+    response_model=PageResult[ScheduledJobExecutionItem],
+)
+async def scheduled_job_executions(
+    db: DbSession,
+    job_id: Annotated[str | None, Query(alias="jobId", max_length=96)] = None,
+    status: ScheduledJobStatus | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(alias="pageSize", ge=1, le=200)] = 20,
+) -> PageResult[ScheduledJobExecutionItem]:
+    return await _service(db).scheduled_job_executions(
+        job_id=job_id,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.get("/alerts", response_model=PageResult[AlertItem])
 async def alerts(
     db: DbSession,
     source: Annotated[
-        Literal["acquisition", "processing", "storage"] | None,
+        Literal["acquisition", "processing", "scheduler", "storage"] | None,
         Query(),
     ] = None,
     page: Annotated[int, Query(ge=1)] = 1,
@@ -218,6 +255,40 @@ async def create_repair(
         db=db,
         request=request,
         action="CREATE_REPAIR",
+    )
+
+
+@router.post(
+    "/commands/scheduled-jobs/{job_id}/{action}",
+    response_model=OperationCommandResult,
+    status_code=202,
+)
+async def manage_scheduled_job(
+    job_id: str,
+    action: Literal["enable", "disable", "run"],
+    payload: ScheduledJobCommand,
+    request: Request,
+    db: DbSession,
+    admin: Admin,
+    idempotency_key: IdempotencyKey,
+) -> OperationCommandResult:
+    service = OperationCommandService(db, build_tushare_api_registry())
+    context = _context(request, admin, idempotency_key)
+    command = (
+        service.request_scheduled_job_run(job_id, reason=payload.reason, context=context)
+        if action == "run"
+        else service.set_scheduled_job_enabled(
+            job_id,
+            enabled=action == "enable",
+            reason=payload.reason,
+            context=context,
+        )
+    )
+    return await _run_command(
+        command,
+        db=db,
+        request=request,
+        action=f"{action.upper()}_SCHEDULED_JOB",
     )
 
 

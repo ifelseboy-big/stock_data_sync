@@ -1,3 +1,6 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import structlog
 
 from app.core.config import settings
@@ -5,17 +8,22 @@ from app.core.logging import configure_logging
 from app.modules.acquisition.factory import shutdown_acquisition_runtime
 from app.scheduler.factory import create_scheduler
 from app.scheduler.jobs import (
-    close_collection_batches,
-    ensure_future_partitions,
     plan_due_collection_stages,
-    plan_etf_master,
-    plan_processing_tasks,
-    plan_special_master,
-    plan_trade_calendar,
     reconcile_collection_runtime,
     reconcile_processing_runtime,
 )
 from app.scheduler.lock import scheduler_singleton_lock
+from app.scheduler.management import ensure_scheduled_job_controls, execute_scheduled_job
+
+
+def _run_startup_job(job_id: str) -> None:
+    try:
+        execute_scheduled_job(job_id, "STARTUP_CATCHUP")
+    except Exception:
+        structlog.get_logger("scheduler").exception(
+            "startup_catchup_failed",
+            job_id=job_id,
+        )
 
 
 def main() -> None:
@@ -29,15 +37,27 @@ def main() -> None:
     )
     with scheduler_singleton_lock():
         try:
-            ensure_future_partitions()
+            ensure_scheduled_job_controls()
+            execute_scheduled_job("ensure-future-partitions", "STARTUP_CATCHUP")
             reconcile_collection_runtime(recover_all_running=True)
             reconcile_processing_runtime(recover_all_running=True)
-            close_collection_batches()
-            plan_processing_tasks()
-            plan_trade_calendar()
-            plan_etf_master()
-            plan_special_master()
-            plan_due_collection_stages()
+            execute_scheduled_job("close-collection-batches", "STARTUP_CATCHUP")
+            execute_scheduled_job("plan-processing-tasks", "STARTUP_CATCHUP")
+            for job_id in (
+                "plan-trade-calendar",
+                "plan-stock-master",
+                "plan-etf-master",
+                "plan-special-master",
+                "plan-concept-board-members",
+                "plan-monthly-index-weights",
+            ):
+                _run_startup_job(job_id)
+            if datetime.now(ZoneInfo(settings.scheduler_timezone)).month >= 10:
+                _run_startup_job("plan-next-year-trade-calendar")
+            try:
+                plan_due_collection_stages()
+            except Exception:
+                logger.exception("daily_startup_catchup_failed")
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             logger.info("scheduler_stopped")

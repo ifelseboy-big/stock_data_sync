@@ -2,6 +2,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+from app.catalog.datasets import ALL_DATASET_SPECS
+from app.catalog.specs import ReleaseScope
 from app.catalog.tushare import build_tushare_api_registry
 from app.core.config import Settings, settings
 from app.modules.acquisition.capacity import CapacityLevel, RawStorageCapacityGate
@@ -10,6 +12,7 @@ from app.modules.operations.repository import OperationsRepository
 from app.modules.operations.schemas import (
     AcquisitionBatchItem,
     AlertItem,
+    DatasetReleaseCoverageItem,
     DatasetReleaseItem,
     DependencyItem,
     ExecutionStatus,
@@ -22,8 +25,11 @@ from app.modules.operations.schemas import (
     ProviderMonitoring,
     QuotaSnapshot,
     RunRecordItem,
+    ScheduledJobExecutionItem,
+    ScheduledJobItem,
 )
 from app.modules.processing.models import DependencyStatus, ProcessingTaskStatus
+from app.scheduler.catalog import SCHEDULED_JOB_DEFINITIONS
 
 
 class OperationsService:
@@ -185,6 +191,7 @@ class OperationsService:
                     processing_task_name=cast(str, row["output_dataset"]),
                     batch_code=str(source_batch_id),
                     source_endpoint=cast(str, row["dependency_name"]),
+                    source_scope=scope_key,
                     source_cycle=asset_date.isoformat() if asset_date else scope_key,
                     source_policy=(
                         "current_cycle" if resolved_batch_id == source_batch_id else "latest_valid"
@@ -236,6 +243,30 @@ class OperationsService:
             generated_at=now,
         )
 
+    async def release_coverage(self, *, day_count: int) -> list[DatasetReleaseCoverageItem]:
+        expected = tuple(
+            sorted(
+                spec.dataset_name
+                for spec in ALL_DATASET_SPECS
+                if spec.release_scope == ReleaseScope.DATE
+            )
+        )
+        rows = await self._repository.release_coverage(
+            day_count=day_count,
+            dataset_names=expected,
+            through_date=datetime.now(self._timezone).date(),
+        )
+        expected_set = set(expected)
+        return [
+            DatasetReleaseCoverageItem(
+                business_date=business_date,
+                expected_count=len(expected),
+                published_count=len(published),
+                missing_datasets=sorted(expected_set - published),
+            )
+            for business_date, published in rows
+        ]
+
     async def provider_monitoring(self) -> ProviderMonitoring:
         now = datetime.now(self._timezone)
         rows = await self._repository.provider_endpoints(day_start=self._day_start(now))
@@ -280,6 +311,72 @@ class OperationsService:
         )
         return PageResult[RunRecordItem](
             items=[self._run_item(row, now) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            generated_at=now,
+        )
+
+    async def scheduled_jobs(self) -> list[ScheduledJobItem]:
+        controls = await self._repository.scheduled_job_controls()
+        latest = await self._repository.latest_scheduled_job_executions()
+        next_runs = await self._repository.scheduled_job_next_runs(
+            self._settings.scheduler_jobstore_table
+        )
+        items: list[ScheduledJobItem] = []
+        for definition in SCHEDULED_JOB_DEFINITIONS:
+            execution = latest.get(definition.job_id, {})
+            raw_status = cast(str | None, execution.get("status"))
+            items.append(
+                ScheduledJobItem(
+                    job_id=definition.job_id,
+                    name=definition.name,
+                    category=definition.category,
+                    schedule=_job_schedule(definition.job_id, definition.schedule, self._settings),
+                    enabled=controls.get(definition.job_id, True),
+                    manual_allowed=definition.manual_allowed,
+                    next_run_at=next_runs.get(definition.job_id),
+                    last_status=cast(Any, raw_status.lower() if raw_status else None),
+                    last_started_at=cast(datetime | None, execution.get("started_at")),
+                    last_finished_at=cast(datetime | None, execution.get("finished_at")),
+                    last_duration_ms=cast(int | None, execution.get("duration_ms")),
+                    last_error=cast(str | None, execution.get("error_message")),
+                )
+            )
+        return items
+
+    async def scheduled_job_executions(
+        self,
+        *,
+        job_id: str | None,
+        status: str | None,
+        page: int,
+        page_size: int,
+    ) -> PageResult[ScheduledJobExecutionItem]:
+        now = datetime.now(self._timezone)
+        rows, total = await self._repository.scheduled_job_executions(
+            job_id=job_id,
+            status=status,
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+        return PageResult[ScheduledJobExecutionItem](
+            items=[
+                ScheduledJobExecutionItem(
+                    execution_id=str(row["execution_id"]),
+                    job_id=cast(str, row["job_id"]),
+                    trigger_type=cast(Any, cast(str, row["trigger_type"]).lower()),
+                    status=cast(Any, cast(str, row["status"]).lower()),
+                    requested_by=cast(str | None, row["requested_by"]),
+                    reason=cast(str | None, row["reason"]),
+                    scheduled_at=cast(datetime | None, row["scheduled_at"]),
+                    started_at=cast(datetime | None, row["started_at"]),
+                    finished_at=cast(datetime | None, row["finished_at"]),
+                    duration_ms=cast(int | None, row["duration_ms"]),
+                    error_message=cast(str | None, row["error_message"]),
+                )
+                for row in rows
+            ],
             total=total,
             page=page,
             page_size=page_size,
@@ -379,6 +476,7 @@ class OperationsService:
             id=str(row["id"]),
             run_type=cast(Any, run_type),
             task_name=cast(str, row["task_name"]),
+            scope_key=cast(str | None, row["scope_key"]),
             batch_code=str(row["batch_id"]),
             data_cycle=_cycle(cast(date | None, row["business_date"])),
             status=(
@@ -409,7 +507,9 @@ class OperationsService:
             level=cast(Any, level),
             source=source,
             title=f"{task_name} 执行异常",
-            detail=cast(str | None, row["error_message"]) or error_code or "任务进入异常状态",
+            detail=_localized_error(cast(str | None, row["error_message"]))
+            or error_code
+            or "任务进入异常状态",
             occurred_at=cast(datetime | None, row["occurred_at"]) or now,
         )
 
@@ -423,6 +523,23 @@ def _ratio(numerator: int, denominator: int) -> float | None:
 
 def _optional_float(value: object) -> float | None:
     return float(cast(Any, value)) if value is not None else None
+
+
+def _job_schedule(job_id: str, schedule: str, config: Settings) -> str:
+    if job_id in {"close-collection-batches", "plan-processing-tasks"}:
+        return f"每 {config.scheduler_poll_seconds} 秒"
+    return schedule
+
+
+def _localized_error(message: str | None) -> str | None:
+    if message is None:
+        return None
+    translations = {
+        "one or more required dependencies are unavailable": "一个或多个必要依赖不可用",
+        "scheduler stopped while processing task was running": "调度器停止时加工任务仍在运行",
+        "scheduler stopped while the collection task was running": "调度器停止时采集任务仍在运行",
+    }
+    return translations.get(message, message)
 
 
 def _duration_ms(
@@ -442,7 +559,7 @@ def _cycle(value: date | None) -> str:
 
 def _batch_type(value: str) -> str:
     if value == BatchType.REPAIR.value:
-        return "auto_supplement"
+        return "manual"
     if value == BatchType.BACKFILL.value:
         return "manual"
     return "normal"
@@ -489,7 +606,7 @@ def _processing_status(value: str) -> ExecutionStatus:
     return cast(
         ExecutionStatus,
         {
-            ProcessingTaskStatus.WAITING_DEPENDENCY.value: "pending",
+            ProcessingTaskStatus.WAITING_DEPENDENCY.value: "waiting_dependency",
             ProcessingTaskStatus.QUEUED.value: "pending",
             ProcessingTaskStatus.RUNNING.value: "running",
             ProcessingTaskStatus.RETRY_WAIT.value: "waiting_retry",

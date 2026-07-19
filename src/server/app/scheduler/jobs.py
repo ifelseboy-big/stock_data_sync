@@ -1,9 +1,12 @@
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 
 from app.catalog import ApiSpec
 from app.catalog.tushare import (
@@ -24,7 +27,7 @@ from app.catalog.tushare import (
     theme_member_scopes,
     ths_member_scopes,
 )
-from app.common.errors import CalendarCoverageError
+from app.common.errors import CalendarCoverageError, ClosedBatchPlanMismatchError
 from app.core.config import settings
 from app.db.sync_session import SyncSessionFactory, sync_engine
 from app.modules.acquisition.factory import (
@@ -36,6 +39,7 @@ from app.modules.acquisition.factory import (
 )
 from app.modules.acquisition.models import BatchType
 from app.modules.acquisition.planner import StagePlan
+from app.modules.operations.models import ScheduledJobExecution
 from app.modules.partitions.service import ensure_monthly_partitions
 from app.modules.processing.factory import (
     get_dataset_specs,
@@ -363,28 +367,36 @@ def plan_hot_rank() -> None:
 
 
 def plan_due_collection_stages() -> None:
+    from app.scheduler.management import execute_scheduled_job
+
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
     stages = (
-        (time(hour=8, minute=45), plan_etf_share_size),
-        (time(hour=9, minute=25), plan_daily_preopen),
-        (time(hour=16, minute=10), plan_daily_close),
-        (time(hour=17, minute=30), plan_daily_late),
-        (time(hour=19), plan_daily_final),
-        (time(hour=20), plan_theme_members),
-        (time(hour=22, minute=35), plan_hot_rank),
+        (time(hour=8, minute=45), "plan-etf-share-size"),
+        (time(hour=9, minute=25), "plan-daily-preopen"),
+        (time(hour=16, minute=10), "plan-daily-close"),
+        (time(hour=17, minute=30), "plan-daily-late"),
+        (time(hour=19), "plan-daily-final"),
+        (time(hour=20), "plan-theme-members"),
+        (time(hour=22, minute=35), "plan-hot-rank"),
     )
-    for scheduled_time, plan_action in stages:
+    for scheduled_time, job_id in stages:
         if now.time() >= scheduled_time:
             try:
-                plan_action()
+                execute_scheduled_job(job_id, "STARTUP_CATCHUP")
             except CalendarCoverageError:
                 structlog.get_logger("scheduler").warning(
                     "daily_stage_waiting_for_calendar",
-                    stage=plan_action.__name__,
+                    stage=job_id,
                     business_date=now.date().isoformat(),
                 )
                 break
+            except Exception:
+                structlog.get_logger("scheduler").exception(
+                    "daily_startup_stage_failed",
+                    stage=job_id,
+                    business_date=now.date().isoformat(),
+                )
 
 
 def _plan_daily_stage(
@@ -410,7 +422,16 @@ def _plan_daily_stage(
 
 
 def _plan_stage(stage: StagePlan, *, now: datetime, stage_name: str) -> None:
-    result = get_collection_planner().plan(stage, now=now)
+    try:
+        result = get_collection_planner().plan(stage, now=now)
+    except ClosedBatchPlanMismatchError:
+        structlog.get_logger("scheduler").info(
+            "collection_stage_already_closed",
+            stage=stage_name,
+            batch_type=stage.batch_type.value,
+            business_date=stage.business_date.isoformat() if stage.business_date else None,
+        )
+        return
     structlog.get_logger("scheduler").info(
         "collection_stage_planned",
         stage=stage_name,
@@ -435,3 +456,52 @@ def ensure_future_partitions() -> None:
         partition_count=len(partition_names),
         through_month=partition_names[-1][-6:] if partition_names else None,
     )
+
+
+def cleanup_scheduled_job_executions() -> None:
+    cutoff = datetime.now(ZoneInfo(settings.scheduler_timezone)) - timedelta(
+        days=settings.scheduler_execution_retention_days
+    )
+    with SyncSessionFactory() as session, session.begin():
+        result = cast(
+            CursorResult[Any],
+            session.execute(
+                delete(ScheduledJobExecution).where(
+                    ScheduledJobExecution.created_at < cutoff,
+                    ScheduledJobExecution.status.in_(("SUCCESS", "FAILED")),
+                )
+            ),
+        )
+    structlog.get_logger("scheduler").info(
+        "scheduled_job_execution_history_cleaned",
+        deleted_count=int(result.rowcount or 0),
+        retention_days=settings.scheduler_execution_retention_days,
+    )
+
+
+def registered_job_functions() -> dict[str, Callable[[], None]]:
+    """Return the canonical scheduler function registry used by cron and manual runs."""
+    return {
+        "dispatch-collection-tasks": dispatch_collection_tasks,
+        "close-collection-batches": close_collection_batches,
+        "plan-processing-tasks": plan_processing_tasks,
+        "dispatch-processing-task": dispatch_processing_task,
+        "reconcile-collection-runtime": reconcile_collection_runtime,
+        "reconcile-processing-runtime": reconcile_processing_runtime,
+        "plan-trade-calendar": plan_trade_calendar,
+        "plan-stock-master": plan_stock_master,
+        "plan-etf-master": plan_etf_master,
+        "plan-special-master": plan_special_master,
+        "plan-concept-board-members": plan_ths_board_members,
+        "plan-monthly-index-weights": plan_monthly_index_weights,
+        "plan-next-year-trade-calendar": plan_next_year_trade_calendar,
+        "plan-daily-preopen": plan_daily_preopen,
+        "plan-daily-close": plan_daily_close,
+        "plan-daily-late": plan_daily_late,
+        "plan-daily-final": plan_daily_final,
+        "plan-etf-share-size": plan_etf_share_size,
+        "plan-theme-members": plan_theme_members,
+        "plan-hot-rank": plan_hot_rank,
+        "ensure-future-partitions": ensure_future_partitions,
+        "cleanup-scheduled-job-executions": cleanup_scheduled_job_executions,
+    }

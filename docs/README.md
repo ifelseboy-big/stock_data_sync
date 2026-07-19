@@ -9,7 +9,7 @@
 - 采集批次关闭后统一生成加工计划；全部加工任务共用一个全局串行入口。
 - Tushare 账户限制为 500 次/分钟，应用预算为 480 次/分钟；所有采集来源共享同一额度。
 - PostgreSQL 是任务状态、队列、依赖和发布的唯一事实来源，不引入 Redis、Kafka、Celery 或 Airflow。
-- 生产环境为 Mac mini 原生进程，由 `launchd` 管理。首次安装必须由用户指定统一安装目录，不提供默认目录。
+- 生产环境为 Mac mini 原生进程，由 `launchd` 管理。首次安装必须由用户指定统一安装目录；正式标签源码在目标 Mac 本地构建，普通升级只切换程序。
 
 ## 阅读顺序
 
@@ -20,7 +20,7 @@
 | 3 | [Tushare 采集设计](03-tushare-collection.md) | 接口范围、调用时间、限流、拆分、完整性和能力边界 |
 | 4 | [管理后台与可观测性设计](04-admin-console.md) | 运维页面、指标口径、管理 API 和告警规则 |
 | 5 | [技术依赖说明](05-dependencies.md) | 引入哪些库以及它们承担的职责 |
-| 6 | [Mac mini 发布与部署](06-deployment.md) | 首次安装、统一目录、服务管理、备份恢复和安全 |
+| 6 | [Mac mini 安装、升级与运行](06-deployment.md) | 源码安装、程序升级、doctor、配置和服务管理 |
 | 7 | [数据模型](data-model/README.md) | PostgreSQL 表结构、索引分区、写入规则和 Parquet 资产 |
 
 ## 维护规则

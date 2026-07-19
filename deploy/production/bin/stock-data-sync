@@ -1,31 +1,86 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RELEASE_DIR="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
+INSTALL_DIR="${STOCK_DATA_SYNC_INSTALL_DIR:-}"
+[[ -n "$INSTALL_DIR" ]] || {
+  printf '错误：缺少 STOCK_DATA_SYNC_INSTALL_DIR\n' >&2
+  exit 1
+}
 ENV_FILE="$INSTALL_DIR/config/app.env"
 PLIST_DIR="/Library/LaunchDaemons"
+ROOT_RUN_SERVICE="$INSTALL_DIR/bin/run-service"
+# shellcheck source=../lib/deploy-common.sh
+source "$SCRIPT_DIR/../lib/deploy-common.sh"
 
 fail() {
   printf '错误：%s\n' "$*" >&2
   exit 1
 }
 
+usage() {
+  cat <<'EOF'
+用法：sudo stock-data-sync <command> [参数]
+
+命令：
+  start [service...]       启动全部服务或指定服务；不会自动修改数据库
+  stop [service...]        停止全部服务或指定服务
+  restart [service...]     重启全部服务或指定服务；不会自动修改数据库
+  status                   查看服务状态和当前程序版本
+  version                  显示版本、commit 和安装目录
+  upgrade [--version V]    从 Git 正式标签本地构建并原子更换程序
+  rollback [--version V]   切换到已构建且数据库兼容的旧程序
+  doctor [选项]            执行安装、升级和运行状态检查
+  config [show|path|validate|edit]
+                           查看或修改单一 app.env 配置
+  migrate                  显式执行数据库迁移；普通升级不会调用
+  backup TARGET [--full]   手工备份数据库和 Parquet
+  verify-backup DIR        校验备份
+  restore DIR --confirm-database-replace
+                           显式恢复数据库和原始资产
+  logs [service]           查看日志
+
+服务名：postgres、server、scheduler、backup；web 是 server 的别名。
+EOF
+}
+
+command_name="${1:-}"
+if [[ "$command_name" == "help" || "$command_name" == "-h" || "$command_name" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
 require_root() {
-  (( EUID == 0 )) || fail "请使用 sudo 执行服务管理命令"
+  (( EUID == 0 )) || fail "请使用 sudo 执行此命令"
 }
 
 require_installation() {
   [[ "$(uname -s)" == "Darwin" ]] || fail "生产服务管理仅支持 macOS"
   [[ -f "$ENV_FILE" ]] || fail "缺少 $ENV_FILE"
-  [[ -x "$BIN_DIR/run-service" ]] || fail "缺少 $BIN_DIR/run-service"
+  [[ -x "$ROOT_RUN_SERVICE" ]] || fail "缺少 $ROOT_RUN_SERVICE"
+  [[ -L "$INSTALL_DIR/current" && -d "$INSTALL_DIR/current/server" ]] || fail "当前程序链接无效"
 }
 
 load_environment() {
+  local key expected_install_dir="$INSTALL_DIR"
+  /bin/bash -n "$ENV_FILE" || fail "配置文件存在 Shell 语法错误"
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
+  for key in \
+    INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_API_PREFIX HTTP_BIND HTTP_PORT \
+    POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL \
+    RAW_DATA_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE \
+    TUSHARE_REQUEST_BUDGET_PER_MINUTE; do
+    [[ -n "${!key:-}" ]] || fail "配置文件缺少必填项：$key"
+  done
+  [[ "$INSTALL_DIR" == "$expected_install_dir" ]] || fail "配置中的 INSTALL_DIR 与真实安装目录不一致"
+  export STOCK_DATA_SYNC_INSTALL_DIR="$expected_install_dir"
+  export INSTALL_DIR="$expected_install_dir"
+  export APP_VERSION="$(tr -d '[:space:]' < "$INSTALL_DIR/current/VERSION")"
+  export WEB_DIST_DIR="$INSTALL_DIR/current/web"
   export PGPASSWORD="$POSTGRES_PASSWORD"
 }
 
@@ -43,37 +98,25 @@ canonical_service() {
   [[ "$1" == "web" ]] && printf 'server\n' || printf '%s\n' "$1"
 }
 
-plist_for() {
-  printf '%s/%s.plist\n' "$PLIST_DIR" "$(label_for "$1")"
-}
-
-is_loaded() {
-  launchctl print "system/$(label_for "$1")" >/dev/null 2>&1
-}
+plist_for() { printf '%s/%s.plist\n' "$PLIST_DIR" "$(label_for "$1")"; }
+is_loaded() { launchctl print "system/$(label_for "$1")" >/dev/null 2>&1; }
 
 bootstrap_service() {
-  local service="$1"
-  local plist
+  local service="$1" plist
   plist="$(plist_for "$service")"
   [[ -f "$plist" ]] || fail "缺少 launchd 配置：$plist"
-  if ! is_loaded "$service"; then
-    launchctl bootstrap system "$plist"
-  fi
+  is_loaded "$service" || launchctl bootstrap system "$plist"
 }
 
 stop_service() {
   local service="$1"
-  if is_loaded "$service"; then
-    launchctl bootout "system/$(label_for "$service")"
-  fi
+  is_loaded "$service" && launchctl bootout "system/$(label_for "$service")" || true
 }
 
 wait_for_postgres() {
   local attempt
   for attempt in {1..30}; do
-    if "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
-      return
-    fi
+    "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1 && return 0
     sleep 1
   done
   fail "PostgreSQL 启动超时，请检查 $INSTALL_DIR/logs/postgres"
@@ -81,66 +124,272 @@ wait_for_postgres() {
 
 ensure_database() {
   local exists
-  exists="$(
-    "$POSTGRES_BIN_DIR/psql" \
-      -h 127.0.0.1 \
-      -p "$POSTGRES_PORT" \
-      -U "$POSTGRES_USER" \
-      -d postgres \
-      -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB'"
-  )"
+  exists="$("$POSTGRES_BIN_DIR/psql" -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d postgres \
+    -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB'")"
   if [[ "$exists" != "1" ]]; then
-    "$POSTGRES_BIN_DIR/createdb" \
-      -h 127.0.0.1 \
-      -p "$POSTGRES_PORT" \
-      -U "$POSTGRES_USER" \
-      -O "$POSTGRES_USER" \
-      "$POSTGRES_DB"
+    "$POSTGRES_BIN_DIR/createdb" -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" \
+      -O "$POSTGRES_USER" "$POSTGRES_DB"
   fi
 }
 
-run_migrations() {
-  /usr/bin/sudo -u "$SERVICE_USER" -H "$BIN_DIR/run-service" migrate
+require_database_compatibility() {
+  local target_release="${1:-$INSTALL_DIR/current}"
+  deploy_database_is_compatible "$target_release" || {
+    printf '错误：数据库 revision 与目标程序不兼容。\n' >&2
+    printf '普通启动和升级不会自动迁移或备份数据库，请使用明确的数据库升级流程。\n' >&2
+    return 1
+  }
 }
 
-start_all() {
+start_postgres() {
   bootstrap_service postgres
   wait_for_postgres
   ensure_database
-  run_migrations
+}
+
+start_selected() {
+  local service
+  service="$(canonical_service "$1")"
+  if [[ "$service" == "postgres" ]]; then
+    start_postgres
+    return
+  fi
+  start_postgres
+  require_database_compatibility "$INSTALL_DIR/current"
+  bootstrap_service "$service"
+}
+
+start_all() {
+  start_postgres
+  require_database_compatibility "$INSTALL_DIR/current"
   bootstrap_service server
   bootstrap_service scheduler
   [[ -f "$(plist_for backup)" ]] && bootstrap_service backup
 }
 
-start_selected() {
-  local requested="$1"
-  local service
-  service="$(canonical_service "$requested")"
-  if [[ "$service" == "postgres" ]]; then
-    bootstrap_service postgres
-    wait_for_postgres
-    ensure_database
-    return
+write_service_plist() {
+  local service="$1" label plist stdout_log stderr_log xml_run xml_install xml_user xml_stdout xml_stderr
+  label="$(label_for "$service")"
+  plist="$INSTALL_DIR/config/launchd/$label.plist"
+  stdout_log="$INSTALL_DIR/logs/$service/launchd.out.log"
+  stderr_log="$INSTALL_DIR/logs/$service/launchd.err.log"
+  xml_run="$(deploy_xml_escape "$ROOT_RUN_SERVICE")"
+  xml_install="$(deploy_xml_escape "$INSTALL_DIR")"
+  xml_user="$(deploy_xml_escape "$SERVICE_USER")"
+  xml_stdout="$(deploy_xml_escape "$stdout_log")"
+  xml_stderr="$(deploy_xml_escape "$stderr_log")"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>$xml_run</string><string>$service</string></array>
+  <key>WorkingDirectory</key><string>$xml_install</string>
+  <key>UserName</key><string>$xml_user</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$xml_stdout</string>
+  <key>StandardErrorPath</key><string>$xml_stderr</string>
+</dict></plist>
+EOF
+}
+
+write_backup_plist() {
+  local label="com.stockdatasync.backup" plist="$INSTALL_DIR/config/launchd/com.stockdatasync.backup.plist"
+  local xml_run xml_backup xml_install xml_user xml_stdout xml_stderr
+  xml_run="$(deploy_xml_escape "$ROOT_RUN_SERVICE")"
+  xml_backup="$(deploy_xml_escape "$BACKUP_TARGET_DIR")"
+  xml_install="$(deploy_xml_escape "$INSTALL_DIR")"
+  xml_user="$(deploy_xml_escape "$SERVICE_USER")"
+  xml_stdout="$(deploy_xml_escape "$INSTALL_DIR/logs/backup/launchd.out.log")"
+  xml_stderr="$(deploy_xml_escape "$INSTALL_DIR/logs/backup/launchd.err.log")"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>$xml_run</string><string>backup</string><string>$xml_backup</string></array>
+  <key>WorkingDirectory</key><string>$xml_install</string>
+  <key>UserName</key><string>$xml_user</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$xml_stdout</string>
+  <key>StandardErrorPath</key><string>$xml_stderr</string>
+</dict></plist>
+EOF
+}
+
+install_services() {
+  local service services
+  for service in postgres server scheduler; do write_service_plist "$service"; done
+  services=(postgres server scheduler)
+  if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
+    write_backup_plist
+    services+=(backup)
+  else
+    stop_service backup
+    rm -f -- \
+      "$INSTALL_DIR/config/launchd/com.stockdatasync.backup.plist" \
+      "/Library/LaunchDaemons/com.stockdatasync.backup.plist"
   fi
-  bootstrap_service postgres
-  wait_for_postgres
-  ensure_database
-  run_migrations
-  bootstrap_service "$service"
+  chown -R root:wheel "$INSTALL_DIR/config/launchd"
+  chmod 0644 "$INSTALL_DIR/config/launchd"/*.plist
+  plutil -lint "$INSTALL_DIR/config/launchd"/*.plist >/dev/null
+  for service in "${services[@]}"; do
+    install -o root -g wheel -m 0644 \
+      "$INSTALL_DIR/config/launchd/com.stockdatasync.$service.plist" \
+      "/Library/LaunchDaemons/com.stockdatasync.$service.plist"
+  done
+}
+
+doctor_failures=0
+doctor_warnings=0
+doctor_pass() { printf 'PASS  %s\n' "$*"; }
+doctor_warn() { printf 'WARN  %s\n' "$*" >&2; doctor_warnings=$((doctor_warnings + 1)); }
+doctor_fail_check() { printf 'FAIL  %s\n' "$*" >&2; doctor_failures=$((doctor_failures + 1)); }
+
+doctor_check_release() {
+  local target="$1"
+  [[ "$(stat -f '%Su' "$target")" == "root" ]] && doctor_pass "程序版本目录由 root 持有" || doctor_fail_check "程序版本目录所有者不可信"
+  [[ -f "$target/BUILD_COMPLETE" ]] && doctor_pass "程序构建完成：$(basename "$target")" || doctor_fail_check "程序构建标记缺失"
+  [[ -x "$target/server/.venv/bin/python" ]] && doctor_pass "Python 运行环境完整" || doctor_fail_check "Python 运行环境缺失"
+  [[ -f "$target/web/index.html" ]] && doctor_pass "Web 构建产物完整" || doctor_fail_check "Web 构建产物缺失"
+  [[ -s "$target/VERSION" && -s "$target/COMMIT" && -s "$target/ALEMBIC_HEADS" ]] && \
+    doctor_pass "版本、commit 和数据库兼容信息完整" || doctor_fail_check "版本元数据不完整"
+  if [[ -x "$target/server/.venv/bin/python" && -s "$target/VERSION" && -d "$target/web" ]]; then
+    if (
+      export APP_VERSION="$(tr -d '[:space:]' < "$target/VERSION")"
+      export WEB_DIST_DIR="$target/web"
+      cd "$target/server"
+      .venv/bin/python -c 'from app.core.config import Settings; Settings()'
+    ); then
+      doctor_pass "目标程序可以解析当前配置"
+    else
+      doctor_fail_check "目标程序无法解析当前配置"
+    fi
+  fi
+}
+
+run_doctor() {
+  local phase="runtime" target="$INSTALL_DIR/current" require_running=1
+  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --phase) (( $# >= 2 )) || fail "--phase 缺少参数"; phase="$2"; shift 2 ;;
+      --release-dir) (( $# >= 2 )) || fail "--release-dir 缺少参数"; target="$2"; shift 2 ;;
+      *) fail "doctor 未知参数：$1" ;;
+    esac
+  done
+  [[ "$phase" == "build" || "$phase" == "pre-upgrade" || "$phase" == "pre-rollback" || "$phase" == "installed-no-start" || "$phase" == "config" ]] && require_running=0
+  doctor_failures=0
+  doctor_warnings=0
+  printf 'Doctor 检查阶段：%s\n' "$phase"
+  [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] && doctor_pass "配置文件存在且不是软链接" || doctor_fail_check "配置文件无效"
+  if [[ -f "$ENV_FILE" ]]; then
+    [[ "$(stat -f '%Lp' "$ENV_FILE")" == "600" ]] && doctor_pass "配置文件权限为 0600" || doctor_fail_check "配置文件权限必须为 0600"
+    [[ "$(stat -f '%Su' "$ENV_FILE")" == "root" ]] && doctor_pass "配置文件由 root 持有" || doctor_fail_check "配置文件必须由 root 持有"
+    /bin/bash -n "$ENV_FILE" && doctor_pass "配置文件语法正确" || doctor_fail_check "配置文件存在语法错误"
+  fi
+  [[ -n "${TUSHARE_TOKEN:-}" ]] || doctor_warn "TUSHARE_TOKEN 尚未填写"
+  if [[ "$TUSHARE_REQUEST_BUDGET_PER_MINUTE" =~ ^[0-9]+$ && "$TUSHARE_REQUEST_LIMIT_PER_MINUTE" =~ ^[0-9]+$ ]] && \
+    (( 10#$TUSHARE_REQUEST_BUDGET_PER_MINUTE <= 10#$TUSHARE_REQUEST_LIMIT_PER_MINUTE )); then
+    doctor_pass "Tushare 请求预算合法"
+  else
+    doctor_fail_check "Tushare 请求预算无效或超过上限"
+  fi
+  deploy_validate_port "Web/API 端口" "$HTTP_PORT" >/dev/null 2>&1 && doctor_pass "Web/API 端口合法" || doctor_fail_check "Web/API 端口无效"
+  deploy_validate_port "PostgreSQL 端口" "$POSTGRES_PORT" >/dev/null 2>&1 && doctor_pass "PostgreSQL 端口合法" || doctor_fail_check "PostgreSQL 端口无效"
+  deploy_validate_bind_ip "Web/API 监听 IP" "$HTTP_BIND" >/dev/null 2>&1 && doctor_pass "Web/API 监听 IP 合法" || doctor_fail_check "Web/API 监听 IP 无效"
+  if [[ "$HTTP_BIND" == "0.0.0.0" || "$HTTP_BIND" == "127.0.0.1" ]] || \
+    /sbin/ifconfig | awk -v address="$HTTP_BIND" '$1 == "inet" && $2 == address {found=1} END {exit !found}'; then
+    doctor_pass "Web/API 监听 IP 可在本机使用"
+  else
+    doctor_fail_check "Web/API 监听 IP 不属于本机：$HTTP_BIND"
+  fi
+  [[ "$HTTP_PORT" != "$POSTGRES_PORT" ]] && doctor_pass "应用与数据库端口不同" || doctor_fail_check "应用与数据库端口冲突"
+  releases_real="$(cd "$INSTALL_DIR/releases" && pwd -P)"
+  if [[ -d "$target" ]]; then
+    target_real="$(cd "$target" && pwd -P)"
+    if [[ "$target_real" == "$releases_real/"* && "$(stat -f '%Su' "$target_real")" == "root" ]]; then
+      target_trusted=1
+    fi
+  fi
+  if (( target_trusted == 1 )); then
+    target="$target_real"
+    doctor_check_release "$target"
+  else
+    doctor_fail_check "目标程序目录不在受信任的 releases 目录中"
+  fi
+  [[ -x "$POSTGRES_BIN_DIR/postgres" ]] && doctor_pass "PostgreSQL 可执行文件存在" || doctor_fail_check "PostgreSQL 可执行文件缺失"
+  /usr/bin/sudo -u "$SERVICE_USER" test -r "$ENV_FILE" && doctor_pass "服务用户可读取配置" || doctor_fail_check "服务用户不能读取配置"
+  /usr/bin/sudo -u "$SERVICE_USER" test -w "$RAW_DATA_DIR" && doctor_pass "服务用户可写原始数据目录" || doctor_fail_check "服务用户不能写原始数据目录"
+  if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
+    [[ -d "$BACKUP_TARGET_DIR" ]] && doctor_pass "外部备份目录存在" || doctor_fail_check "外部备份目录不存在"
+    /usr/bin/sudo -u "$SERVICE_USER" test -w "$BACKUP_TARGET_DIR" && doctor_pass "服务用户可写外部备份目录" || doctor_fail_check "服务用户不能写外部备份目录"
+  else
+    doctor_warn "未配置外部备份目录"
+  fi
+  if [[ "$phase" == "pre-upgrade" ]]; then
+    service_home="$(deploy_service_home "$SERVICE_USER" || true)"
+    [[ -d "$INSTALL_DIR/source/repository.git" ]] && doctor_pass "本地 Git 源码镜像存在" || doctor_fail_check "本地 Git 源码镜像缺失"
+    if [[ -d "$INSTALL_DIR/source/repository.git" ]]; then
+      [[ "$(git --git-dir="$INSTALL_DIR/source/repository.git" remote get-url origin 2>/dev/null || true)" == "$SOURCE_REPOSITORY" ]] && \
+        doctor_pass "源码镜像地址与配置一致" || doctor_fail_check "源码镜像地址与配置不一致"
+    fi
+    for dependency in git npm node uv; do
+      deploy_find_executable "$dependency" "$service_home" >/dev/null 2>&1 && doctor_pass "升级依赖可用：$dependency" || doctor_fail_check "升级依赖缺失：$dependency"
+    done
+    node_bin="$(deploy_find_executable node "$service_home" || true)"
+    if [[ -n "$node_bin" ]]; then
+      node_major="$("$node_bin" -p 'process.versions.node.split(".")[0]')"
+      [[ "$node_major" == "22" ]] && doctor_pass "Node.js 22 版本正确" || doctor_fail_check "升级必须使用 Node.js 22"
+    fi
+    available_kb="$(df -Pk "$INSTALL_DIR" | awk 'NR == 2 {print $4}')"
+    [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] && doctor_pass "升级磁盘至少有 5 GiB 可用空间" || doctor_fail_check "升级磁盘可用空间不足 5 GiB"
+  fi
+  if "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
+    doctor_pass "PostgreSQL 可用"
+    if (( target_trusted == 1 )); then
+      deploy_database_is_compatible "$target" && doctor_pass "数据库 revision 与目标程序兼容" || doctor_fail_check "数据库 revision 与目标程序不兼容"
+    fi
+  elif [[ "$phase" == "build" || "$phase" == "installed-no-start" || "$phase" == "config" ]]; then
+    doctor_warn "PostgreSQL 当前未运行，跳过数据库兼容性检查"
+  else
+    doctor_fail_check "PostgreSQL 不可用"
+  fi
+  local service services=(postgres server scheduler)
+  [[ -n "${BACKUP_TARGET_DIR:-}" ]] && services+=(backup)
+  for service in "${services[@]}"; do
+    [[ -f "$(plist_for "$service")" ]] && plutil -lint "$(plist_for "$service")" >/dev/null && \
+      doctor_pass "launchd 配置有效：$service" || doctor_fail_check "launchd 配置无效：$service"
+  done
+  if (( require_running == 1 )); then
+    is_loaded postgres && doctor_pass "PostgreSQL 服务已加载" || doctor_fail_check "PostgreSQL 服务未加载"
+    is_loaded server && doctor_pass "Server 服务已加载" || doctor_fail_check "Server 服务未加载"
+    is_loaded scheduler && doctor_pass "Scheduler 服务已加载" || doctor_fail_check "Scheduler 服务未加载"
+    if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
+      is_loaded backup && doctor_pass "Backup 定时服务已加载" || doctor_fail_check "Backup 定时服务未加载"
+    fi
+    if curl -fsS --max-time 5 "http://127.0.0.1:$HTTP_PORT$APP_API_PREFIX/health/live" >/dev/null; then
+      doctor_pass "API 健康检查通过"
+    else
+      doctor_fail_check "API 健康检查失败"
+    fi
+  fi
+  printf 'Doctor 结果：%s 个失败，%s 个警告\n' "$doctor_failures" "$doctor_warnings"
+  (( doctor_failures == 0 ))
 }
 
 print_service_status() {
-  local service="$1"
-  local label
-  local pid
-  label="$(label_for "$service")"
+  local service="$1" pid
   if is_loaded "$service"; then
-    pid="$(launchctl print "system/$label" | awk '/pid =/ {print $3; exit}')"
+    pid="$(launchctl print "system/$(label_for "$service")" | awk '/pid =/ {print $3; exit}')"
     if [[ "$service" == "backup" && -z "$pid" ]]; then
       printf '%-10s 已加载（每日定时）\n' "$service"
     else
-      printf '%-10s 运行中%s\n' "$service" "${pid:+ (PID $pid)}"
+      printf '%-10s 已加载%s\n' "$service" "${pid:+ (PID $pid)}"
     fi
   else
     printf '%-10s 已停止\n' "$service"
@@ -148,171 +397,262 @@ print_service_status() {
 }
 
 show_logs() {
-  local service="$1"
-  case "$service" in
+  case "$1" in
     postgres) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/postgres/*.log ;;
     server|web) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/server/*.log ;;
     scheduler) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/scheduler/*.log ;;
     backup) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/backup/*.log ;;
-    *) fail "不支持的服务：$service" ;;
+    *) fail "不支持的服务：$1" ;;
   esac
 }
 
-usage() {
-  cat <<'EOF'
-用法：sudo stock-data-sync <command> [service...]
-
-命令：
-  start [service...]    启动全部服务或指定服务
-  stop [service...]     停止全部服务或指定服务
-  restart [service...]  重启全部服务或指定服务
-  status                查看 PostgreSQL、API/Web、Scheduler 和备份状态
-  logs [service]        持续查看指定服务日志
-  migrate               执行数据库迁移
-  doctor                检查安装目录和运行依赖
-  config                显示非敏感部署配置
-  backup TARGET_DIR [--full]
-                        备份数据库和 Parquet；目标必须在安装目录外
-  verify-backup DIR     校验备份清单、数据库和全部原始资产 SHA-256
-  restore DIR --confirm-database-replace
-                        替换数据库和原始资产；API 与 Scheduler 必须已停止
-
-服务名：postgres、server、scheduler、backup；web 是 server 的别名。
-EOF
+acquire_upgrade_lock() {
+  UPGRADE_LOCK="$INSTALL_DIR/.upgrade.lock"
+  mkdir "$UPGRADE_LOCK" 2>/dev/null || fail "已有安装、升级或回滚正在执行"
+  trap 'rmdir "$UPGRADE_LOCK" 2>/dev/null || true' EXIT
 }
 
-require_root
+resolve_upgrade_target() {
+  local requested="$1" mirror="$INSTALL_DIR/source/repository.git"
+  git --git-dir="$mirror" fetch --quiet --prune --tags origin
+  TARGET_TAG="$(deploy_resolve_tag "$mirror" "$requested")"
+}
+
+run_upgrade() {
+  local requested="" previous target service_home service_group
+  while (( $# > 0 )); do
+    case "$1" in
+      --version) (( $# >= 2 )) || fail "--version 缺少版本"; requested="$2"; shift 2 ;;
+      *) fail "upgrade 未知参数：$1" ;;
+    esac
+  done
+  acquire_upgrade_lock
+  start_postgres
+  run_doctor --phase pre-upgrade
+  resolve_upgrade_target "$requested"
+  service_home="$(deploy_service_home "$SERVICE_USER")"
+  service_group="$(id -gn "$SERVICE_USER")"
+  deploy_prepare_release "$INSTALL_DIR" "$SERVICE_USER" "$service_group" "$service_home" \
+    "$INSTALL_DIR/source/repository.git" "$TARGET_TAG" "$SOURCE_REPOSITORY"
+  target="$BUILT_RELEASE_DIR"
+  if [[ "$(cd "$target" && pwd -P)" == "$(cd "$INSTALL_DIR/current" && pwd -P)" ]]; then
+    printf '已经是最新版本：%s\n' "$BUILT_RELEASE_VERSION"
+    return 0
+  fi
+  run_doctor --phase build --release-dir "$target"
+  require_database_compatibility "$target"
+  previous="$(cd "$INSTALL_DIR/current" && pwd -P)"
+  stop_service scheduler
+  stop_service server
+  ln -sfn "releases/$(basename "$previous")" "$INSTALL_DIR/previous"
+  deploy_switch_current "$INSTALL_DIR" "$target"
+  bootstrap_service server
+  bootstrap_service scheduler
+  if ! run_doctor --phase post-upgrade; then
+    printf '升级后检查失败，正在切回旧程序。\n' >&2
+    stop_service scheduler
+    stop_service server
+    deploy_switch_current "$INSTALL_DIR" "$previous"
+    bootstrap_service server
+    bootstrap_service scheduler
+    run_doctor --phase rollback || true
+    fail "程序升级失败，已切回旧版本"
+  fi
+  deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$INSTALL_DIR" "$SOURCE_REPOSITORY" "$BUILT_RELEASE_VERSION"
+  printf '升级完成：%s (%s)\n' "$BUILT_RELEASE_VERSION" "$BUILT_RELEASE_COMMIT"
+}
+
+run_rollback() {
+  local requested="" target="" candidate current service_home service_group
+  while (( $# > 0 )); do
+    case "$1" in
+      --version) (( $# >= 2 )) || fail "--version 缺少版本"; requested="$(deploy_normalize_version "$2")"; shift 2 ;;
+      *) fail "rollback 未知参数：$1" ;;
+    esac
+  done
+  acquire_upgrade_lock
+  start_postgres
+  run_doctor --phase pre-rollback
+  current="$(cd "$INSTALL_DIR/current" && pwd -P)"
+  if [[ -n "$requested" ]]; then
+    for candidate in "$INSTALL_DIR/releases/$requested-"*; do
+      [[ -f "$candidate/BUILD_COMPLETE" ]] && target="$candidate" && break
+    done
+  elif [[ -L "$INSTALL_DIR/previous" ]]; then
+    target="$(cd "$INSTALL_DIR/previous" && pwd -P)"
+  fi
+  [[ -n "$target" && -d "$target" ]] || fail "找不到可回滚的已构建版本"
+  [[ "$target" != "$current" ]] || fail "目标版本已经在运行"
+  require_database_compatibility "$target"
+  stop_service scheduler
+  stop_service server
+  ln -sfn "releases/$(basename "$current")" "$INSTALL_DIR/previous"
+  deploy_switch_current "$INSTALL_DIR" "$target"
+  bootstrap_service server
+  bootstrap_service scheduler
+  run_doctor --phase rollback || {
+    stop_service scheduler; stop_service server
+    deploy_switch_current "$INSTALL_DIR" "$current"
+    bootstrap_service server; bootstrap_service scheduler
+    fail "回滚后检查失败，已恢复原程序"
+  }
+  service_home="$(deploy_service_home "$SERVICE_USER")"
+  service_group="$(id -gn "$SERVICE_USER")"
+  deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$INSTALL_DIR" "$SOURCE_REPOSITORY" "$(tr -d '[:space:]' < "$target/VERSION")"
+  printf '程序已回滚到：%s\n' "$(tr -d '[:space:]' < "$target/VERSION")"
+}
+
+validate_config_candidate() {
+  local candidate="$1"
+  /bin/bash -n "$candidate" || return 1
+  /bin/bash -c '
+    set -Eeuo pipefail
+    original="$1"
+    candidate="$2"
+    target_server="$3"
+    target_version="$4"
+    target_web="$5"
+    actual_install_dir="$6"
+    set -a
+    source "$original"
+    original_install_dir="$INSTALL_DIR"
+    original_service_user="$SERVICE_USER"
+    original_repository="$SOURCE_REPOSITORY"
+    original_app_env="$APP_ENV"
+    original_postgres_bin_dir="$POSTGRES_BIN_DIR"
+    original_postgres_port="$POSTGRES_PORT"
+    original_postgres_db="$POSTGRES_DB"
+    original_postgres_user="$POSTGRES_USER"
+    original_postgres_password="$POSTGRES_PASSWORD"
+    original_database_url="$DATABASE_URL"
+    original_raw_data_dir="$RAW_DATA_DIR"
+    original_web_dist_dir="$WEB_DIST_DIR"
+    original_scheduler_jobstore_table="$SCHEDULER_JOBSTORE_TABLE"
+    original_scheduler_advisory_lock_id="$SCHEDULER_ADVISORY_LOCK_ID"
+    original_processing_advisory_lock_id="$PROCESSING_ADVISORY_LOCK_ID"
+    for key in INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_ENV APP_API_PREFIX HTTP_BIND HTTP_PORT POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR WEB_DIST_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE TUSHARE_REQUEST_BUDGET_PER_MINUTE SCHEDULER_JOBSTORE_TABLE SCHEDULER_ADVISORY_LOCK_ID PROCESSING_ADVISORY_LOCK_ID; do
+      /usr/bin/grep -Eq "^[[:space:]]*${key}=" "$candidate" || { printf "缺少配置项：%s\\n" "$key" >&2; exit 1; }
+    done
+    source "$candidate"
+    set +a
+    for key in INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_API_PREFIX HTTP_BIND HTTP_PORT POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE TUSHARE_REQUEST_BUDGET_PER_MINUTE; do
+      [[ -n "${!key:-}" ]] || { printf "缺少必填配置：%s\\n" "$key" >&2; exit 1; }
+    done
+    for key in INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_ENV POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR WEB_DIST_DIR SCHEDULER_JOBSTORE_TABLE SCHEDULER_ADVISORY_LOCK_ID PROCESSING_ADVISORY_LOCK_ID; do
+      original_key="original_$(printf "%s" "$key" | tr "[:upper:]" "[:lower:]")"
+      [[ "${!key}" == "${!original_key}" ]] || { printf "%s 由安装器维护，不允许修改\\n" "$key" >&2; exit 1; }
+    done
+    [[ "$INSTALL_DIR" == "$actual_install_dir" ]] || { printf "INSTALL_DIR 与真实安装目录不一致\\n" >&2; exit 1; }
+    [[ "$HTTP_BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { printf "HTTP_BIND 必须是 IPv4 地址\\n" >&2; exit 1; }
+    IFS=. read -r bind_a bind_b bind_c bind_d <<< "$HTTP_BIND"
+    for octet in "$bind_a" "$bind_b" "$bind_c" "$bind_d"; do
+      (( 10#$octet <= 255 )) || { printf "HTTP_BIND 不是有效的 IPv4 地址\\n" >&2; exit 1; }
+    done
+    [[ "$HTTP_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$HTTP_PORT >= 1 && 10#$HTTP_PORT <= 65535 )) || { printf "HTTP_PORT 必须在 1-65535 之间\\n" >&2; exit 1; }
+    [[ "$HTTP_PORT" != "$POSTGRES_PORT" ]] || { printf "HTTP_PORT 与 POSTGRES_PORT 不能相同\\n" >&2; exit 1; }
+    export APP_VERSION="$target_version"
+    export WEB_DIST_DIR="$target_web"
+    cd "$target_server"
+    .venv/bin/python -c "from app.core.config import Settings; Settings()"
+  ' _ "$ENV_FILE" "$candidate" "$INSTALL_DIR/current/server" "$APP_VERSION" "$INSTALL_DIR/current/web" "$INSTALL_DIR"
+}
+
+run_config() {
+  local action="${1:-show}" temporary editor
+  case "$action" in
+    show)
+      printf '配置文件：%s\n' "$ENV_FILE"
+      printf '安装目录：%s\n' "$INSTALL_DIR"
+      printf '服务用户：%s\n' "$SERVICE_USER"
+      printf '监听地址：http://%s:%s\n' "$HTTP_BIND" "$HTTP_PORT"
+      printf 'PostgreSQL：127.0.0.1:%s/%s\n' "$POSTGRES_PORT" "$POSTGRES_DB"
+      printf '原始数据：%s\n' "$RAW_DATA_DIR"
+      printf '外部备份：%s\n' "${BACKUP_TARGET_DIR:-未配置}"
+      ;;
+    path) printf '%s\n' "$ENV_FILE" ;;
+    validate)
+      run_doctor --phase config
+      ;;
+    edit)
+      temporary="$(mktemp "$INSTALL_DIR/config/.app.env.XXXXXX")"
+      cp -p "$ENV_FILE" "$temporary"
+      editor="${EDITOR:-vi}"
+      "$editor" "$temporary"
+      validate_config_candidate "$temporary" || { rm -f "$temporary"; fail "配置校验失败，未保存"; }
+      install -o root -g wheel -m 0600 "$temporary" "$ENV_FILE"
+      rm -f "$temporary"
+      chmod +a "$SERVICE_USER allow read" "$ENV_FILE"
+      load_environment
+      install_services
+      run_doctor --phase config
+      printf '配置已保存；请按需执行 sudo stock-data-sync restart。\n'
+      ;;
+    *) fail "config 仅支持 show、path、validate、edit" ;;
+  esac
+}
+
+[[ -n "$command_name" ]] || { usage; exit 1; }
+shift
+if [[ "$command_name" == "version" ]]; then
+  [[ -s "$INSTALL_DIR/current/VERSION" && -s "$INSTALL_DIR/current/COMMIT" ]] || fail "当前版本元数据缺失"
+  printf '版本：%s\nCommit：%s\n安装目录：%s\n' \
+    "$(tr -d '[:space:]' < "$INSTALL_DIR/current/VERSION")" \
+    "$(cat "$INSTALL_DIR/current/COMMIT")" "$INSTALL_DIR"
+  exit 0
+fi
 require_installation
+require_root
 load_environment
 
-command_name="${1:-}"
-[[ -n "$command_name" ]] || {
-  usage
-  exit 1
-}
-shift
-
 case "$command_name" in
+  install-services) install_services ;;
   start)
-    if (( $# == 0 )); then
-      start_all
-    else
-      for service in "$@"; do
-        start_selected "$service"
-      done
-    fi
+    if (( $# == 0 )); then start_all; else for service in "$@"; do start_selected "$service"; done; fi
     ;;
   stop)
     if (( $# == 0 )); then
-      stop_service backup
-      stop_service scheduler
-      stop_service server
-      stop_service postgres
+      stop_service backup; stop_service scheduler; stop_service server; stop_service postgres
     else
-      for service in "$@"; do
-        stop_service "$(canonical_service "$service")"
-      done
+      for service in "$@"; do stop_service "$(canonical_service "$service")"; done
     fi
     ;;
   restart)
     if (( $# == 0 )); then
-      stop_service backup
-      stop_service scheduler
-      stop_service server
-      stop_service postgres
-      start_all
+      stop_service backup; stop_service scheduler; stop_service server; stop_service postgres; start_all
     else
-      for service in "$@"; do
-        canonical="$(canonical_service "$service")"
-        stop_service "$canonical"
-        start_selected "$canonical"
-      done
+      for service in "$@"; do stop_service "$(canonical_service "$service")"; start_selected "$service"; done
     fi
     ;;
   status)
-    print_service_status postgres
-    print_service_status server
-    print_service_status scheduler
+    printf 'version    %s (%s)\n' "$APP_VERSION" "$(cut -c1-12 "$INSTALL_DIR/current/COMMIT")"
+    print_service_status postgres; print_service_status server; print_service_status scheduler
     [[ -f "$(plist_for backup)" ]] && print_service_status backup
     ;;
-  logs)
-    show_logs "${1:-server}"
-    ;;
+  upgrade) run_upgrade "$@" ;;
+  rollback) run_rollback "$@" ;;
+  doctor) run_doctor "$@" ;;
+  config) run_config "$@" ;;
+  logs) show_logs "${1:-server}" ;;
   migrate)
-    bootstrap_service postgres
-    wait_for_postgres
-    ensure_database
-    run_migrations
-    ;;
-  doctor)
-    config_mode="$(stat -f '%Lp' "$ENV_FILE")"
-    config_owner="$(stat -f '%Su' "$ENV_FILE")"
-    [[ "$config_mode" == "600" ]] || fail "配置文件权限必须为 0600，当前为 $config_mode"
-    [[ "$config_owner" == "root" ]] || fail "配置文件必须由 root 持有"
-    [[ -n "$ADMIN_API_TOKEN" ]] || fail "ADMIN_API_TOKEN 未配置"
-    [[ -n "$TUSHARE_TOKEN" ]] || fail "TUSHARE_TOKEN 未配置"
-    (( TUSHARE_REQUEST_BUDGET_PER_MINUTE <= TUSHARE_REQUEST_LIMIT_PER_MINUTE )) || \
-      fail "Tushare 请求预算超过供应方限制"
-    [[ -d "$INSTALL_DIR/app/server/.venv" ]] || fail "服务端虚拟环境不存在"
-    [[ -f "$INSTALL_DIR/app/web/index.html" ]] || fail "Web 构建产物不存在"
-    [[ -x "$POSTGRES_BIN_DIR/postgres" ]] || fail "PostgreSQL 可执行文件不存在"
-    /usr/bin/sudo -u "$SERVICE_USER" test -r "$ENV_FILE" || fail "服务用户无法读取配置文件"
-    /usr/bin/sudo -u "$SERVICE_USER" test -w "$RAW_DATA_DIR" || fail "服务用户无法写入原始数据目录"
-    "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null || \
-      fail "PostgreSQL 不可用"
-    (
-      cd "$INSTALL_DIR/app/server"
-      .venv/bin/python -c 'from app.core.config import Settings; Settings()'
-      .venv/bin/alembic current >/dev/null
-    )
-    doctor_plists=("$(plist_for postgres)" "$(plist_for server)" "$(plist_for scheduler)")
-    if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
-      [[ -d "$BACKUP_TARGET_DIR" ]] || fail "备份目标目录不存在"
-      /usr/bin/sudo -u "$SERVICE_USER" test -w "$BACKUP_TARGET_DIR" || \
-        fail "服务用户无法写入备份目标"
-      doctor_plists+=("$(plist_for backup)")
-    else
-      printf '警告：未配置每日外部备份，请使用 --backup-dir 安装或执行手工备份。\n' >&2
-    fi
-    plutil -lint "${doctor_plists[@]}"
-    printf '安装检查通过\n'
-    ;;
-  config)
-    printf '安装目录：%s\n' "$INSTALL_DIR"
-    printf '服务用户：%s\n' "$SERVICE_USER"
-    printf '访问地址：http://%s:%s\n' "$HTTP_BIND" "$HTTP_PORT"
-    printf 'PostgreSQL：127.0.0.1:%s/%s\n' "$POSTGRES_PORT" "$POSTGRES_DB"
-    printf '原始数据：%s\n' "$RAW_DATA_DIR"
-    printf '外部备份：%s\n' "${BACKUP_TARGET_DIR:-未配置}"
+    start_postgres
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" migrate
     ;;
   backup)
-    [[ $# == 1 || ( $# == 2 && "$2" == "--full" ) ]] || \
-      fail "用法：stock-data-sync backup TARGET_DIR [--full]"
-    "$BIN_DIR/run-service" backup "$1" "${2:-}"
+    [[ $# == 1 || ( $# == 2 && "$2" == "--full" ) ]] || fail "用法：stock-data-sync backup TARGET [--full]"
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" backup "$1" "${2:-}"
     ;;
   verify-backup)
-    [[ $# == 1 ]] || fail "用法：stock-data-sync verify-backup BACKUP_DIR"
-    "$BIN_DIR/run-service" verify-backup "$1"
+    [[ $# == 1 ]] || fail "用法：stock-data-sync verify-backup DIR"
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" verify-backup "$1"
     ;;
   restore)
-    [[ $# == 2 && "$2" == "--confirm-database-replace" ]] || \
-      fail "用法：stock-data-sync restore BACKUP_DIR --confirm-database-replace"
+    [[ $# == 2 && "$2" == "--confirm-database-replace" ]] || fail "用法：stock-data-sync restore DIR --confirm-database-replace"
     ! is_loaded server || fail "恢复前必须停止 server"
     ! is_loaded scheduler || fail "恢复前必须停止 scheduler"
-    bootstrap_service postgres
-    wait_for_postgres
-    ensure_database
-    "$BIN_DIR/run-service" restore "$1"
-    service_group="$(id -gn "$SERVICE_USER")"
-    chown -R "$SERVICE_USER:$service_group" "$RAW_DATA_DIR"
-    run_migrations
-    printf '恢复完成。旧原始数据目录已保留；验证成功后再由管理员清理。\n'
+    start_postgres
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" restore "$1"
+    chown -R "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$RAW_DATA_DIR"
+    printf '恢复完成；数据库迁移未自动执行。\n'
     ;;
-  help|-h|--help)
-    usage
-    ;;
-  *)
-    usage
-    fail "不支持的命令：$command_name"
-    ;;
+  *) usage; fail "不支持的命令：$command_name" ;;
 esac

@@ -38,6 +38,12 @@ const router = createRouter({
           meta: { title: '数据发布' },
         },
         {
+          path: 'schedules',
+          name: 'schedules',
+          component: () => import('@/modules/operations/views/ScheduledJobsView.vue'),
+          meta: { title: '任务调度' },
+        },
+        {
           path: 'providers',
           name: 'providers',
           component: () => import('@/modules/providers/views/ProviderMonitoringView.vue'),

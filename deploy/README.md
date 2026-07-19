@@ -1,8 +1,11 @@
 # 部署配置
 
-- `production/install.sh`：Mac mini 首次安装入口。
-- `production/bin/run-service`：`launchd` 使用的内部进程入口。
-- `production/bin/stock-data-sync`：统一的服务管理、检查、迁移、备份、校验和恢复命令。
-- `../scripts/build-release.sh`：生成包含服务端源码、Vue 构建产物和安装器的发布包。
+- `production/install.sh`：GitHub Release 发布的一行安装入口。
+- `production/install-local.sh`：拉取正式标签后执行的首次本地构建和初始化。
+- `production/lib/deploy-common.sh`：本地构建、版本切换和安装发现公共逻辑。
+- `production/bootstrap/`：不随版本变化的全局命令和 launchd 薄入口。
+- `production/bin/stock-data-sync`：版本化服务管理、doctor、升级和程序回滚命令。
+- `production/bin/run-service`：当前版本的实际进程入口。
+- `../scripts/build-release.sh`：生成 GitHub Release 的安装器、manifest 和校验文件，不生成应用二进制包。
 
-安装目录不在代码中预设，由用户首次安装时明确指定。有效备份目标同样由用户指定，并且必须位于安装目录之外。完整流程见 [Mac mini 发布与部署](../docs/06-deployment.md)。
+首次安装目录、Web/API 监听 IPv4、Web/API 端口和 PostgreSQL 端口都没有默认值，必须由用户明确指定；后续通过 `~/.stock-data-sync/install.conf` 自动发现。普通升级只更换程序，不备份或迁移数据库。完整流程见 [Mac mini 安装、升级与运行](../docs/06-deployment.md)。

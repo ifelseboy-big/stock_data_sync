@@ -46,7 +46,7 @@ function canRetry(value: unknown) {
 
 function canStop(value: unknown) {
   const row = value as RunRecordItem
-  return ['pending', 'waiting_retry', 'blocked'].includes(row.status)
+  return ['waiting_dependency', 'pending', 'waiting_retry', 'blocked'].includes(row.status)
 }
 
 function openCommand(value: unknown, transition: TaskTransition) {
@@ -96,6 +96,8 @@ async function submitCommand(value: {
         <el-form-item label="状态">
           <el-select v-model="status" placeholder="全部状态" clearable style="width: 140px">
             <el-option label="运行中" value="running" />
+            <el-option label="等待依赖" value="waiting_dependency" />
+            <el-option label="待执行" value="pending" />
             <el-option label="等待重试" value="waiting_retry" />
             <el-option label="成功" value="succeeded" />
             <el-option label="失败" value="failed" />
@@ -114,13 +116,14 @@ async function submitCommand(value: {
         empty-description="任务产生执行实例后会显示在这里。"
         @retry="load"
       >
-        <el-table :data="data?.items ?? []">
+        <el-table :data="data?.items ?? []" scrollbar-always-on>
           <el-table-column label="类型" width="100">
             <template #default="{ row }">{{
               row.runType === 'acquisition' ? '采集' : '加工'
             }}</template>
           </el-table-column>
           <el-table-column prop="taskName" label="任务" min-width="180" />
+          <el-table-column prop="scopeKey" label="任务范围" min-width="220" show-overflow-tooltip />
           <el-table-column prop="batchCode" label="批次" min-width="170" />
           <el-table-column prop="dataCycle" label="数据周期" min-width="120" />
           <el-table-column label="状态" width="110">

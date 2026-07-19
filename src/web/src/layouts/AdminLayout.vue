@@ -11,6 +11,7 @@ import {
   Menu as MenuIcon,
   Monitor,
   SetUp,
+  Timer,
 } from '@element-plus/icons-vue'
 import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
@@ -72,6 +73,10 @@ watch(isMobile, (mobile) => appStore.setSidebarCollapsed(mobile), { immediate: t
               <el-icon><Monitor /></el-icon>
               <span>观测中心</span>
             </template>
+            <el-menu-item index="/schedules">
+              <el-icon><Timer /></el-icon>
+              <template #title>任务调度</template>
+            </el-menu-item>
             <el-menu-item index="/providers">
               <el-icon><Connection /></el-icon>
               <template #title>接口监控</template>

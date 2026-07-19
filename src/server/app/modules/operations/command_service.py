@@ -20,8 +20,13 @@ from app.modules.acquisition.models import (
     CollectionTask,
     CollectionTaskStatus,
 )
-from app.modules.operations.models import OperationCommand
+from app.modules.operations.models import (
+    OperationCommand,
+    ScheduledJobControl,
+    ScheduledJobExecution,
+)
 from app.modules.operations.schemas import OperationCommandResult
+from app.modules.partitions.service import ensure_partitions_for_range
 from app.modules.processing.models import (
     DependencyStatus,
     ProcessingDependency,
@@ -30,6 +35,7 @@ from app.modules.processing.models import (
 )
 from app.modules.stocks.models import TradeCalendar
 from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
+from app.scheduler.catalog import SCHEDULED_JOB_BY_ID, ScheduledJobDefinition
 
 COLLECTION_RETRYABLE = frozenset(
     {
@@ -102,6 +108,14 @@ class OperationCommandService:
                 )
             specs = self._resolve_specs(api_names, daily_only=True)
             trading_dates = await self._trading_dates(start_date, end_date)
+            connection = await self._session.connection()
+            partition_names = await connection.run_sync(
+                lambda sync_connection: ensure_partitions_for_range(
+                    sync_connection,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
             batch_ids = [
                 str(
                     await self._create_batch(
@@ -117,6 +131,7 @@ class OperationCommandService:
                 "batchIds": batch_ids,
                 "batchCount": len(batch_ids),
                 "tradingDateCount": len(trading_dates),
+                "partitionCount": len(partition_names),
             }
 
         return await self._execute(
@@ -159,6 +174,94 @@ class OperationCommandService:
             target_id=None,
             reason=reason,
             payload=payload,
+            context=context,
+            apply=apply,
+        )
+
+    async def set_scheduled_job_enabled(
+        self,
+        job_id: str,
+        *,
+        enabled: bool,
+        reason: str,
+        context: "CommandContext",
+    ) -> OperationCommandResult:
+        self._scheduled_job(job_id)
+
+        async def apply(now: datetime) -> dict[str, object]:
+            await self._session.execute(
+                insert(ScheduledJobControl)
+                .values(
+                    job_id=job_id,
+                    enabled=enabled,
+                    updated_at=now,
+                    updated_by=context.actor,
+                )
+                .on_conflict_do_update(
+                    index_elements=(ScheduledJobControl.job_id,),
+                    set_={
+                        "enabled": enabled,
+                        "updated_at": now,
+                        "updated_by": context.actor,
+                    },
+                )
+            )
+            return {"jobId": job_id, "enabled": enabled}
+
+        return await self._execute(
+            action="ENABLE_SCHEDULED_JOB" if enabled else "DISABLE_SCHEDULED_JOB",
+            target_type="scheduled_job",
+            target_id=job_id,
+            reason=reason,
+            payload={"job_id": job_id, "enabled": enabled, "reason": reason},
+            context=context,
+            apply=apply,
+        )
+
+    async def request_scheduled_job_run(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        context: "CommandContext",
+    ) -> OperationCommandResult:
+        definition = self._scheduled_job(job_id)
+        if not definition.manual_allowed:
+            raise OperationCommandError("该任务不允许人工执行", status_code=422)
+
+        async def apply(now: datetime) -> dict[str, object]:
+            active_count = await self._session.scalar(
+                select(func.count())
+                .select_from(ScheduledJobExecution)
+                .where(
+                    ScheduledJobExecution.job_id == job_id,
+                    ScheduledJobExecution.status.in_(("PENDING", "RUNNING")),
+                )
+            )
+            if int(active_count or 0):
+                raise OperationCommandError("该定时任务已有待执行或运行中的人工请求")
+            execution_id = uuid4()
+            self._session.add(
+                ScheduledJobExecution(
+                    execution_id=execution_id,
+                    job_id=job_id,
+                    trigger_type="MANUAL",
+                    status="PENDING",
+                    requested_by=context.actor,
+                    reason=reason,
+                    scheduled_at=now,
+                    created_at=now,
+                )
+            )
+            await self._session.flush()
+            return {"jobId": job_id, "executionId": str(execution_id), "status": "PENDING"}
+
+        return await self._execute(
+            action="RUN_SCHEDULED_JOB",
+            target_type="scheduled_job",
+            target_id=job_id,
+            reason=reason,
+            payload={"job_id": job_id, "reason": reason},
             context=context,
             apply=apply,
         )
@@ -500,6 +603,13 @@ class OperationCommandService:
                 )
             specs.append(spec)
         return tuple(specs)
+
+    @staticmethod
+    def _scheduled_job(job_id: str) -> ScheduledJobDefinition:
+        definition = SCHEDULED_JOB_BY_ID.get(job_id)
+        if definition is None:
+            raise OperationCommandError("定时任务不存在", status_code=404)
+        return definition
 
     async def _trading_dates(self, start_date: date, end_date: date) -> tuple[date, ...]:
         expected_days = (end_date - start_date).days + 1

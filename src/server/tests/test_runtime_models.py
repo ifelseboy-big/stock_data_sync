@@ -97,7 +97,7 @@ def test_alembic_has_one_head() -> None:
     config = Config(server_dir / "alembic.ini")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260719_0005"]
+    assert script.get_heads() == ["20260719_0007"]
 
 
 def test_runtime_schema_compiles_for_postgresql() -> None:

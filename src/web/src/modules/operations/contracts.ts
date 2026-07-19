@@ -1,5 +1,6 @@
 export type ExecutionStatus =
   | 'pending'
+  | 'waiting_dependency'
   | 'running'
   | 'waiting_retry'
   | 'succeeded'
@@ -72,6 +73,7 @@ export interface DependencyItem {
   processingTaskName: string
   batchCode: string
   sourceEndpoint: string
+  sourceScope: string
   sourceCycle: string
   sourcePolicy: 'current_cycle' | 'latest_valid'
   sourceReady: boolean
@@ -104,6 +106,7 @@ export interface RunRecordItem {
   id: string
   runType: 'acquisition' | 'processing'
   taskName: string
+  scopeKey: string | null
   batchCode: string
   dataCycle: string
   status: ExecutionStatus
@@ -153,6 +156,13 @@ export interface DatasetReleaseItem {
   processorVersion: string
   rowCount: number
   publishedAt: string
+}
+
+export interface DatasetReleaseCoverageItem {
+  businessDate: string
+  expectedCount: number
+  publishedCount: number
+  missingDatasets: string[]
 }
 
 export interface DatasetReleaseQuery {
@@ -222,7 +232,46 @@ export interface DependencyQuery {
 }
 
 export interface AlertQuery {
-  source?: 'acquisition' | 'processing' | 'storage'
+  source?: 'acquisition' | 'processing' | 'scheduler' | 'storage'
+  page?: number
+  pageSize?: number
+}
+
+export type ScheduledJobStatus = 'pending' | 'running' | 'success' | 'failed'
+export type ScheduledJobAction = 'enable' | 'disable' | 'run'
+
+export interface ScheduledJobItem {
+  jobId: string
+  name: string
+  category: string
+  schedule: string
+  enabled: boolean
+  manualAllowed: boolean
+  nextRunAt: string | null
+  lastStatus: ScheduledJobStatus | null
+  lastStartedAt: string | null
+  lastFinishedAt: string | null
+  lastDurationMs: number | null
+  lastError: string | null
+}
+
+export interface ScheduledJobExecutionItem {
+  executionId: string
+  jobId: string
+  triggerType: 'scheduled' | 'manual' | 'startup_catchup'
+  status: ScheduledJobStatus
+  requestedBy: string | null
+  reason: string | null
+  scheduledAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
+  durationMs: number | null
+  errorMessage: string | null
+}
+
+export interface ScheduledJobExecutionQuery {
+  jobId?: string
+  status?: ScheduledJobStatus
   page?: number
   pageSize?: number
 }

@@ -1,0 +1,80 @@
+name: Release installer
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  verify-and-release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/web/package-lock.json
+
+      - name: Install build dependencies
+        run: brew install uv
+
+      - name: Verify server
+        working-directory: src/server
+        run: |
+          uv sync --frozen --all-groups
+          uv run ruff check .
+          uv run mypy app
+          uv run pytest
+
+      - name: Verify web
+        working-directory: src/web
+        run: |
+          npm ci
+          npm run lint
+          npm run type-check
+          npm run test:run
+          npm run build
+
+      - name: Verify deployment scripts
+        run: |
+          bash -n deploy/production/install.sh
+          bash -n deploy/production/install-local.sh
+          bash -n deploy/production/lib/deploy-common.sh
+          bash -n deploy/production/bin/stock-data-sync
+          bash -n deploy/production/bin/run-service
+          bash -n deploy/production/bootstrap/installed-stock-data-sync
+          bash -n deploy/production/bootstrap/global-stock-data-sync
+          bash -n deploy/production/bootstrap/run-service
+          deploy/production/tests/test-deploy-common.sh
+
+      - name: Prepare release assets
+        run: ./scripts/build-release.sh "${GITHUB_REF_NAME#v}" "https://github.com/${GITHUB_REPOSITORY}.git"
+
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/install.sh
+            dist/release-manifest.json
+            dist/SHA256SUMS
+
+      - name: Publish immutable release inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/install.sh \
+            dist/release-manifest.json \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

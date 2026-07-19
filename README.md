@@ -80,10 +80,28 @@ uv run alembic revision --autogenerate -m "add tables"
 uv run alembic upgrade head
 ```
 
-## 发布
+## 发布与安装
 
 ```bash
-make release VERSION=0.1.0
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
-生产服务器上的安装目录由用户首次安装时指定，没有内置默认目录。安装及 `start`、`stop`、`restart` 命令见[Mac mini 发布与部署](docs/06-deployment.md)。
+GitHub Actions 会校验代码并生成 Release 安装入口。目标 Mac 从正式标签拉取源码并在本地构建。首次安装必须明确指定目录：
+
+```bash
+curl -fsSL https://github.com/ORG/stock-data-sync/releases/latest/download/install.sh \
+  | sudo bash -s -- \
+      --install-dir /用户指定的绝对路径 \
+      --http-bind 0.0.0.0 \
+      --http-port 18080 \
+      --postgres-port 15432
+```
+
+以后升级不需要再次指定目录：
+
+```bash
+sudo stock-data-sync upgrade
+```
+
+普通升级只切换程序，不备份或迁移数据库。完整说明见 [Mac mini 安装、升级与运行](docs/06-deployment.md)。

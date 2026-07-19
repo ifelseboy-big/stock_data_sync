@@ -55,6 +55,36 @@ def planned_partitions(reference_date: date, months_ahead: int) -> tuple[Partiti
     return tuple(specs)
 
 
+def planned_partitions_for_range(start_date: date, end_date: date) -> tuple[PartitionSpec, ...]:
+    """Plan every monthly partition touched by an inclusive historical range."""
+    if end_date < start_date:
+        raise ValueError("end_date must not be earlier than start_date")
+
+    first_month = month_start(start_date)
+    last_month = month_start(end_date)
+    month_count = (last_month.year - first_month.year) * 12 + last_month.month - first_month.month
+    return planned_partitions(first_month, months_ahead=month_count)
+
+
+def planned_partitions_for_table(
+    parent_table: str,
+    business_dates: tuple[date, ...],
+) -> tuple[PartitionSpec, ...]:
+    """Plan only the partitions touched by one write to a known parent table."""
+    if parent_table not in PARTITIONED_TABLES:
+        raise ValueError(f"{parent_table} is not a managed partitioned table")
+
+    return tuple(
+        PartitionSpec(
+            parent_table=parent_table,
+            partition_table=f"{parent_table}_p{start_date:%Y%m}",
+            start_date=start_date,
+            end_date=month_start(start_date, 1),
+        )
+        for start_date in sorted({month_start(value) for value in business_dates})
+    )
+
+
 def ensure_monthly_partitions(
     connection: Connection,
     *,
@@ -65,6 +95,34 @@ def ensure_monthly_partitions(
 
     partition_names: list[str] = []
     for spec in planned_partitions(reference_date, months_ahead):
+        connection.exec_driver_sql(spec.create_sql())
+        partition_names.append(spec.partition_table)
+    return tuple(partition_names)
+
+
+def ensure_partitions_for_range(
+    connection: Connection,
+    *,
+    start_date: date,
+    end_date: date,
+) -> tuple[str, ...]:
+    """Ensure all monthly partitions needed by a historical backfill exist."""
+    partition_names: list[str] = []
+    for spec in planned_partitions_for_range(start_date, end_date):
+        connection.exec_driver_sql(spec.create_sql())
+        partition_names.append(spec.partition_table)
+    return tuple(partition_names)
+
+
+def ensure_partitions_for_write(
+    connection: Connection,
+    *,
+    parent_table: str,
+    business_dates: tuple[date, ...],
+) -> tuple[str, ...]:
+    """Ensure the exact monthly partitions needed by a formal-table write."""
+    partition_names: list[str] = []
+    for spec in planned_partitions_for_table(parent_table, business_dates):
         connection.exec_driver_sql(spec.create_sql())
         partition_names.append(spec.partition_table)
     return tuple(partition_names)

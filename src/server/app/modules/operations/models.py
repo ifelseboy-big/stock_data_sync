@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -81,3 +82,53 @@ class OperationCommand(Base):
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ScheduledJobControl(Base):
+    __tablename__ = "scheduled_job_control"
+
+    job_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class ScheduledJobExecution(Base):
+    __tablename__ = "scheduled_job_execution"
+    __table_args__ = (
+        CheckConstraint(
+            "trigger_type IN ('SCHEDULED', 'MANUAL', 'STARTUP_CATCHUP')",
+            name="scheduled_job_execution_trigger",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED')",
+            name="scheduled_job_execution_status",
+        ),
+        Index("idx_scheduled_job_execution_created", "created_at"),
+        Index("idx_scheduled_job_execution_job_time", "job_id", "created_at"),
+        Index(
+            "idx_scheduled_job_execution_pending",
+            "created_at",
+            "execution_id",
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+    )
+
+    execution_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    job_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )

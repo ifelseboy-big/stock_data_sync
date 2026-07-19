@@ -9,7 +9,7 @@ import type { AlertLevel } from '@/modules/operations/contracts'
 import { formatDateTime } from '@/modules/operations/presentation'
 
 const page = ref(1)
-const source = ref<'' | 'acquisition' | 'processing' | 'storage'>('')
+const source = ref<'' | 'acquisition' | 'processing' | 'scheduler' | 'storage'>('')
 const { data, loading, error, load } = useApiResource(() =>
   getAlerts({ source: source.value || undefined, page: page.value, pageSize: 20 }),
 )
@@ -23,6 +23,12 @@ const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' |
   warning: { label: '警告', type: 'warning' },
   info: { label: '提示', type: 'info' },
 }
+const sourceMap = {
+  acquisition: '采集',
+  processing: '加工',
+  scheduler: '调度',
+  storage: '存储',
+} as const
 </script>
 
 <template>
@@ -36,6 +42,7 @@ const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' |
           <el-select v-model="source" clearable placeholder="全部" style="width: 160px">
             <el-option label="采集" value="acquisition" />
             <el-option label="加工" value="processing" />
+            <el-option label="调度" value="scheduler" />
             <el-option label="存储" value="storage" />
           </el-select>
         </el-form-item>
@@ -51,7 +58,7 @@ const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' |
         empty-description="新的异常会按发生时间显示。"
         @retry="load"
       >
-        <el-table :data="data?.items ?? []">
+        <el-table :data="data?.items ?? []" scrollbar-always-on>
           <el-table-column label="级别" width="90">
             <template #default="{ row }">
               <el-tag :type="levelMap[row.level as AlertLevel].type">
@@ -59,7 +66,11 @@ const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' |
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="source" label="来源" min-width="130" />
+          <el-table-column label="来源" min-width="130">
+            <template #default="{ row }">{{
+              sourceMap[row.source as keyof typeof sourceMap] ?? row.source
+            }}</template>
+          </el-table-column>
           <el-table-column prop="title" label="告警" min-width="190" />
           <el-table-column prop="detail" label="详情" min-width="280" show-overflow-tooltip />
           <el-table-column label="发生时间" min-width="170">

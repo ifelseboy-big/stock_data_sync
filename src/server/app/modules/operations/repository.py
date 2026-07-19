@@ -1,7 +1,7 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import String, case, func, literal, or_, select, union_all
+from sqlalchemy import MetaData, String, Table, case, func, inspect, literal, or_, select, union_all
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -13,7 +13,11 @@ from app.modules.acquisition.models import (
     CollectionTaskStatus,
     RawDataAsset,
 )
-from app.modules.operations.models import ProviderRequestLog
+from app.modules.operations.models import (
+    ProviderRequestLog,
+    ScheduledJobControl,
+    ScheduledJobExecution,
+)
 from app.modules.processing.models import (
     DatasetRelease,
     DependencyStatus,
@@ -21,6 +25,7 @@ from app.modules.processing.models import (
     ProcessingTask,
     ProcessingTaskStatus,
 )
+from app.modules.stocks.models import TradeCalendar
 
 COLLECTION_SUCCESS = (
     CollectionTaskStatus.SUCCESS.value,
@@ -284,6 +289,7 @@ class OperationsRepository:
                 or_(
                     ProcessingTask.output_dataset.ilike(pattern),
                     ProcessingDependency.dependency_name.ilike(pattern),
+                    ProcessingDependency.dependency_scope_key.ilike(pattern),
                     sql_cast(ProcessingTask.source_batch_id, String).ilike(pattern),
                 )
             )
@@ -330,6 +336,41 @@ class OperationsRepository:
         ).mappings()
         return [dict(row) for row in rows], int(total or 0)
 
+    async def release_coverage(
+        self,
+        *,
+        day_count: int,
+        dataset_names: tuple[str, ...],
+        through_date: date,
+    ) -> list[tuple[date, set[str]]]:
+        trading_dates = tuple(
+            await self._session.scalars(
+                select(TradeCalendar.cal_date)
+                .where(
+                    TradeCalendar.exchange == "SSE",
+                    TradeCalendar.is_open.is_(True),
+                    TradeCalendar.cal_date <= through_date,
+                )
+                .order_by(TradeCalendar.cal_date.desc())
+                .limit(day_count)
+            )
+        )
+        if not trading_dates:
+            return []
+        rows = (
+            await self._session.execute(
+                select(DatasetRelease.business_date, DatasetRelease.dataset_name).where(
+                    DatasetRelease.business_date.in_(trading_dates),
+                    DatasetRelease.dataset_name.in_(dataset_names),
+                )
+            )
+        ).all()
+        published_by_date: dict[date, set[str]] = {item: set() for item in trading_dates}
+        for business_date, dataset_name in rows:
+            if business_date is not None:
+                published_by_date[business_date].add(str(dataset_name))
+        return [(item, published_by_date[item]) for item in trading_dates]
+
     async def provider_endpoints(self, *, day_start: datetime) -> list[dict[str, Any]]:
         rows = (
             await self._session.execute(
@@ -374,6 +415,7 @@ class OperationsRepository:
             CollectionTask.task_id.label("id"),
             literal("acquisition").label("run_type"),
             CollectionTask.api_name.label("task_name"),
+            CollectionTask.scope_key.label("scope_key"),
             CollectionTask.batch_id.label("batch_id"),
             CollectionBatch.business_date.label("business_date"),
             CollectionTask.status.label("raw_status"),
@@ -387,6 +429,7 @@ class OperationsRepository:
             ProcessingTask.process_id.label("id"),
             literal("processing").label("run_type"),
             ProcessingTask.output_dataset.label("task_name"),
+            literal(None).cast(String).label("scope_key"),
             ProcessingTask.source_batch_id.label("batch_id"),
             ProcessingTask.business_date.label("business_date"),
             ProcessingTask.status.label("raw_status"),
@@ -416,6 +459,86 @@ class OperationsRepository:
         ).mappings()
         return [dict(row) for row in rows], int(total or 0)
 
+    async def scheduled_job_controls(self) -> dict[str, bool]:
+        rows = (
+            await self._session.execute(
+                select(ScheduledJobControl.job_id, ScheduledJobControl.enabled)
+            )
+        ).all()
+        return {str(job_id): bool(enabled) for job_id, enabled in rows}
+
+    async def latest_scheduled_job_executions(self) -> dict[str, dict[str, Any]]:
+        ranked = select(
+            ScheduledJobExecution,
+            func.row_number()
+            .over(
+                partition_by=ScheduledJobExecution.job_id,
+                order_by=ScheduledJobExecution.created_at.desc(),
+            )
+            .label("row_number"),
+        ).subquery()
+        rows = (
+            await self._session.execute(select(ranked).where(ranked.c.row_number == 1))
+        ).mappings()
+        return {str(row["job_id"]): dict(row) for row in rows}
+
+    async def scheduled_job_next_runs(self, table_name: str) -> dict[str, datetime]:
+        connection = await self._session.connection()
+
+        def load(sync_connection: Any) -> list[tuple[str, float | None]]:
+            if not inspect(sync_connection).has_table(table_name):
+                return []
+            table = Table(table_name, MetaData(), autoload_with=sync_connection)
+            return list(sync_connection.execute(select(table.c.id, table.c.next_run_time)).all())
+
+        rows = await connection.run_sync(load)
+        return {
+            str(job_id): datetime.fromtimestamp(float(next_run_time), UTC)
+            for job_id, next_run_time in rows
+            if next_run_time is not None
+        }
+
+    async def scheduled_job_executions(
+        self,
+        *,
+        job_id: str | None,
+        status: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        statement = select(ScheduledJobExecution)
+        if job_id:
+            statement = statement.where(ScheduledJobExecution.job_id == job_id)
+        if status:
+            statement = statement.where(ScheduledJobExecution.status == status.upper())
+        total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))
+        rows = (
+            await self._session.execute(
+                statement.order_by(
+                    ScheduledJobExecution.created_at.desc(),
+                    ScheduledJobExecution.execution_id,
+                )
+                .offset(offset)
+                .limit(limit)
+            )
+        ).scalars()
+        return [
+            {
+                "execution_id": row.execution_id,
+                "job_id": row.job_id,
+                "trigger_type": row.trigger_type,
+                "status": row.status,
+                "requested_by": row.requested_by,
+                "reason": row.reason,
+                "scheduled_at": row.scheduled_at,
+                "started_at": row.started_at,
+                "finished_at": row.finished_at,
+                "duration_ms": row.duration_ms,
+                "error_message": row.error_message,
+            }
+            for row in rows
+        ], int(total or 0)
+
     async def alert_rows(
         self,
         *,
@@ -424,6 +547,20 @@ class OperationsRepository:
         offset: int,
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
+        recovered_collection = aliased(CollectionTask)
+        recovered_processing = aliased(ProcessingTask)
+        recovered_scheduler = aliased(ScheduledJobExecution)
+        processing_occurred_at = func.coalesce(
+            ProcessingTask.finished_at,
+            ProcessingTask.started_at,
+            ProcessingTask.queued_at,
+            CollectionBatch.scheduled_at,
+        )
+        scheduler_occurred_at = func.coalesce(
+            ScheduledJobExecution.finished_at,
+            ScheduledJobExecution.started_at,
+            ScheduledJobExecution.created_at,
+        )
         collection = select(
             CollectionTask.task_id.label("id"),
             literal("acquisition").label("source"),
@@ -433,8 +570,16 @@ class OperationsRepository:
             CollectionTask.error_message.label("error_message"),
             CollectionTask.finished_at.label("occurred_at"),
         ).where(
-            CollectionTask.status.in_(COLLECTION_FAILED),
+            CollectionTask.status == CollectionTaskStatus.FAILED.value,
             CollectionTask.finished_at >= since,
+            ~select(literal(1))
+            .where(
+                recovered_collection.api_name == CollectionTask.api_name,
+                recovered_collection.scope_key == CollectionTask.scope_key,
+                recovered_collection.status.in_(COLLECTION_SUCCESS),
+                recovered_collection.finished_at > CollectionTask.finished_at,
+            )
+            .exists(),
         )
         processing = select(
             ProcessingTask.process_id.label("id"),
@@ -443,22 +588,43 @@ class OperationsRepository:
             ProcessingTask.status.label("status"),
             literal(None).label("error_code"),
             ProcessingTask.error_message.label("error_message"),
-            func.coalesce(
-                ProcessingTask.finished_at,
-                ProcessingTask.started_at,
-                ProcessingTask.queued_at,
-            ).label("occurred_at"),
-        ).where(
+            processing_occurred_at.label("occurred_at"),
+        ).join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id).where(
             ProcessingTask.status.in_(
                 (ProcessingTaskStatus.FAILED.value, ProcessingTaskStatus.BLOCKED.value)
             ),
-            or_(
-                ProcessingTask.finished_at >= since,
-                ProcessingTask.started_at >= since,
-                ProcessingTask.queued_at >= since,
-            ),
+            processing_occurred_at >= since,
+            ~select(literal(1))
+            .where(
+                recovered_processing.output_dataset == ProcessingTask.output_dataset,
+                recovered_processing.business_date.is_not_distinct_from(
+                    ProcessingTask.business_date
+                ),
+                recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
+                recovered_processing.finished_at > processing_occurred_at,
+            )
+            .exists(),
         )
-        combined = union_all(collection, processing).subquery()
+        scheduler = select(
+            ScheduledJobExecution.execution_id.label("id"),
+            literal("scheduler").label("source"),
+            ScheduledJobExecution.job_id.label("task_name"),
+            ScheduledJobExecution.status.label("status"),
+            literal(None).label("error_code"),
+            ScheduledJobExecution.error_message.label("error_message"),
+            scheduler_occurred_at.label("occurred_at"),
+        ).where(
+            ScheduledJobExecution.status == "FAILED",
+            scheduler_occurred_at >= since,
+            ~select(literal(1))
+            .where(
+                recovered_scheduler.job_id == ScheduledJobExecution.job_id,
+                recovered_scheduler.status == "SUCCESS",
+                recovered_scheduler.created_at > ScheduledJobExecution.created_at,
+            )
+            .exists(),
+        )
+        combined = union_all(collection, processing, scheduler).subquery()
         statement = select(combined)
         if source:
             statement = statement.where(combined.c.source == source)
@@ -501,9 +667,9 @@ def _run_status_condition(rows: Any, status: str | None) -> Any:
     values = {
         "pending": (
             CollectionTaskStatus.PENDING.value,
-            ProcessingTaskStatus.WAITING_DEPENDENCY.value,
             ProcessingTaskStatus.QUEUED.value,
         ),
+        "waiting_dependency": (ProcessingTaskStatus.WAITING_DEPENDENCY.value,),
         "running": (
             CollectionTaskStatus.RUNNING.value,
             ProcessingTaskStatus.RUNNING.value,
@@ -524,9 +690,9 @@ def _processing_status_values(status: str | None) -> tuple[str, ...] | None:
         return None
     return {
         "pending": (
-            ProcessingTaskStatus.WAITING_DEPENDENCY.value,
             ProcessingTaskStatus.QUEUED.value,
         ),
+        "waiting_dependency": (ProcessingTaskStatus.WAITING_DEPENDENCY.value,),
         "running": (ProcessingTaskStatus.RUNNING.value,),
         "waiting_retry": (ProcessingTaskStatus.RETRY_WAIT.value,),
         "blocked": (ProcessingTaskStatus.BLOCKED.value,),

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
+TARGET="$INSTALL_DIR/current/deploy/production/bin/run-service"
+[[ -x "$TARGET" ]] || {
+  printf '错误：当前服务入口不存在：%s\n' "$TARGET" >&2
+  exit 1
+}
+export STOCK_DATA_SYNC_INSTALL_DIR="$INSTALL_DIR"
+exec "$TARGET" "$@"
+

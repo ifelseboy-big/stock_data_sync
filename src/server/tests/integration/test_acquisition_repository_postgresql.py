@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.common.errors import BatchPlanningError
+from app.common.errors import ClosedBatchPlanMismatchError
 from app.db.sync_session import SyncSessionFactory
 from app.modules.acquisition.domain import TaskBlueprint
 from app.modules.acquisition.models import BatchType, CollectionTaskStatus
@@ -96,7 +96,7 @@ def test_collection_repository_state_machine_roundtrip() -> None:
     assert replay.created_task_count == 0
     assert replay.total_task_count == 2
     assert replay.frozen is True
-    with pytest.raises(BatchPlanningError, match="closed batches"):
+    with pytest.raises(ClosedBatchPlanMismatchError, match="closed batches"):
         repository.append_tasks(
             batch_id,
             (TaskBlueprint("TUSHARE", "daily", "part=3", {"part": 3}, 1),),

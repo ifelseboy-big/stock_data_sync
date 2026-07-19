@@ -3,61 +3,71 @@ set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-}"
+REPOSITORY="${2:-${STOCK_DATA_SYNC_REPOSITORY:-}}"
 
-if [[ -z "$VERSION" ]]; then
-  printf '用法：%s <version>\n' "$0" >&2
-  exit 1
-fi
-[[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || {
-  printf '版本号只能包含字母、数字、点、下划线和短横线\n' >&2
+fail() {
+  printf '发布准备失败：%s\n' "$*" >&2
   exit 1
 }
+
+[[ -n "$VERSION" ]] || fail "用法：$0 <version> [repository-url]"
+VERSION="${VERSION#v}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || fail "版本必须使用语义化版本格式"
+TAG="v$VERSION"
+
+if [[ -z "$REPOSITORY" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+  REPOSITORY="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}.git"
+fi
+if [[ -z "$REPOSITORY" ]]; then
+  REPOSITORY="$(git -C "$PROJECT_ROOT" remote get-url origin 2>/dev/null || true)"
+fi
+[[ -n "$REPOSITORY" ]] || fail "无法确定 Git 仓库地址，请传入 repository-url"
+[[ "$REPOSITORY" != *$'\n'* && "$REPOSITORY" != *$'\r'* ]] || fail "Git 仓库地址不能包含换行"
+[[ "$REPOSITORY" != *'\\'* ]] || fail "Git 仓库地址不能包含反斜杠"
+
+git -C "$PROJECT_ROOT" diff --quiet || fail "工作区存在未提交的已跟踪文件"
+git -C "$PROJECT_ROOT" diff --cached --quiet || fail "暂存区存在未提交文件"
+[[ -z "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=normal)" ]] || fail "工作区存在未跟踪文件"
+git -C "$PROJECT_ROOT" rev-parse --verify --quiet "refs/tags/$TAG^{commit}" >/dev/null || fail "缺少发布标签：$TAG"
+COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+TAG_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse "$TAG^{commit}")"
+[[ "$COMMIT" == "$TAG_COMMIT" ]] || fail "$TAG 没有指向当前 commit"
 
 DIST_DIR="$PROJECT_ROOT/dist"
-STAGE_DIR="$(mktemp -d)"
-BUNDLE_NAME="stock-data-sync-$VERSION"
-BUNDLE_DIR="$STAGE_DIR/$BUNDLE_NAME"
-ARCHIVE="$DIST_DIR/$BUNDLE_NAME.tar.gz"
-WEB_DIR="$PROJECT_ROOT/src/web"
+INSTALLER_SOURCE="$PROJECT_ROOT/deploy/production/install.sh"
+INSTALLER="$DIST_DIR/install.sh"
+MANIFEST="$DIST_DIR/release-manifest.json"
+mkdir -p "$DIST_DIR"
 
-cleanup() {
-  rm -rf -- "$STAGE_DIR"
+escaped_repository="$(printf '%s' "$REPOSITORY" | sed 's/[&|]/\\&/g')"
+sed \
+  -e "s|__STOCK_DATA_SYNC_REPOSITORY__|$escaped_repository|g" \
+  -e "s|__STOCK_DATA_SYNC_VERSION__|$VERSION|g" \
+  "$INSTALLER_SOURCE" > "$INSTALLER"
+chmod 0755 "$INSTALLER"
+
+ALEMBIC_HEADS="$(
+  cd "$PROJECT_ROOT/src/server"
+  UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/stock-data-sync-release-uv-cache}" \
+    uv run --frozen alembic heads | awk '{print $1}' | LC_ALL=C sort | paste -sd, -
+)"
+[[ -n "$ALEMBIC_HEADS" ]] || fail "无法确定 Alembic head"
+
+manifest_repository="${REPOSITORY//\"/\\\"}"
+
+cat > "$MANIFEST" <<EOF
+{
+  "version": "$VERSION",
+  "tag": "$TAG",
+  "commit": "$COMMIT",
+  "repository": "$manifest_repository",
+  "buildMode": "source-on-target",
+  "requiredDatabaseRevisions": "$ALEMBIC_HEADS",
+  "minimumNodeMajor": 22,
+  "pythonVersion": "3.12",
+  "postgresqlMajor": 18
 }
-trap cleanup EXIT
+EOF
 
-mkdir -p "$DIST_DIR" "$BUNDLE_DIR"
-
-command -v npm >/dev/null 2>&1 || {
-  printf '缺少 npm，无法构建管理端\n' >&2
-  exit 1
-}
-if [[ ! -d "$WEB_DIR/node_modules" ]]; then
-  npm --prefix "$WEB_DIR" ci
-fi
-npm --prefix "$WEB_DIR" run build
-
-tar -C "$PROJECT_ROOT" \
-  --exclude='src/server/.venv' \
-  --exclude='src/server/.pytest_cache' \
-  --exclude='src/server/.ruff_cache' \
-  --exclude='src/server/.mypy_cache' \
-  --exclude='src/server/**/__pycache__' \
-  --exclude='src/server/tests' \
-  -cf - \
-  src/server \
-  src/web/dist \
-  deploy/production \
-  docs \
-  | tar -C "$BUNDLE_DIR" -xf -
-
-printf '%s\n' "$VERSION" > "$BUNDLE_DIR/VERSION"
-tar -C "$STAGE_DIR" -czf "$ARCHIVE" "$BUNDLE_NAME"
-
-if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$DIST_DIR" && sha256sum "$BUNDLE_NAME.tar.gz" > "$BUNDLE_NAME.tar.gz.sha256")
-else
-  (cd "$DIST_DIR" && shasum -a 256 "$BUNDLE_NAME.tar.gz" > "$BUNDLE_NAME.tar.gz.sha256")
-fi
-
-printf '发布包：%s\n' "$ARCHIVE"
-printf '校验文件：%s.sha256\n' "$ARCHIVE"
+(cd "$DIST_DIR" && shasum -a 256 install.sh release-manifest.json > SHA256SUMS)
+printf '发布资产：\n%s\n%s\n%s\n' "$INSTALLER" "$MANIFEST" "$DIST_DIR/SHA256SUMS"

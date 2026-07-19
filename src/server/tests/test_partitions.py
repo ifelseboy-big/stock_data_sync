@@ -2,7 +2,13 @@ from datetime import date
 
 import pytest
 
-from app.modules.partitions.service import PARTITIONED_TABLES, month_start, planned_partitions
+from app.modules.partitions.service import (
+    PARTITIONED_TABLES,
+    month_start,
+    planned_partitions,
+    planned_partitions_for_range,
+    planned_partitions_for_table,
+)
 
 
 def test_month_start_handles_year_boundary() -> None:
@@ -32,3 +38,38 @@ def test_partition_sql_uses_fixed_generated_identifiers() -> None:
 def test_partition_plan_rejects_negative_horizon() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         planned_partitions(date(2026, 7, 19), months_ahead=-1)
+
+
+def test_partition_plan_for_backfill_range_includes_every_touched_month() -> None:
+    specs = planned_partitions_for_range(date(2025, 12, 31), date(2026, 2, 1))
+
+    stock_partitions = [
+        item.partition_table for item in specs if item.parent_table == "stock_daily"
+    ]
+    assert stock_partitions == [
+        "stock_daily_p202512",
+        "stock_daily_p202601",
+        "stock_daily_p202602",
+    ]
+
+
+def test_partition_plan_for_backfill_range_rejects_reversed_dates() -> None:
+    with pytest.raises(ValueError, match="end_date"):
+        planned_partitions_for_range(date(2026, 2, 1), date(2026, 1, 31))
+
+
+def test_partition_plan_for_write_targets_only_touched_table_and_months() -> None:
+    specs = planned_partitions_for_table(
+        "etf_daily",
+        (date(2026, 8, 1), date(2026, 7, 31), date(2026, 7, 1)),
+    )
+
+    assert [item.partition_table for item in specs] == [
+        "etf_daily_p202607",
+        "etf_daily_p202608",
+    ]
+
+
+def test_partition_plan_for_write_rejects_unmanaged_table() -> None:
+    with pytest.raises(ValueError, match="not a managed partitioned table"):
+        planned_partitions_for_table("theme_index_daily", (date(2026, 7, 19),))

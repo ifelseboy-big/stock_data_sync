@@ -46,6 +46,12 @@ class BatchPlanningError(AppError):
     code = "batch_planning_error"
 
 
+class ClosedBatchPlanMismatchError(BatchPlanningError):
+    """Raised when a completed batch is replayed with a different task plan."""
+
+    code = "closed_batch_plan_mismatch"
+
+
 class CalendarCoverageError(AppError):
     """Raised when a scheduled trading-day decision lacks local calendar data."""
 

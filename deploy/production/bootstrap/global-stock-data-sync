@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+calling_user="${SUDO_USER:-$(id -un)}"
+[[ "$calling_user" != "root" ]] || {
+  printf '错误：无法确定安装所属用户，请从首次安装使用的用户执行此命令\n' >&2
+  exit 1
+}
+service_home="$(dscl . -read "/Users/$calling_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+receipt="$service_home/.stock-data-sync/install.conf"
+[[ -f "$receipt" && ! -L "$receipt" ]] || {
+  printf '错误：找不到安装记录：%s\n' "$receipt" >&2
+  exit 1
+}
+[[ "$(stat -f '%Su' "$receipt")" == "$calling_user" && "$(stat -f '%Lp' "$receipt")" == "600" ]] || {
+  printf '错误：安装记录的所有者或权限不正确\n' >&2
+  exit 1
+}
+install_dir="$(awk -F= '$1 == "INSTALL_DIR" {sub(/^[^=]*=/, ""); print; exit}' "$receipt")"
+[[ -n "$install_dir" && "$install_dir" == /* ]] || {
+  printf '错误：安装记录中的目录无效\n' >&2
+  exit 1
+}
+target="$install_dir/bin/stock-data-sync"
+[[ -x "$target" && ! -L "$target" && "$(stat -f '%Su' "$target")" == "root" ]] || {
+  printf '错误：安装目录中的管理入口不可信\n' >&2
+  exit 1
+}
+exec "$target" "$@"

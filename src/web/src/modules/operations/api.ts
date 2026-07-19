@@ -10,6 +10,7 @@ import type {
   DependencyItem,
   DependencyQuery,
   DatasetReleaseItem,
+  DatasetReleaseCoverageItem,
   DatasetReleaseQuery,
   CreateBackfillCommand,
   CreateRepairCommand,
@@ -21,6 +22,10 @@ import type {
   ProviderMonitoring,
   RunRecordItem,
   RunRecordQuery,
+  ScheduledJobAction,
+  ScheduledJobExecutionItem,
+  ScheduledJobExecutionQuery,
+  ScheduledJobItem,
   TaskCommand,
   TaskTransition,
 } from './contracts'
@@ -93,6 +98,15 @@ export async function getDatasetReleases(
   return response.data
 }
 
+export async function getDatasetReleaseCoverage(
+  dayCount = 5,
+): Promise<DatasetReleaseCoverageItem[]> {
+  const response = await http.get<DatasetReleaseCoverageItem[]>('/operations/release-coverage', {
+    params: { dayCount },
+  })
+  return response.data
+}
+
 export async function createBackfill(
   payload: CreateBackfillCommand,
   options: AdminCommandOptions,
@@ -152,5 +166,34 @@ export async function cancelAcquisitionBatch(
 
 export async function getManualCommandOptions(): Promise<ManualCommandOptions> {
   const response = await http.get<ManualCommandOptions>('/operations/command-options')
+  return response.data
+}
+
+export async function getScheduledJobs(): Promise<ScheduledJobItem[]> {
+  const response = await http.get<ScheduledJobItem[]>('/operations/scheduled-jobs')
+  return response.data
+}
+
+export async function getScheduledJobExecutions(
+  query: ScheduledJobExecutionQuery = {},
+): Promise<PageResult<ScheduledJobExecutionItem>> {
+  const response = await http.get<PageResult<ScheduledJobExecutionItem>>(
+    '/operations/scheduled-job-executions',
+    { params: query },
+  )
+  return response.data
+}
+
+export async function runScheduledJobCommand(
+  jobId: string,
+  action: ScheduledJobAction,
+  payload: TaskCommand,
+  options: AdminCommandOptions,
+): Promise<OperationCommandResult> {
+  const response = await http.post<OperationCommandResult>(
+    `/operations/commands/scheduled-jobs/${jobId}/${action}`,
+    payload,
+    { headers: commandHeaders(options) },
+  )
   return response.data
 }
