@@ -8,6 +8,8 @@ PARTITIONED_TABLES = (
     "stock_technical_daily",
     "stock_moneyflow_daily",
     "market_theme_member_daily",
+    "etf_daily",
+    "etf_share_size_daily",
 )
 
 

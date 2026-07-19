@@ -20,7 +20,7 @@ target_metadata = Base.metadata
 
 PARTITION_TABLE_NAME = re.compile(
     r"^(?:stock_daily|stock_technical_daily|stock_moneyflow_daily|"
-    r"market_theme_member_daily)_p\d{6}$"
+    r"market_theme_member_daily|etf_daily|etf_share_size_daily)_p\d{6}$"
 )
 
 

@@ -6,7 +6,7 @@
 
 - 25 张业务表、6 张控制面运行表和 2 张运维支撑表，股票、ETF 和指数分别建模。
 - `stock_daily` 合并 `daily`、`daily_basic` 和 `adj_factor`，`stk_limit` 只补充涨跌停价。
-- 4 张持续增长的大事实表按 `trade_date` 月分区，其他表使用普通表和针对性索引。
+- 6 张持续增长的日事实表按 `trade_date` 月分区，其他表使用普通表和针对性索引。
 - Tushare 原始结果以不可变 Parquet 封存；正式消费者只读取已经登记发布的 PostgreSQL 数据。
 - `dataset_release` 表达当前发布完整性和血缘，不代表业务表支持历史版本指针回滚。
 

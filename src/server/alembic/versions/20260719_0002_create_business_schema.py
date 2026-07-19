@@ -22,6 +22,8 @@ PARTITIONED_TABLES = (
     "stock_technical_daily",
     "stock_moneyflow_daily",
     "market_theme_member_daily",
+    "etf_daily",
+    "etf_share_size_daily",
 )
 INITIAL_PARTITIONS = (
     ("202607", "2026-07-01", "2026-08-01"),
@@ -271,6 +273,7 @@ def upgrade() -> None:
             ["ts_code"], ["etf.ts_code"], name=op.f("fk_etf_daily_ts_code_etf")
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_etf_daily")),
+        postgresql_partition_by="RANGE (trade_date)",
     )
     op.create_index(
         "idx_etf_daily_trade_code", "etf_daily", ["trade_date", "ts_code"], unique=False
@@ -290,6 +293,7 @@ def upgrade() -> None:
             ["ts_code"], ["etf.ts_code"], name=op.f("fk_etf_share_size_daily_ts_code_etf")
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_etf_share_size_daily")),
+        postgresql_partition_by="RANGE (trade_date)",
     )
     op.create_index(
         "idx_etf_share_trade_code", "etf_share_size_daily", ["trade_date", "ts_code"], unique=False

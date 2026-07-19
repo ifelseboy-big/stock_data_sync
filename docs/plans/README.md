@@ -39,5 +39,7 @@ NN-topic.md
 6. [加工与发布链路](05-processing-runtime.md)
 7. [运维后台闭环](06-operations-console.md)
 8. [生产验收与恢复](07-production-readiness.md)
+9. [最近两周真实数据流程验收](08-live-workflow-validation.md)
+10. [ETF 数据同步链路](09-etf-data-pipeline.md)
 
 性能验收的固定规模、阈值和实测结果记录在 [目标规模性能验收](07-performance-results.md)。

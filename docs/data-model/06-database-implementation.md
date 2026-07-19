@@ -7,7 +7,7 @@
 | 25张业务表 | 字段、类型、主外键、单位和 NULL 口径以本目录表定义为准 |
 | 6张系统运行表 | 作为批次、任务、资产、依赖和发布的唯一事实来源 |
 | 2张运维支撑表 | 保存实际接口请求指标，以及人工命令的幂等键、操作者、原因、请求 ID 和结果 |
-| 4张分区事实表 | stock_daily、stock_technical_daily、stock_moneyflow_daily、market_theme_member_daily按trade_date月分区 |
+| 6张分区事实表 | stock_daily、stock_technical_daily、stock_moneyflow_daily、market_theme_member_daily、etf_daily、etf_share_size_daily按trade_date月分区 |
 | 其余表 | 普通表；仅建立[全局约定](01-overview.md)定义的访问路径索引 |
 | APScheduler JobStore | 使用独立apscheduler_jobs表，只保存系统触发器，不保存业务任务结果 |
 
@@ -72,6 +72,6 @@ WHERE resolved_release_process_id IS NOT NULL;
 
 **事务边界。**任务领取只在短事务内完成状态切换，接口调用和Parquet读写不得占用数据库事务。正式表写入、数据校验结果确认和dataset_release切换位于同一数据库事务；失败时整体回滚。大批量写入先进入会话级临时表，再使用COPY和集合SQL写入目标表。
 
-**分区维护。**启动时和每日08:30检查四张分区表，至少预建当前月及未来3个月；历史回填先按请求区间建分区。分区缺失使对应加工任务进入BLOCKED并告警，禁止DEFAULT分区。大批量回填完成后对受影响分区执行ANALYZE；清理或重写后依据膨胀情况执行VACUUM，不在高峰期自动VACUUM FULL。
+**分区维护。**启动时和每日08:30检查六张分区表，至少预建当前月及未来3个月；历史回填先按请求区间建分区。分区缺失使对应加工任务进入BLOCKED并告警，禁止DEFAULT分区。大批量回填完成后对受影响分区执行ANALYZE；清理或重写后依据膨胀情况执行VACUUM，不在高峰期自动VACUUM FULL。
 
 **连接与权限。**迁移账号负责DDL，应用账号只具有DML和序列权限，查询消费者使用只读账号。API和Scheduler分别配置连接池，连接总数必须小于PostgreSQL max_connections的70%，为迁移、备份、内置状态查询和人工诊断保留余量。

@@ -17,7 +17,7 @@ def test_partition_plan_includes_current_and_three_future_months() -> None:
     assert specs[0].partition_table == "stock_daily_p202607"
     assert specs[0].start_date == date(2026, 7, 1)
     assert specs[0].end_date == date(2026, 8, 1)
-    assert specs[-1].partition_table == "market_theme_member_daily_p202610"
+    assert specs[-1].partition_table == "etf_share_size_daily_p202610"
 
 
 def test_partition_sql_uses_fixed_generated_identifiers() -> None:

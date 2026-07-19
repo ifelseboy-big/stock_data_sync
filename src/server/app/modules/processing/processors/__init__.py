@@ -3,6 +3,11 @@ from app.modules.processing.processors.base import (
     PreparedDataset,
     PublicationResult,
 )
+from app.modules.processing.processors.etf import (
+    EtfDailyProcessor,
+    EtfProcessor,
+    EtfShareSizeDailyProcessor,
+)
 from app.modules.processing.processors.stock_daily import (
     StockDailyCoreProcessor,
     StockDailyLimitProcessor,
@@ -18,6 +23,9 @@ from app.modules.processing.processors.trade_calendar import TradeCalendarProces
 
 __all__ = [
     "DatasetProcessor",
+    "EtfDailyProcessor",
+    "EtfProcessor",
+    "EtfShareSizeDailyProcessor",
     "PreparedDataset",
     "PublicationResult",
     "StockCompanyProcessor",

@@ -95,6 +95,29 @@ def _stock_company_scopes(business_date: date | None) -> tuple[RequestScope, ...
     )
 
 
+def _etf_basic_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    del business_date
+    return tuple(
+        RequestScope(
+            f"list_status={list_status}",
+            {"list_status": list_status},
+        )
+        for list_status in ("L", "D", "P")
+    )
+
+
+def _etf_share_size_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    if business_date is None:
+        raise ValueError("ETF share-size API requires a business date")
+    return tuple(
+        RequestScope(
+            f"trade_date={business_date:%Y%m%d};exchange={exchange}",
+            {"trade_date": business_date, "exchange": exchange},
+        )
+        for exchange in ("SSE", "SZSE")
+    )
+
+
 def _extract_trade_date(record: Mapping[str, object]) -> date | None:
     value = record.get("trade_date")
     if value is None:
@@ -273,6 +296,31 @@ STOCK_COMPANY_SPEC = _master_spec(
     empty_policy=EmptyPolicy.ALLOWED,
 )
 
+ETF_BASIC_FIELDS = (
+    "ts_code",
+    "csname",
+    "extname",
+    "cname",
+    "index_code",
+    "index_name",
+    "setup_date",
+    "list_date",
+    "list_status",
+    "exchange",
+    "mgr_name",
+    "custod_name",
+    "mgt_fee",
+    "etf_type",
+)
+ETF_BASIC_SPEC = _master_spec(
+    api_name="etf_basic",
+    fields=ETF_BASIC_FIELDS,
+    string_fields=frozenset(ETF_BASIC_FIELDS) - {"mgt_fee"},
+    natural_key=("ts_code",),
+    scope_builder=_etf_basic_scopes,
+    empty_policy=EmptyPolicy.ALLOWED,
+)
+
 DAILY_FIELDS = (
     "ts_code",
     "trade_date",
@@ -435,21 +483,91 @@ SUSPEND_SPEC = _daily_spec(
     empty_policy=EmptyPolicy.ALLOWED,
 )
 
+FUND_DAILY_FIELDS = (
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+)
+FUND_DAILY_SPEC = _daily_spec(
+    api_name="fund_daily",
+    fields=FUND_DAILY_FIELDS,
+    string_fields=frozenset({"ts_code", "trade_date"}),
+    natural_key=("ts_code", "trade_date"),
+    row_limit=5_000,
+    cutoff_time=time(hour=20),
+)
+
+FUND_ADJ_FIELDS = ("ts_code", "trade_date", "adj_factor")
+FUND_ADJ_SPEC = _daily_spec(
+    api_name="fund_adj",
+    fields=FUND_ADJ_FIELDS,
+    string_fields=frozenset({"ts_code", "trade_date"}),
+    natural_key=("ts_code", "trade_date"),
+    row_limit=2_000,
+    cutoff_time=time(hour=23),
+    split_policy=SplitPolicy.OFFSET,
+)
+
+ETF_SHARE_SIZE_FIELDS = (
+    "ts_code",
+    "trade_date",
+    "etf_name",
+    "total_share",
+    "total_size",
+    "nav",
+    "close",
+    "exchange",
+)
+ETF_SHARE_SIZE_SPEC = ApiSpec(
+    api_name="etf_share_size",
+    provider="TUSHARE",
+    fields=ETF_SHARE_SIZE_FIELDS,
+    schema=_arrow_schema(
+        ETF_SHARE_SIZE_FIELDS,
+        string_fields=frozenset({"ts_code", "trade_date", "etf_name", "exchange"}),
+    ),
+    natural_key=("ts_code", "trade_date"),
+    schedule_group=ScheduleGroup.DELAYED,
+    scope_builder=_etf_share_size_scopes,
+    split_policy=SplitPolicy.NONE,
+    row_limit=5_000,
+    empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,
+    retry_policy=RetryPolicy(
+        max_attempts=5,
+        initial_wait_seconds=900,
+        max_wait_seconds=3_600,
+    ),
+    date_extractor=_extract_trade_date,
+)
+
 MASTER_STOCK_SPECS = (STOCK_BASIC_SPEC, STOCK_COMPANY_SPEC)
+MASTER_ETF_SPECS = (ETF_BASIC_SPEC,)
 DAILY_PREOPEN_SPECS = (ADJ_FACTOR_SPEC,)
-DAILY_CLOSE_SPECS = (DAILY_SPEC,)
+DAILY_CLOSE_SPECS = (DAILY_SPEC, FUND_DAILY_SPEC)
 DAILY_LATE_SPECS = (
     DAILY_BASIC_SPEC,
     STK_LIMIT_SPEC,
     MONEYFLOW_SPEC,
     SUSPEND_SPEC,
+    FUND_ADJ_SPEC,
 )
 DAILY_FINAL_SPECS = (STK_FACTOR_SPEC,)
+DELAYED_ETF_SPECS = (ETF_SHARE_SIZE_SPEC,)
 ALL_TUSHARE_API_SPECS = (
     TRADE_CAL_SPEC,
     *MASTER_STOCK_SPECS,
+    *MASTER_ETF_SPECS,
     *DAILY_PREOPEN_SPECS,
     *DAILY_CLOSE_SPECS,
     *DAILY_LATE_SPECS,
     *DAILY_FINAL_SPECS,
+    *DELAYED_ETF_SPECS,
 )

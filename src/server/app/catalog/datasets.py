@@ -78,6 +78,75 @@ STOCK_COMPANY_DATASET = DatasetSpec(
     ),
 )
 
+ETF_DATASET = DatasetSpec(
+    dataset_name="etf",
+    processor="etf",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(
+            kind=DependencyKind.RAW_ASSET,
+            name="etf_basic",
+            scope=ReleaseScope.GLOBAL,
+        ),
+    ),
+    write_strategy=WriteStrategy.MASTER_MERGE,
+    release_scope=ReleaseScope.GLOBAL,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("ts_code",)}),
+        QualityRuleSpec("etf_master_non_empty"),
+        QualityRuleSpec("etf_exchange_normalized"),
+    ),
+)
+
+ETF_DAILY_DATASET = DatasetSpec(
+    dataset_name="etf_daily",
+    processor="etf_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "fund_daily", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.RAW_ASSET, "fund_adj", ReleaseScope.DATE),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "etf", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            "trade_calendar",
+            ReleaseScope.GLOBAL,
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),
+        QualityRuleSpec("filter_to_etf_master"),
+        QualityRuleSpec("fund_adj_optional_for_daily_key"),
+    ),
+)
+
+ETF_SHARE_SIZE_DAILY_DATASET = DatasetSpec(
+    dataset_name="etf_share_size_daily",
+    processor="etf_share_size_daily",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(
+            DependencyKind.RAW_ASSET,
+            "etf_share_size",
+            ReleaseScope.DATE,
+        ),
+        DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "etf", ReleaseScope.GLOBAL),
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            "trade_calendar",
+            ReleaseScope.GLOBAL,
+        ),
+    ),
+    write_strategy=WriteStrategy.REPLACE_DATE,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(
+        QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),
+        QualityRuleSpec("filter_to_etf_master"),
+        QualityRuleSpec("share_size_units_normalized"),
+    ),
+)
+
 STOCK_DAILY_CORE_DATASET = DatasetSpec(
     dataset_name="stock_daily.core",
     processor="stock_daily_core",
@@ -194,6 +263,9 @@ ALL_DATASET_SPECS = (
     TRADE_CALENDAR_DATASET,
     STOCK_DATASET,
     STOCK_COMPANY_DATASET,
+    ETF_DATASET,
+    ETF_DAILY_DATASET,
+    ETF_SHARE_SIZE_DAILY_DATASET,
     STOCK_DAILY_CORE_DATASET,
     STOCK_DAILY_LIMIT_DATASET,
     STOCK_TECHNICAL_DAILY_DATASET,

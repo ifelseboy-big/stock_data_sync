@@ -488,9 +488,12 @@ class OperationCommandService:
                 raise OperationCommandError(
                     f"未启用的采集接口：{api_name}", status_code=422
                 ) from exc
-            if daily_only and spec.schedule_group != ScheduleGroup.DAILY:
+            if daily_only and spec.schedule_group not in {
+                ScheduleGroup.DAILY,
+                ScheduleGroup.DELAYED,
+            }:
                 raise OperationCommandError(
-                    f"历史回填只允许按交易日采集的接口：{api_name}", status_code=422
+                    f"历史回填只允许按业务日期采集的接口：{api_name}", status_code=422
                 )
             specs.append(spec)
         return tuple(specs)

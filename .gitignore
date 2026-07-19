@@ -21,3 +21,7 @@ src/web/coverage/
 
 # Release artifacts
 dist/
+
+# Local integration data
+data/raw/
+src/server/data/raw/

@@ -9,6 +9,9 @@ from app.modules.acquisition.factory import get_raw_asset_store
 from app.modules.processing.executor import ProcessingExecutor
 from app.modules.processing.processors import (
     DatasetProcessor,
+    EtfDailyProcessor,
+    EtfProcessor,
+    EtfShareSizeDailyProcessor,
     StockCompanyProcessor,
     StockDailyCoreProcessor,
     StockDailyLimitProcessor,
@@ -43,6 +46,9 @@ def get_processors() -> dict[str, DatasetProcessor]:
         StockTechnicalDailyProcessor(),
         StockMoneyflowDailyProcessor(),
         StockSuspendDailyProcessor(),
+        EtfProcessor(),
+        EtfDailyProcessor(),
+        EtfShareSizeDailyProcessor(),
     )
     return {processor.name: processor for processor in processors}
 

@@ -31,7 +31,10 @@ class Etf(Base):
 
 class EtfDaily(Base):
     __tablename__ = "etf_daily"
-    __table_args__ = (Index("idx_etf_daily_trade_code", "trade_date", "ts_code"),)
+    __table_args__ = (
+        Index("idx_etf_daily_trade_code", "trade_date", "ts_code"),
+        {"postgresql_partition_by": "RANGE (trade_date)"},
+    )
 
     ts_code: Mapped[str] = mapped_column(String(16), ForeignKey("etf.ts_code"), primary_key=True)
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
@@ -50,7 +53,10 @@ class EtfDaily(Base):
 
 class EtfShareSizeDaily(Base):
     __tablename__ = "etf_share_size_daily"
-    __table_args__ = (Index("idx_etf_share_trade_code", "trade_date", "ts_code"),)
+    __table_args__ = (
+        Index("idx_etf_share_trade_code", "trade_date", "ts_code"),
+        {"postgresql_partition_by": "RANGE (trade_date)"},
+    )
 
     ts_code: Mapped[str] = mapped_column(String(16), ForeignKey("etf.ts_code"), primary_key=True)
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)

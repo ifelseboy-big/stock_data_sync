@@ -11,7 +11,7 @@ from app.modules.acquisition.domain import BatchPlanResult, TaskBlueprint
 from app.modules.acquisition.models import BatchType
 from app.modules.acquisition.repository import AcquisitionRepository
 
-TRADING_DAY_BATCH_TYPES = frozenset({BatchType.DAILY, BatchType.HOT})
+TRADING_DAY_BATCH_TYPES = frozenset({BatchType.DAILY, BatchType.HOT, BatchType.DELAYED})
 
 
 @dataclass(frozen=True, slots=True)

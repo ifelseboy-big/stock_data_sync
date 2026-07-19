@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import structlog
+from sqlalchemy import select
 
 from app.catalog import ApiSpec
 from app.catalog.tushare import (
@@ -10,13 +11,15 @@ from app.catalog.tushare import (
     DAILY_CLOSE_SPECS,
     DAILY_LATE_SPECS,
     DAILY_PREOPEN_SPECS,
+    DELAYED_ETF_SPECS,
+    MASTER_ETF_SPECS,
     MASTER_STOCK_SPECS,
     TRADE_CAL_SPEC,
     next_year_trade_calendar_scopes,
 )
 from app.common.errors import CalendarCoverageError
 from app.core.config import settings
-from app.db.sync_session import sync_engine
+from app.db.sync_session import SyncSessionFactory, sync_engine
 from app.modules.acquisition.factory import (
     get_acquisition_recovery,
     get_acquisition_repository,
@@ -32,6 +35,7 @@ from app.modules.processing.factory import (
     get_processing_repository,
     get_processing_runtime,
 )
+from app.modules.stocks.models import TradeCalendar
 
 
 def dispatch_collection_tasks() -> None:
@@ -151,6 +155,54 @@ def plan_stock_master() -> None:
     )
 
 
+def plan_etf_master() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    business_date = date(now.year, now.month, 1)
+    scheduled_at = datetime.combine(business_date, time(hour=8, minute=35), timezone)
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.MASTER,
+            business_date=business_date,
+            scheduled_at=scheduled_at,
+            api_specs=MASTER_ETF_SPECS,
+            finalize=True,
+        ),
+        now=now,
+        stage_name="etf_master",
+    )
+
+
+def plan_etf_share_size() -> None:
+    timezone = ZoneInfo(settings.scheduler_timezone)
+    now = datetime.now(timezone)
+    with SyncSessionFactory() as session:
+        business_date = session.scalar(
+            select(TradeCalendar.cal_date)
+            .where(
+                TradeCalendar.exchange == "SSE",
+                TradeCalendar.cal_date < now.date(),
+                TradeCalendar.is_open.is_(True),
+            )
+            .order_by(TradeCalendar.cal_date.desc())
+            .limit(1)
+        )
+    if business_date is None:
+        raise CalendarCoverageError("trade calendar has no previous SSE trading day")
+    scheduled_at = datetime.combine(now.date(), time(hour=8, minute=45), timezone)
+    _plan_stage(
+        StagePlan(
+            batch_type=BatchType.DELAYED,
+            business_date=business_date,
+            scheduled_at=scheduled_at,
+            api_specs=DELAYED_ETF_SPECS,
+            finalize=True,
+        ),
+        now=now,
+        stage_name="etf_share_size",
+    )
+
+
 def plan_daily_preopen() -> None:
     _plan_daily_stage(DAILY_PREOPEN_SPECS, finalize=False, stage_name="daily_preopen")
 
@@ -174,6 +226,7 @@ def plan_due_collection_stages() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
     stages = (
+        (time(hour=8, minute=45), plan_etf_share_size),
         (time(hour=9, minute=25), plan_daily_preopen),
         (time(hour=16, minute=10), plan_daily_close),
         (time(hour=17, minute=30), plan_daily_late),

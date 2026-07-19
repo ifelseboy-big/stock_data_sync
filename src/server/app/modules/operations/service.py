@@ -2,6 +2,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+from app.catalog.tushare import build_tushare_api_registry
 from app.core.config import Settings, settings
 from app.modules.acquisition.capacity import CapacityLevel, RawStorageCapacityGate
 from app.modules.acquisition.models import BatchStatus, BatchType, CollectionTaskStatus
@@ -238,24 +239,26 @@ class OperationsService:
     async def provider_monitoring(self) -> ProviderMonitoring:
         now = datetime.now(self._timezone)
         rows = await self._repository.provider_endpoints(day_start=self._day_start(now))
+        observed = {cast(str, row["endpoint"]): row for row in rows}
         return ProviderMonitoring(
             generated_at=now,
             quota=await self._quota(now),
             endpoints=[
                 ProviderEndpointMetric(
-                    endpoint=cast(str, row["endpoint"]),
-                    request_count_today=cast(int, row["request_count"]),
+                    endpoint=spec.api_name,
+                    request_count_today=cast(int, row.get("request_count", 0)),
                     success_rate_today=_ratio(
-                        cast(int, row["success_count"]),
-                        cast(int, row["request_count"]),
+                        cast(int, row.get("success_count", 0)),
+                        cast(int, row.get("request_count", 0)),
                     ),
-                    p50_duration_ms=_optional_float(row["p50"]),
-                    p95_duration_ms=_optional_float(row["p95"]),
-                    throttled_count_today=cast(int, row["throttled_count"]),
-                    empty_response_count_today=cast(int, row["empty_count"]),
-                    last_requested_at=cast(datetime | None, row["last_requested_at"]),
+                    p50_duration_ms=_optional_float(row.get("p50")),
+                    p95_duration_ms=_optional_float(row.get("p95")),
+                    throttled_count_today=cast(int, row.get("throttled_count", 0)),
+                    empty_response_count_today=cast(int, row.get("empty_count", 0)),
+                    last_requested_at=cast(datetime | None, row.get("last_requested_at")),
                 )
-                for row in rows
+                for spec in build_tushare_api_registry().all()
+                for row in (observed.get(spec.api_name, {}),)
             ],
         )
 

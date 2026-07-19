@@ -24,6 +24,8 @@ from app.scheduler.jobs import (
     plan_daily_final,
     plan_daily_late,
     plan_daily_preopen,
+    plan_etf_master,
+    plan_etf_share_size,
     plan_next_year_trade_calendar,
     plan_processing_tasks,
     plan_stock_master,
@@ -107,6 +109,13 @@ def create_scheduler() -> BlockingScheduler:
         replace_existing=True,
     )
     scheduler.add_job(
+        plan_etf_master,
+        trigger=CronTrigger(day=1, hour=8, minute=35),
+        id="plan-etf-master",
+        name="规划ETF主数据采集",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         plan_next_year_trade_calendar,
         trigger=CronTrigger(month="10-12", day=1, hour=8, minute=25),
         id="plan-next-year-trade-calendar",
@@ -126,6 +135,13 @@ def create_scheduler() -> BlockingScheduler:
             name=name,
             replace_existing=True,
         )
+    scheduler.add_job(
+        plan_etf_share_size,
+        trigger=CronTrigger(hour=8, minute=45),
+        id="plan-etf-share-size",
+        name="规划ETF份额规模采集",
+        replace_existing=True,
+    )
     scheduler.add_job(
         ensure_future_partitions,
         trigger=CronTrigger(hour=8, minute=30),
