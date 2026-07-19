@@ -97,15 +97,35 @@ grep -Fq '/bin/bash "$MANAGER" "${UPGRADE_ARGS[@]}"' \
   "$PROJECT_ROOT/deploy/production/install.sh"
 grep -Fq '确认忽略时使用 --ignore-doctor' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
-grep -Fq 'health_host="$HTTP_BIND"' \
+grep -Fq '[[ "$HTTP_BIND" == "0.0.0.0" ]]' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'http://$health_host:$HTTP_PORT$APP_API_PREFIX/health/live' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'wait_for_api 30 && return 0' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'if wait_for_api 5; then' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+[[ "$(grep -Ec '^[[:space:]]+wait_for_server$' "$PROJECT_ROOT/deploy/production/bin/stock-data-sync")" == "3" ]]
+grep -Fq 'if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 if grep -Eq 'local release=.*bootstrap=.*\$release' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"; then
   printf 'upgrade bootstrap path expands release before local assignment completes\n' >&2
   exit 1
 fi
+
+(
+  eval "$(sed -n '/^wait_for_api() {$/,/^}$/p' "$PROJECT_ROOT/deploy/production/bin/stock-data-sync")"
+  attempt_count=0
+  api_is_healthy() { (( attempt_count += 1 )); (( attempt_count >= 3 )); }
+  sleep() { :; }
+  wait_for_api 5
+  [[ "$attempt_count" == "3" ]]
+  attempt_count=0
+  api_is_healthy() { (( attempt_count += 1 )); return 1; }
+  ! wait_for_api 3
+  [[ "$attempt_count" == "3" ]]
+)
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"

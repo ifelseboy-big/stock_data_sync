@@ -131,6 +131,32 @@ wait_for_postgres() {
   fail "PostgreSQL 启动超时，请检查 $DATA_DIR/logs/postgres"
 }
 
+api_health_host() {
+  [[ "$HTTP_BIND" == "0.0.0.0" ]] && printf '127.0.0.1\n' || printf '%s\n' "$HTTP_BIND"
+}
+
+api_is_healthy() {
+  local health_host
+  health_host="$(api_health_host)"
+  curl -fsS --connect-timeout 1 --max-time 2 \
+    "http://$health_host:$HTTP_PORT$APP_API_PREFIX/health/live" >/dev/null 2>&1
+}
+
+wait_for_api() {
+  local attempts="${1:-30}" attempt
+  for (( attempt = 1; attempt <= attempts; attempt++ )); do
+    api_is_healthy && return 0
+    (( attempt < attempts )) && sleep 1
+  done
+  return 1
+}
+
+wait_for_server() {
+  wait_for_api 30 && return 0
+  printf '错误：Server 启动超时，请检查 %s/logs/launchd/server.err.log\n' "$PROGRAM_DIR" >&2
+  return 1
+}
+
 ensure_database() {
   local exists
   exists="$("$POSTGRES_BIN_DIR/psql" -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d postgres \
@@ -180,6 +206,9 @@ start_selected() {
   start_postgres
   require_database_compatibility "$PROGRAM_DIR/current"
   bootstrap_service "$service"
+  if [[ "$service" == "server" ]]; then
+    wait_for_server
+  fi
 }
 
 start_all() {
@@ -187,6 +216,7 @@ start_all() {
   print_postgres_runtime_config
   require_database_compatibility "$PROGRAM_DIR/current"
   bootstrap_service server
+  wait_for_server
   bootstrap_service scheduler
   [[ -f "$(plist_for backup)" ]] && bootstrap_service backup
 }
@@ -208,6 +238,8 @@ restart_selected() {
     wait_for_postgres
     ensure_database
     print_postgres_runtime_config
+  elif [[ "$service" == "server" ]]; then
+    wait_for_server
   fi
 }
 
@@ -330,7 +362,7 @@ doctor_check_release() {
 
 run_doctor() {
   local phase="runtime" target="$PROGRAM_DIR/current" require_running=1
-  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services health_host
+  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services
   local shared_buffers_status shared_buffers_actual shared_buffers_bytes
   while (( $# > 0 )); do
     case "$1" in
@@ -465,9 +497,7 @@ run_doctor() {
     if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
       is_loaded backup && doctor_pass "Backup 定时服务已加载" || doctor_fail_check "Backup 定时服务未加载"
     fi
-    health_host="$HTTP_BIND"
-    [[ "$health_host" == "0.0.0.0" ]] && health_host="127.0.0.1"
-    if curl -fsS --max-time 5 "http://$health_host:$HTTP_PORT$APP_API_PREFIX/health/live" >/dev/null; then
+    if wait_for_api 5; then
       doctor_pass "API 健康检查通过"
     else
       doctor_fail_check "API 健康检查失败"
@@ -524,7 +554,7 @@ refresh_stable_entries() {
 }
 
 run_upgrade() {
-  local requested="" previous target service_home service_group ignore_doctor=0
+  local requested="" previous target service_home service_group ignore_doctor=0 rollback_ok
   while (( $# > 0 )); do
     case "$1" in
       --version) (( $# >= 2 )) || fail "--version 缺少版本"; requested="$2"; shift 2 ;;
@@ -554,14 +584,14 @@ run_upgrade() {
   previous="$(cd "$PROGRAM_DIR/current" && pwd -P)"
   ln -sfn "releases/$(basename "$previous")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
-  restart_selected server
-  restart_selected scheduler
-  if ! run_doctor --phase post-upgrade; then
+  if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then
     printf '升级后检查失败，正在切回旧程序。\n' >&2
     deploy_switch_current "$PROGRAM_DIR" "$previous"
-    restart_selected server
-    restart_selected scheduler
-    run_doctor --phase rollback || true
+    rollback_ok=1
+    restart_selected server || rollback_ok=0
+    restart_selected scheduler || rollback_ok=0
+    run_doctor --phase rollback || rollback_ok=0
+    (( rollback_ok == 1 )) || fail "程序升级失败；已切回旧版本，但服务恢复检查未通过"
     fail "程序升级失败，已切回旧版本"
   fi
   deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$PROGRAM_DIR" "$DATA_DIR" "$SOURCE_REPOSITORY" "$BUILT_RELEASE_VERSION"
@@ -569,7 +599,7 @@ run_upgrade() {
 }
 
 run_rollback() {
-  local requested="" target="" candidate current service_home service_group
+  local requested="" target="" candidate current service_home service_group restore_ok
   while (( $# > 0 )); do
     case "$1" in
       --version) (( $# >= 2 )) || fail "--version 缺少版本"; requested="$(deploy_normalize_version "$2")"; shift 2 ;;
@@ -592,13 +622,14 @@ run_rollback() {
   require_database_compatibility "$target"
   ln -sfn "releases/$(basename "$current")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
-  restart_selected server
-  restart_selected scheduler
-  run_doctor --phase rollback || {
+  if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase rollback; then
     deploy_switch_current "$PROGRAM_DIR" "$current"
-    restart_selected server; restart_selected scheduler
+    restore_ok=1
+    restart_selected server || restore_ok=0
+    restart_selected scheduler || restore_ok=0
+    (( restore_ok == 1 )) || fail "回滚失败；已恢复原程序，但服务启动未通过"
     fail "回滚后检查失败，已恢复原程序"
-  }
+  fi
   service_home="$(deploy_service_home "$SERVICE_USER")"
   service_group="$(id -gn "$SERVICE_USER")"
   deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$PROGRAM_DIR" "$DATA_DIR" "$SOURCE_REPOSITORY" "$(tr -d '[:space:]' < "$target/VERSION")"
