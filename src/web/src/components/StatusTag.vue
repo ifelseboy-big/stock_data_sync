@@ -17,7 +17,7 @@ const statusMap: Record<
   partial_failed: { label: '部分失败', type: 'warning' },
   failed: { label: '失败', type: 'danger' },
   blocked: { label: '已阻塞', type: 'danger' },
-  closed: { label: '已关闭', type: 'info' },
+  closed: { label: '已完成', type: 'success' },
 }
 
 const display = computed(() => statusMap[props.status])

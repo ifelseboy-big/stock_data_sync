@@ -1,7 +1,8 @@
 from collections.abc import Awaitable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog.presentation import TUSHARE_API_PRESENTATION_BY_NAME
 from app.catalog.tushare import build_tushare_api_registry
+from app.core.config import settings
 from app.db.session import get_db
 from app.modules.operations.command_service import (
     MAX_BACKFILL_DAYS,
@@ -129,9 +131,25 @@ async def releases(
 @router.get("/release-coverage", response_model=list[DatasetReleaseCoverageItem])
 async def release_coverage(
     db: DbSession,
-    day_count: Annotated[int, Query(alias="dayCount", ge=1, le=30)] = 5,
+    start_date: Annotated[date | None, Query(alias="startDate")] = None,
+    end_date: Annotated[date | None, Query(alias="endDate")] = None,
+    day_count: Annotated[int | None, Query(alias="dayCount", ge=1, le=30)] = None,
 ) -> list[DatasetReleaseCoverageItem]:
-    return await _service(db).release_coverage(day_count=day_count)
+    today = datetime.now(ZoneInfo(settings.scheduler_timezone)).date()
+    resolved_end = end_date or today
+    if resolved_end > today:
+        raise HTTPException(status_code=422, detail="结束日期不能晚于今天")
+    if start_date is not None and start_date > resolved_end:
+        raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+    if start_date is not None and resolved_end - start_date > timedelta(days=3660):
+        raise HTTPException(status_code=422, detail="单次检查范围不能超过 10 年")
+    if start_date is None and day_count is None:
+        start_date = resolved_end - timedelta(days=29)
+    return await _service(db).release_coverage(
+        start_date=start_date,
+        end_date=resolved_end,
+        day_count=day_count if start_date is None else None,
+    )
 
 
 @router.get("/providers/tushare", response_model=ProviderMonitoring)

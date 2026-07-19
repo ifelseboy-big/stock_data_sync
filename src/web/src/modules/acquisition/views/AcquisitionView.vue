@@ -228,7 +228,7 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
 
 <template>
   <section>
-    <PageHeader title="采集运行" description="按批次观察原始数据采集、失败重试和批次关闭结果。">
+    <PageHeader title="采集运行" description="按批次观察原始数据采集、失败重试和最终结果。">
       <template #actions>
         <el-button @click="openManualCommand('repair')">创建修复</el-button>
         <el-button type="primary" @click="openManualCommand('backfill')">历史回填</el-button>
@@ -245,7 +245,6 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
             <el-option label="成功" value="succeeded" />
             <el-option label="部分失败" value="partial_failed" />
             <el-option label="失败" value="failed" />
-            <el-option label="已关闭" value="closed" />
           </el-select>
         </el-form-item>
         <el-form-item label="数据周期">
@@ -293,7 +292,7 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
           <el-table-column label="耗时" width="110">
             <template #default="{ row }">{{ formatDuration(row.durationMs) }}</template>
           </el-table-column>
-          <el-table-column label="关闭时间" min-width="170">
+          <el-table-column label="完成时间" min-width="170">
             <template #default="{ row }">{{ formatDateTime(row.closedAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="170" fixed="right">

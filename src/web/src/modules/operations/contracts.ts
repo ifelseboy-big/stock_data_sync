@@ -187,7 +187,15 @@ export interface DatasetReleaseCoverageItem {
   businessDate: string
   expectedCount: number
   publishedCount: number
+  coverageStatus: 'complete' | 'missing' | 'pending'
   missingDatasets: string[]
+  missingDatasetDisplayNames: string[]
+}
+
+export interface DatasetReleaseCoverageQuery {
+  startDate?: string
+  endDate?: string
+  dayCount?: number
 }
 
 export interface DatasetReleaseQuery {

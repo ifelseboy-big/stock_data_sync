@@ -446,22 +446,25 @@ class OperationsRepository:
     async def release_coverage(
         self,
         *,
-        day_count: int,
+        start_date: date | None,
+        end_date: date,
+        day_count: int | None,
         dataset_names: tuple[str, ...],
-        through_date: date,
     ) -> list[tuple[date, set[str]]]:
-        trading_dates = tuple(
-            await self._session.scalars(
-                select(TradeCalendar.cal_date)
-                .where(
-                    TradeCalendar.exchange == "SSE",
-                    TradeCalendar.is_open.is_(True),
-                    TradeCalendar.cal_date <= through_date,
-                )
-                .order_by(TradeCalendar.cal_date.desc())
-                .limit(day_count)
+        trading_date_query = (
+            select(TradeCalendar.cal_date)
+            .where(
+                TradeCalendar.exchange == "SSE",
+                TradeCalendar.is_open.is_(True),
+                TradeCalendar.cal_date <= end_date,
             )
+            .order_by(TradeCalendar.cal_date.desc())
         )
+        if start_date is not None:
+            trading_date_query = trading_date_query.where(TradeCalendar.cal_date >= start_date)
+        if day_count is not None:
+            trading_date_query = trading_date_query.limit(day_count)
+        trading_dates = tuple(await self._session.scalars(trading_date_query))
         if not trading_dates:
             return []
         rows = (

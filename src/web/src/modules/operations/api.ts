@@ -11,6 +11,7 @@ import type {
   DependencyQuery,
   DatasetReleaseItem,
   DatasetReleaseCoverageItem,
+  DatasetReleaseCoverageQuery,
   DatasetReleaseQuery,
   CreateBackfillCommand,
   CreateRepairCommand,
@@ -112,10 +113,10 @@ export async function getDatasetReleases(
 }
 
 export async function getDatasetReleaseCoverage(
-  dayCount = 5,
+  query: DatasetReleaseCoverageQuery = {},
 ): Promise<DatasetReleaseCoverageItem[]> {
   const response = await http.get<DatasetReleaseCoverageItem[]>('/operations/release-coverage', {
-    params: { dayCount },
+    params: query,
   })
   return response.data
 }

@@ -12,6 +12,8 @@ DATA_DIR="${STOCK_DATA_SYNC_DATA_DIR:-}"
 ENV_FILE="$PROGRAM_DIR/config/app.env"
 PLIST_DIR="/Library/LaunchDaemons"
 SYSTEM_RUN_SERVICE="/usr/local/libexec/stock-data-sync/run-service"
+EXPECTED_SHARED_BUFFERS="2GB"
+EXPECTED_SHARED_BUFFERS_BYTES="2147483648"
 # shellcheck source=../lib/deploy-common.sh
 source "$SCRIPT_DIR/../lib/deploy-common.sh"
 
@@ -139,6 +141,19 @@ ensure_database() {
   fi
 }
 
+postgres_shared_buffers_status() {
+  "$POSTGRES_BIN_DIR/psql" -X -h 127.0.0.1 -p "$POSTGRES_PORT" \
+    -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
+    "SELECT current_setting('shared_buffers') || '|' || pg_size_bytes(current_setting('shared_buffers'))"
+}
+
+print_postgres_runtime_config() {
+  local status actual
+  status="$(postgres_shared_buffers_status)" || fail "无法读取 PostgreSQL 实际 shared_buffers"
+  actual="${status%%|*}"
+  printf 'PostgreSQL 实际配置：shared_buffers=%s\n' "$actual"
+}
+
 require_database_compatibility() {
   local target_release="${1:-$PROGRAM_DIR/current}"
   deploy_database_is_compatible "$target_release" || {
@@ -159,6 +174,7 @@ start_selected() {
   service="$(canonical_service "$1")"
   if [[ "$service" == "postgres" ]]; then
     start_postgres
+    print_postgres_runtime_config
     return
   fi
   start_postgres
@@ -168,6 +184,7 @@ start_selected() {
 
 start_all() {
   start_postgres
+  print_postgres_runtime_config
   require_database_compatibility "$PROGRAM_DIR/current"
   bootstrap_service server
   bootstrap_service scheduler
@@ -190,6 +207,7 @@ restart_selected() {
   if [[ "$service" == "postgres" ]]; then
     wait_for_postgres
     ensure_database
+    print_postgres_runtime_config
   fi
 }
 
@@ -313,6 +331,7 @@ doctor_check_release() {
 run_doctor() {
   local phase="runtime" target="$PROGRAM_DIR/current" require_running=1
   local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services
+  local shared_buffers_status shared_buffers_actual shared_buffers_bytes
   while (( $# > 0 )); do
     case "$1" in
       --phase) (( $# >= 2 )) || fail "--phase 缺少参数"; phase="$2"; shift 2 ;;
@@ -402,6 +421,16 @@ run_doctor() {
   fi
   if "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
     doctor_pass "PostgreSQL 可用"
+    shared_buffers_status="$(postgres_shared_buffers_status 2>/dev/null || true)"
+    shared_buffers_actual="${shared_buffers_status%%|*}"
+    shared_buffers_bytes="${shared_buffers_status##*|}"
+    if [[ "$shared_buffers_bytes" == "$EXPECTED_SHARED_BUFFERS_BYTES" ]]; then
+      doctor_pass "PostgreSQL shared_buffers 已生效：$shared_buffers_actual"
+    elif (( require_running == 1 )); then
+      doctor_fail_check "PostgreSQL shared_buffers 未按生产配置生效：${shared_buffers_actual:-无法读取}（期望 $EXPECTED_SHARED_BUFFERS）"
+    else
+      doctor_warn "PostgreSQL shared_buffers 当前为 ${shared_buffers_actual:-无法读取}（目标 $EXPECTED_SHARED_BUFFERS）"
+    fi
     if (( target_trusted == 1 )); then
       deploy_database_is_compatible "$target" && doctor_pass "数据库 revision 与目标程序兼容" || doctor_fail_check "数据库 revision 与目标程序不兼容"
     fi
@@ -702,7 +731,11 @@ case "$command_name" in
     ;;
   status)
     printf 'version    %s (%s)\n' "$APP_VERSION" "$(cut -c1-12 "$PROGRAM_DIR/current/COMMIT")"
-    print_service_status postgres; print_service_status server; print_service_status scheduler
+    print_service_status postgres
+    if "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
+      print_postgres_runtime_config
+    fi
+    print_service_status server; print_service_status scheduler
     [[ -f "$(plist_for backup)" ]] && print_service_status backup
     ;;
   upgrade) run_upgrade "$@" ;;

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { http } from '@/api/http'
 
-import { createRepair } from './api'
+import { createRepair, getDatasetReleaseCoverage } from './api'
 
 vi.mock('@/api/http', () => ({
   http: {
@@ -36,6 +36,24 @@ describe('operations command authentication', () => {
       headers: {
         Authorization: 'Bearer configured-admin-token',
         'Idempotency-Key': 'request-1',
+      },
+    })
+  })
+})
+
+describe('release coverage query', () => {
+  it('passes the selected date range to the API', async () => {
+    vi.mocked(http.get).mockResolvedValueOnce({ data: [] })
+
+    await getDatasetReleaseCoverage({
+      startDate: '2026-07-01',
+      endDate: '2026-07-19',
+    })
+
+    expect(http.get).toHaveBeenCalledWith('/operations/release-coverage', {
+      params: {
+        startDate: '2026-07-01',
+        endDate: '2026-07-19',
       },
     })
   })

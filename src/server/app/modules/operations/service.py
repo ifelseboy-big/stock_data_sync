@@ -295,7 +295,13 @@ class OperationsService:
             generated_at=now,
         )
 
-    async def release_coverage(self, *, day_count: int) -> list[DatasetReleaseCoverageItem]:
+    async def release_coverage(
+        self,
+        *,
+        start_date: date | None,
+        end_date: date,
+        day_count: int | None,
+    ) -> list[DatasetReleaseCoverageItem]:
         expected = tuple(
             sorted(
                 spec.dataset_name
@@ -304,20 +310,40 @@ class OperationsService:
             )
         )
         rows = await self._repository.release_coverage(
+            start_date=start_date,
+            end_date=end_date,
             day_count=day_count,
             dataset_names=expected,
-            through_date=datetime.now(self._timezone).date(),
         )
         expected_set = set(expected)
-        return [
-            DatasetReleaseCoverageItem(
-                business_date=business_date,
-                expected_count=len(expected),
-                published_count=len(published),
-                missing_datasets=sorted(expected_set - published),
+        today = datetime.now(self._timezone).date()
+        result: list[DatasetReleaseCoverageItem] = []
+        for business_date, published in rows:
+            missing = sorted(expected_set - published)
+            result.append(
+                DatasetReleaseCoverageItem(
+                    business_date=business_date,
+                    expected_count=len(expected),
+                    published_count=len(published),
+                    coverage_status=(
+                        "complete"
+                        if not missing
+                        else "pending"
+                        if business_date == today
+                        else "missing"
+                    ),
+                    missing_datasets=missing,
+                    missing_dataset_display_names=[
+                        (
+                            DATASET_PRESENTATION_BY_NAME[item].display_name
+                            if item in DATASET_PRESENTATION_BY_NAME
+                            else item
+                        )
+                        for item in missing
+                    ],
+                )
             )
-            for business_date, published in rows
-        ]
+        return result
 
     async def provider_monitoring(self) -> ProviderMonitoring:
         now = datetime.now(self._timezone)
@@ -655,7 +681,7 @@ def _batch_status(value: str, failed_count: int) -> ExecutionStatus:
     if value == BatchStatus.RUNNING.value:
         return "running"
     if value == BatchStatus.CLOSED.value:
-        return "partial_failed" if failed_count else "closed"
+        return "partial_failed" if failed_count else "succeeded"
     return "failed"
 
 

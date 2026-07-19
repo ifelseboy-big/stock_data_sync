@@ -213,7 +213,9 @@ class DatasetReleaseCoverageItem(OperationsModel):
     business_date: date
     expected_count: int
     published_count: int
+    coverage_status: Literal["complete", "missing", "pending"]
     missing_datasets: list[str]
+    missing_dataset_display_names: list[str]
 
 
 class OperationsOverview(OperationsModel):
