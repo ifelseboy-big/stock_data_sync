@@ -21,6 +21,7 @@ from app.modules.acquisition.models import (
     CollectionTaskStatus,
 )
 from app.modules.operations.models import (
+    DeferredCollectionStage,
     OperationCommand,
     ScheduledJobControl,
     ScheduledJobExecution,
@@ -91,6 +92,7 @@ class OperationCommandService:
         reason: str,
         context: "CommandContext",
     ) -> OperationCommandResult:
+        command_id = uuid4()
         payload: dict[str, object] = {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
@@ -116,22 +118,32 @@ class OperationCommandService:
                     end_date=end_date,
                 )
             )
-            batch_ids = [
-                str(
-                    await self._create_batch(
-                        batch_type=BatchType.BACKFILL,
-                        business_date=business_date,
-                        specs=specs,
-                        now=now,
+            batch_ids: list[str] = []
+            deferred_stage_count = 0
+            for business_date in trading_dates:
+                date_specs, deferred_count = await self._manual_batch_specs(
+                    specs,
+                    business_date=business_date,
+                    batch_type=BatchType.BACKFILL,
+                    command_id=command_id,
+                )
+                deferred_stage_count += deferred_count
+                batch_ids.append(
+                    str(
+                        await self._create_batch(
+                            batch_type=BatchType.BACKFILL,
+                            business_date=business_date,
+                            specs=date_specs,
+                            now=now,
+                        )
                     )
                 )
-                for business_date in trading_dates
-            ]
             return {
                 "batchIds": batch_ids,
                 "batchCount": len(batch_ids),
                 "tradingDateCount": len(trading_dates),
                 "partitionCount": len(partition_names),
+                "deferredStageCount": deferred_stage_count,
             }
 
         return await self._execute(
@@ -142,6 +154,7 @@ class OperationCommandService:
             payload=payload,
             context=context,
             apply=apply,
+            command_id=command_id,
         )
 
     async def create_repair(
@@ -152,6 +165,7 @@ class OperationCommandService:
         reason: str,
         context: "CommandContext",
     ) -> OperationCommandResult:
+        command_id = uuid4()
         payload: dict[str, object] = {
             "business_date": business_date.isoformat() if business_date else None,
             "api_names": list(api_names),
@@ -160,13 +174,19 @@ class OperationCommandService:
 
         async def apply(now: datetime) -> dict[str, object]:
             specs = self._resolve_specs(api_names, daily_only=False)
+            planned_specs, deferred_count = await self._manual_batch_specs(
+                specs,
+                business_date=business_date,
+                batch_type=BatchType.REPAIR,
+                command_id=command_id,
+            )
             batch_id = await self._create_batch(
                 batch_type=BatchType.REPAIR,
                 business_date=business_date,
-                specs=specs,
+                specs=planned_specs,
                 now=now,
             )
-            return {"batchId": str(batch_id)}
+            return {"batchId": str(batch_id), "deferredStageCount": deferred_count}
 
         return await self._execute(
             action="CREATE_REPAIR",
@@ -176,6 +196,7 @@ class OperationCommandService:
             payload=payload,
             context=context,
             apply=apply,
+            command_id=command_id,
         )
 
     async def set_scheduled_job_enabled(
@@ -517,10 +538,11 @@ class OperationCommandService:
         payload: dict[str, object],
         context: "CommandContext",
         apply: Callable[[datetime], Awaitable[dict[str, object]]],
+        command_id: UUID | None = None,
     ) -> OperationCommandResult:
         now = datetime.now(UTC)
         request_hash = _request_hash(action, target_type, target_id, payload)
-        command_id = uuid4()
+        command_id = command_id or uuid4()
         inserted = await self._session.scalar(
             insert(OperationCommand)
             .values(
@@ -686,49 +708,140 @@ class OperationCommandService:
         await self._session.flush()
         return batch_id
 
+    async def _manual_batch_specs(
+        self,
+        specs: Sequence[ApiSpec],
+        *,
+        business_date: date | None,
+        batch_type: BatchType,
+        command_id: UUID,
+    ) -> tuple[tuple[ApiSpec, ...], int]:
+        planned_specs = list(specs)
+        deferred_count = 0
+        theme_member_spec = next(
+            (spec for spec in planned_specs if spec.api_name == "dc_concept_cons"),
+            None,
+        )
+        if theme_member_spec is not None:
+            if business_date is None:
+                raise OperationCommandError(
+                    "采集东方财富题材成分必须指定业务日期",
+                    status_code=422,
+                )
+            planned_specs = [
+                spec for spec in planned_specs if spec.api_name != theme_member_spec.api_name
+            ]
+            refreshes_theme_master = any(spec.api_name == "dc_concept" for spec in planned_specs)
+            theme_codes = await self._theme_codes(business_date)
+            if theme_codes and not refreshes_theme_master:
+                planned_specs.append(theme_member_spec)
+            else:
+                if not refreshes_theme_master:
+                    planned_specs.append(self._api_specs.get("dc_concept"))
+                self._add_deferred_stage(
+                    command_id=command_id,
+                    api_name=theme_member_spec.api_name,
+                    business_date=business_date,
+                    batch_type=batch_type,
+                )
+                deferred_count += 1
+
+        ths_member_spec = next(
+            (spec for spec in planned_specs if spec.api_name == "ths_member"),
+            None,
+        )
+        if ths_member_spec is not None:
+            if business_date is None:
+                raise OperationCommandError(
+                    "采集同花顺概念与主题成分必须指定业务日期",
+                    status_code=422,
+                )
+            planned_specs = [
+                spec for spec in planned_specs if spec.api_name != ths_member_spec.api_name
+            ]
+            refreshes_ths_master = any(spec.api_name == "ths_index" for spec in planned_specs)
+            ths_codes = await self._ths_board_codes()
+            if ths_codes and not refreshes_ths_master:
+                planned_specs.append(ths_member_spec)
+            else:
+                if not refreshes_ths_master:
+                    planned_specs.append(self._api_specs.get("ths_index"))
+                self._add_deferred_stage(
+                    command_id=command_id,
+                    api_name=ths_member_spec.api_name,
+                    business_date=business_date,
+                    batch_type=batch_type,
+                )
+                deferred_count += 1
+        return tuple(planned_specs), deferred_count
+
+    def _add_deferred_stage(
+        self,
+        *,
+        command_id: UUID,
+        api_name: str,
+        business_date: date,
+        batch_type: BatchType,
+    ) -> None:
+        self._session.add(
+            DeferredCollectionStage(
+                command_id=command_id,
+                api_name=api_name,
+                business_date=business_date,
+                batch_type=batch_type.value,
+                status="PENDING",
+            )
+        )
+
     async def _resolve_scopes(
         self,
         spec: ApiSpec,
         business_date: date | None,
     ) -> tuple[RequestScope, ...]:
         if spec.api_name == "ths_member":
-            concept_codes = tuple(
-                await self._session.scalars(
-                    select(ConceptBoard.ts_code)
-                    .where(ConceptBoard.source == "THS")
-                    .order_by(ConceptBoard.ts_code)
-                )
-            )
-            theme_codes = tuple(
-                await self._session.scalars(
-                    select(ThemeIndex.ts_code)
-                    .where(ThemeIndex.source == "THS")
-                    .order_by(ThemeIndex.ts_code)
-                )
-            )
-            codes = tuple(sorted({*concept_codes, *theme_codes}))
+            codes = await self._ths_board_codes()
             if not codes:
                 raise OperationCommandError("同花顺概念和主题主数据尚未发布，不能采集板块成分")
             return ths_member_scopes(codes)
         if spec.api_name == "dc_concept_cons":
             if business_date is None:
                 raise OperationCommandError("题材成分采集必须指定业务日期")
-            theme_codes = tuple(
-                await self._session.scalars(
-                    select(MarketThemeDaily.theme_code)
-                    .where(
-                        MarketThemeDaily.source == "DC",
-                        MarketThemeDaily.trade_date == business_date,
-                    )
-                    .order_by(MarketThemeDaily.theme_code)
-                )
-            )
+            theme_codes = await self._theme_codes(business_date)
             if not theme_codes:
                 raise OperationCommandError(
                     "该日期题材主数据尚未发布，必须先完成dc_concept采集和加工"
                 )
             return theme_member_scopes(business_date, theme_codes)
         return tuple(spec.scope_builder(business_date))
+
+    async def _theme_codes(self, business_date: date) -> tuple[str, ...]:
+        return tuple(
+            await self._session.scalars(
+                select(MarketThemeDaily.theme_code)
+                .where(
+                    MarketThemeDaily.source == "DC",
+                    MarketThemeDaily.trade_date == business_date,
+                )
+                .order_by(MarketThemeDaily.theme_code)
+            )
+        )
+
+    async def _ths_board_codes(self) -> tuple[str, ...]:
+        concept_codes = tuple(
+            await self._session.scalars(
+                select(ConceptBoard.ts_code)
+                .where(ConceptBoard.source == "THS")
+                .order_by(ConceptBoard.ts_code)
+            )
+        )
+        theme_codes = tuple(
+            await self._session.scalars(
+                select(ThemeIndex.ts_code)
+                .where(ThemeIndex.source == "THS")
+                .order_by(ThemeIndex.ts_code)
+            )
+        )
+        return tuple(sorted({*concept_codes, *theme_codes}))
 
     async def _create_batch_from_task(
         self,

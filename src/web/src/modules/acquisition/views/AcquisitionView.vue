@@ -128,8 +128,9 @@ async function submitManualCommand() {
   manualLoading.value = true
   try {
     const options = { idempotencyKey }
+    let deferredStageCount = 0
     if (manualMode.value === 'backfill') {
-      await createBackfill(
+      const command = await createBackfill(
         {
           startDate: commandForm.startDate,
           endDate: commandForm.endDate,
@@ -138,8 +139,9 @@ async function submitManualCommand() {
         },
         options,
       )
+      deferredStageCount = Number(command.result.deferredStageCount ?? 0)
     } else {
-      await createRepair(
+      const command = await createRepair(
         {
           businessDate: commandForm.businessDate || null,
           apiNames: commandForm.apiNames,
@@ -147,8 +149,13 @@ async function submitManualCommand() {
         },
         options,
       )
+      deferredStageCount = Number(command.result.deferredStageCount ?? 0)
     }
-    ElMessage.success('采集命令已创建，调度器将异步执行')
+    ElMessage.success(
+      deferredStageCount > 0
+        ? `采集命令已创建；${deferredStageCount} 个依赖阶段将在主数据发布后自动执行`
+        : '采集命令已创建，调度器将异步执行',
+    )
     manualMode.value = null
     await load()
   } catch (error) {

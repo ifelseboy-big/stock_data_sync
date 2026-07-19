@@ -1,6 +1,6 @@
 import os
 from datetime import UTC, date, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -15,15 +15,19 @@ from app.modules.acquisition.models import (
     CollectionTask,
     CollectionTaskStatus,
 )
-from app.modules.operations.models import OperationCommand
+from app.modules.operations.models import DeferredCollectionStage, OperationCommand
 from app.modules.processing.models import (
+    DatasetRelease,
     DependencyStatus,
     DependencyType,
     ProcessingDependency,
     ProcessingTask,
     ProcessingTaskStatus,
+    ReleaseScopeType,
 )
 from app.modules.stocks.models import TradeCalendar
+from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
+from app.scheduler.jobs import plan_deferred_collection_stages
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_INTEGRATION") != "1",
@@ -210,7 +214,19 @@ async def test_manual_commands_are_authenticated_idempotent_and_queue_only() -> 
                 "startDate": business_date.isoformat(),
                 "endDate": business_date.isoformat(),
                 "apiNames": ["daily"],
-                "reason": "补齐历史日线原始数据",
+                "reason": "回填",
+            },
+        )
+        staged_repair = await client.post(
+            "/api/v1/operations/commands/repairs",
+            headers={
+                "Authorization": f"Bearer {ADMIN_TOKEN}",
+                "Idempotency-Key": "create-staged-repair-command",
+            },
+            json={
+                "businessDate": business_date.isoformat(),
+                "apiNames": ["dc_concept", "dc_concept_cons", "ths_index", "ths_member"],
+                "reason": "验证动态接口自动分阶段修复",
             },
         )
 
@@ -223,6 +239,8 @@ async def test_manual_commands_are_authenticated_idempotent_and_queue_only() -> 
     assert cancel_batch.status_code == 202, cancel_batch.text
     assert backfill.status_code == 202, backfill.text
     assert backfill.json()["result"]["batchCount"] == 1
+    assert staged_repair.status_code == 202, staged_repair.text
+    assert staged_repair.json()["result"]["deferredStageCount"] == 2
 
     with SyncSessionFactory() as session:
         repair_batch_id = first.json()["result"]["batchId"]
@@ -237,6 +255,20 @@ async def test_manual_commands_are_authenticated_idempotent_and_queue_only() -> 
                 OperationCommand.idempotency_key == "retry-collection-command"
             )
         )
+        staged_command_id = UUID(staged_repair.json()["commandId"])
+        staged_batch_id = UUID(staged_repair.json()["result"]["batchId"])
+        deferred_stages = tuple(
+            session.scalars(
+                select(DeferredCollectionStage).where(
+                    DeferredCollectionStage.command_id == staged_command_id
+                )
+            )
+        )
+        staged_tasks = tuple(
+            session.scalars(
+                select(CollectionTask).where(CollectionTask.batch_id == staged_batch_id)
+            )
+        )
 
     assert repair_batch is not None
     assert repair_batch.batch_type == BatchType.REPAIR.value
@@ -249,6 +281,97 @@ async def test_manual_commands_are_authenticated_idempotent_and_queue_only() -> 
     assert cancelled_batch.status == BatchStatus.CANCELLED.value
     assert cancelled_task is not None
     assert cancelled_task.status == CollectionTaskStatus.CANCELLED.value
-    assert command_count == 5
+    assert command_count == 6
     assert command is not None
     assert command.request_id != "unknown"
+    assert {stage.api_name for stage in deferred_stages} == {"dc_concept_cons", "ths_member"}
+    assert {task.api_name for task in staged_tasks} == {"dc_concept", "ths_index"}
+
+    published_at = datetime.now(UTC) + timedelta(seconds=1)
+    release_rows = (
+        ("market_theme_daily", ReleaseScopeType.DATE.value, business_date.isoformat()),
+        ("concept_board", ReleaseScopeType.GLOBAL.value, "global"),
+        ("theme_index", ReleaseScopeType.GLOBAL.value, "global"),
+    )
+    with SyncSessionFactory() as session, session.begin():
+        session.add_all(
+            (
+                MarketThemeDaily(
+                    source="DC",
+                    theme_code="DC001",
+                    trade_date=business_date,
+                    name="测试题材",
+                    synced_at=published_at,
+                ),
+                ConceptBoard(
+                    source="THS",
+                    ts_code="885001.TI",
+                    name="测试概念",
+                    board_type="N",
+                    synced_at=published_at,
+                ),
+                ThemeIndex(
+                    source="THS",
+                    ts_code="700001.TI",
+                    name="测试主题",
+                    theme_type="TH",
+                    synced_at=published_at,
+                ),
+            )
+        )
+        for dataset_name, scope_type, scope_key in release_rows:
+            process_id = uuid4()
+            version_id = uuid4()
+            session.add(
+                ProcessingTask(
+                    process_id=process_id,
+                    source_batch_id=staged_batch_id,
+                    process_type=f"{dataset_name}@1",
+                    business_date=(
+                        business_date if scope_type == ReleaseScopeType.DATE.value else None
+                    ),
+                    output_dataset=dataset_name,
+                    output_version=version_id,
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    finished_at=published_at,
+                )
+            )
+            session.flush()
+            session.add(
+                DatasetRelease(
+                    dataset_name=dataset_name,
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                    business_date=(
+                        business_date if scope_type == ReleaseScopeType.DATE.value else None
+                    ),
+                    version_id=version_id,
+                    process_id=process_id,
+                    row_count=1,
+                    published_at=published_at,
+                )
+            )
+
+    plan_deferred_collection_stages()
+
+    with SyncSessionFactory() as session:
+        planned_stages = tuple(
+            session.scalars(
+                select(DeferredCollectionStage).where(
+                    DeferredCollectionStage.command_id == staged_command_id
+                )
+            )
+        )
+        planned_batch_ids = tuple(
+            stage.batch_id for stage in planned_stages if stage.batch_id is not None
+        )
+        deferred_tasks = tuple(
+            session.scalars(
+                select(CollectionTask).where(CollectionTask.batch_id.in_(planned_batch_ids))
+            )
+        )
+
+    assert {stage.status for stage in planned_stages} == {"PLANNED"}
+    assert len(planned_batch_ids) == 2
+    assert {task.api_name for task in deferred_tasks} == {"dc_concept_cons", "ths_member"}

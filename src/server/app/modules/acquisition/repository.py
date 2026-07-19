@@ -267,6 +267,15 @@ class AcquisitionRepository:
                         (CollectionBatch.batch_type == BatchType.BACKFILL.value, 400),
                         else_=500,
                     ),
+                    case(
+                        (
+                            CollectionBatch.batch_type == BatchType.BACKFILL.value,
+                            CollectionBatch.business_date,
+                        ),
+                        else_=None,
+                    )
+                    .desc()
+                    .nulls_last(),
                     CollectionBatch.scheduled_at,
                     CollectionTask.api_name,
                     CollectionTask.scope_key,

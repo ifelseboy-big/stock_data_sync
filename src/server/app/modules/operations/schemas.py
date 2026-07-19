@@ -228,7 +228,7 @@ class OperationsOverview(OperationsModel):
 
 
 class ManualCommandBase(OperationsModel):
-    reason: str = Field(min_length=3, max_length=500)
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class CreateBackfillCommand(ManualCommandBase):

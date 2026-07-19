@@ -39,13 +39,14 @@ from app.modules.acquisition.factory import (
 )
 from app.modules.acquisition.models import BatchType
 from app.modules.acquisition.planner import StagePlan
-from app.modules.operations.models import ScheduledJobExecution
+from app.modules.operations.models import DeferredCollectionStage, ScheduledJobExecution
 from app.modules.partitions.service import ensure_monthly_partitions
 from app.modules.processing.factory import (
     get_dataset_specs,
     get_processing_repository,
     get_processing_runtime,
 )
+from app.modules.processing.models import DatasetRelease
 from app.modules.stocks.models import TradeCalendar
 from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
 
@@ -83,11 +84,131 @@ def plan_processing_tasks() -> None:
             queued_task_count=result.queued_task_count,
             blocked_task_count=result.blocked_task_count,
         )
+    plan_deferred_collection_stages()
+
+
+def plan_deferred_collection_stages() -> None:
+    now = datetime.now(ZoneInfo(settings.scheduler_timezone))
+    planned_batch_ids: list[str] = []
+    completed_without_tasks = 0
+    with SyncSessionFactory() as session, session.begin():
+        stages = session.scalars(
+            select(DeferredCollectionStage)
+            .where(DeferredCollectionStage.status == "PENDING")
+            .order_by(
+                DeferredCollectionStage.created_at,
+                DeferredCollectionStage.stage_id,
+            )
+            .with_for_update(skip_locked=True, of=DeferredCollectionStage)
+            .limit(50)
+        ).all()
+        for stage in stages:
+            if stage.api_name == "dc_concept_cons":
+                stage_date = stage.business_date
+                if stage_date is None:
+                    raise RuntimeError("dc_concept_cons deferred stage has no business date")
+                release_ready = session.scalar(
+                    select(DatasetRelease.process_id).where(
+                        DatasetRelease.dataset_name == "market_theme_daily",
+                        DatasetRelease.business_date == stage_date,
+                        DatasetRelease.published_at >= stage.created_at,
+                    )
+                )
+                if release_ready is None:
+                    continue
+                theme_codes = tuple(
+                    session.scalars(
+                        select(MarketThemeDaily.theme_code)
+                        .where(
+                            MarketThemeDaily.source == "DC",
+                            MarketThemeDaily.trade_date == stage_date,
+                        )
+                        .order_by(MarketThemeDaily.theme_code)
+                    )
+                )
+                dynamic_spec = _theme_member_spec(stage.api_name, stage_date, theme_codes)
+                scope_count = len(theme_codes)
+            elif stage.api_name == "ths_member":
+                ready_datasets = set(
+                    session.scalars(
+                        select(DatasetRelease.dataset_name).where(
+                            DatasetRelease.dataset_name.in_(("concept_board", "theme_index")),
+                            DatasetRelease.published_at >= stage.created_at,
+                        )
+                    )
+                )
+                if ready_datasets != {"concept_board", "theme_index"}:
+                    continue
+                concept_codes = tuple(
+                    session.scalars(
+                        select(ConceptBoard.ts_code)
+                        .where(ConceptBoard.source == "THS")
+                        .order_by(ConceptBoard.ts_code)
+                    )
+                )
+                theme_codes = tuple(
+                    session.scalars(
+                        select(ThemeIndex.ts_code)
+                        .where(ThemeIndex.source == "THS")
+                        .order_by(ThemeIndex.ts_code)
+                    )
+                )
+                ths_codes = tuple(sorted({*concept_codes, *theme_codes}))
+                dynamic_spec = _ths_member_spec(stage.api_name, ths_codes)
+                scope_count = len(ths_codes)
+            else:
+                raise RuntimeError(f"unsupported deferred collection API: {stage.api_name}")
+            if not scope_count:
+                stage.status = "PLANNED"
+                stage.planned_at = now
+                completed_without_tasks += 1
+                continue
+            result = get_collection_planner().plan(
+                StagePlan(
+                    batch_type=BatchType(stage.batch_type),
+                    business_date=stage.business_date,
+                    scheduled_at=stage.created_at
+                    + timedelta(microseconds=1 if stage.api_name == "dc_concept_cons" else 2),
+                    api_specs=(dynamic_spec,),
+                    finalize=True,
+                ),
+                now=now,
+            )
+            if result.batch_id is None:
+                raise RuntimeError("deferred collection stage unexpectedly skipped")
+            stage.status = "PLANNED"
+            stage.batch_id = result.batch_id
+            stage.planned_at = now
+            planned_batch_ids.append(str(result.batch_id))
+    if planned_batch_ids or completed_without_tasks:
+        structlog.get_logger("scheduler").info(
+            "deferred_collection_stages_planned",
+            batch_ids=planned_batch_ids,
+            completed_without_tasks=completed_without_tasks,
+        )
 
 
 def dispatch_processing_task() -> None:
     now = datetime.now(ZoneInfo(settings.scheduler_timezone))
     get_processing_runtime().dispatch(now=now)
+
+
+def _theme_member_spec(
+    api_name: str,
+    business_date: date,
+    codes: tuple[str, ...],
+) -> ApiSpec:
+    return replace(
+        get_api_specs().get(api_name),
+        scope_builder=lambda ignored_date: theme_member_scopes(business_date, codes),
+    )
+
+
+def _ths_member_spec(api_name: str, codes: tuple[str, ...]) -> ApiSpec:
+    return replace(
+        get_api_specs().get(api_name),
+        scope_builder=lambda ignored_date: ths_member_scopes(codes),
+    )
 
 
 def reconcile_processing_runtime(*, recover_all_running: bool = False) -> None:

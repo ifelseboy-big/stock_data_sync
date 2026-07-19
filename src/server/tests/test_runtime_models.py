@@ -27,6 +27,7 @@ RUNTIME_TABLES = {
     "processing_task",
     "processing_dependency",
     "dataset_release",
+    "deferred_collection_stage",
 }
 
 
@@ -60,6 +61,7 @@ def test_runtime_indexes_match_queue_access_paths() -> None:
         "idx_dependency_waiting",
         "idx_release_process",
         "idx_release_business_date",
+        "idx_deferred_collection_stage_pending",
     } <= index_names
 
 
@@ -97,7 +99,7 @@ def test_alembic_has_one_head() -> None:
     config = Config(server_dir / "alembic.ini")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260719_0007"]
+    assert script.get_heads() == ["20260720_0008"]
 
 
 def test_runtime_schema_compiles_for_postgresql() -> None:

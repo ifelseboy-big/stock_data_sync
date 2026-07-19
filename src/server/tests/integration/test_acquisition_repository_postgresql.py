@@ -103,3 +103,52 @@ def test_collection_repository_state_machine_roundtrip() -> None:
             finalize=True,
             now=retry_at,
         )
+
+
+def test_backfill_claims_the_most_recent_business_date_first() -> None:
+    repository = AcquisitionRepository(SyncSessionFactory)
+    scheduled_at = datetime(2026, 7, 20, 1, 0, tzinfo=TIMEZONE)
+    older_date = date(2026, 7, 16)
+    recent_date = date(2026, 7, 17)
+    blueprint = (TaskBlueprint("TUSHARE", "daily", "full-market", {}, 1),)
+    for business_date in (older_date, recent_date):
+        batch_id = repository.create_or_get_batch(
+            batch_type=BatchType.BACKFILL,
+            business_date=business_date,
+            scheduled_at=scheduled_at,
+        )
+        repository.append_tasks(batch_id, blueprint, finalize=True, now=scheduled_at)
+
+    first = repository.claim_next(
+        allowed_batch_types={BatchType.BACKFILL},
+        now=scheduled_at,
+    )
+
+    assert first is not None
+    assert first.business_date == recent_date
+    repository.fail_task(
+        first.task_id,
+        error_code="TEST_COMPLETE",
+        error_message="test terminal transition",
+        request_count=0,
+        retry_at=None,
+        completed_at=scheduled_at,
+        skipped=True,
+    )
+
+    second = repository.claim_next(
+        allowed_batch_types={BatchType.BACKFILL},
+        now=scheduled_at,
+    )
+
+    assert second is not None
+    assert second.business_date == older_date
+    repository.fail_task(
+        second.task_id,
+        error_code="TEST_COMPLETE",
+        error_message="test terminal transition",
+        request_count=0,
+        retry_at=None,
+        completed_at=scheduled_at,
+        skipped=True,
+    )

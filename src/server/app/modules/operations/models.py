@@ -1,16 +1,18 @@
 """SQLAlchemy entities for operations observability and manual commands."""
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     String,
+    UniqueConstraint,
     Uuid,
     text,
 )
@@ -82,6 +84,54 @@ class OperationCommand(Base):
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DeferredCollectionStage(Base):
+    __tablename__ = "deferred_collection_stage"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'PLANNED')",
+            name="deferred_collection_stage_status",
+        ),
+        CheckConstraint(
+            "batch_type IN ('BACKFILL', 'REPAIR')",
+            name="deferred_collection_stage_batch_type",
+        ),
+        UniqueConstraint(
+            "command_id",
+            "api_name",
+            "business_date",
+            name="uq_deferred_collection_stage_command_api_date",
+        ),
+        Index(
+            "idx_deferred_collection_stage_pending",
+            "created_at",
+            "stage_id",
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+    )
+
+    stage_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    command_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("operation_command.command_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    api_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    batch_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="PENDING", server_default="PENDING"
+    )
+    batch_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("collection_batch.batch_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    planned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
 
 
 class ScheduledJobControl(Base):
