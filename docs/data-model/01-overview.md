@@ -1,6 +1,6 @@
 # 数据范围与全局约定
 
-最终设计包含 **25 张业务数据表**和 **6 张系统运行表**。业务表服务研究、筛选和策略消费；系统运行表服务采集、重试、依赖、原始数据追溯和原子发布，两者用途不同。
+最终设计包含 **25 张业务数据表**、**6 张控制面运行表**和 **2 张运维支撑表**。业务表服务研究、筛选和策略消费；控制面表服务采集、重试、依赖、原始数据追溯和原子发布；运维支撑表保存物理接口请求观测与幂等人工命令。
 
 | 分类 | 最终表 | 主要用途 |
 |-|-|-|
@@ -10,6 +10,7 @@
 | 指数 | market_index、market_index_daily、index_daily_basic、market_index_weight | 指数主数据、行情、估值和月度成分权重 |
 | ETF | etf、etf_daily、etf_share_size_daily | ETF主数据、日线、复权、份额和规模 |
 | 系统运行 | collection_batch、collection_task、raw_data_asset、processing_task、processing_dependency、dataset_release | 保证多接口合并数据完整、可重试、可追溯 |
+| 运维支撑 | provider_request_log、operation_command | 统计实际供应方请求，并保证人工命令幂等和可追溯 |
 
 本期不包含实时、分钟、周线、月线和财务报表接口。周/月线可由日线派生；股票名称历史等低频能力暂不进入最终核心表。供应方数据覆盖边界见顶层[Tushare 采集设计](../03-tushare-collection.md)。
 
@@ -41,7 +42,7 @@
 | stock_moneyflow_daily | 按trade_date月分区 | 与股票日线同量级，历史补采和重放按交易日执行。 |
 | market_theme_member_daily | 按trade_date月分区 | 保存每日题材成员快照，预计是增长最快的数据集。 |
 | 其余21张业务表 | 普通表 | 主数据、当前快照或日增量较小；依靠主键和针对性索引即可。 |
-| 6张系统运行表 | 普通表 | 通过运行记录归档控制规模；当前不承担大范围行情扫描。 |
+| 6张控制面表和2张运维支撑表 | 普通表 | 通过运行记录归档控制规模；当前不承担大范围行情扫描。 |
 
 ```sql
 CREATE TABLE stock_daily (
@@ -210,6 +211,15 @@ CREATE INDEX idx_release_process
 CREATE INDEX idx_release_business_date
     ON dataset_release (dataset_name, business_date)
     WHERE business_date IS NOT NULL;
+
+CREATE INDEX idx_provider_request_endpoint_time
+    ON provider_request_log (provider, endpoint, requested_at);
+
+CREATE UNIQUE INDEX uq_operation_command_idempotency
+    ON operation_command (idempotency_key);
+
+CREATE INDEX idx_operation_command_target
+    ON operation_command (target_type, target_id, created_at);
 ```
 
 运行表部分索引只覆盖少量活动状态，减少索引体积和状态更新开销。processing_task约定priority数值越小优先级越高，队列SQL固定使用ORDER BY priority, queued_at, process_id。所有部分索引的查询条件必须与调度SQL保持一致，否则PostgreSQL无法使用对应索引。

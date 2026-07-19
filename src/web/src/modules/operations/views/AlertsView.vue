@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { useApiResource } from '@/composables/useApiResource'
@@ -6,7 +8,16 @@ import { getAlerts } from '@/modules/operations/api'
 import type { AlertLevel } from '@/modules/operations/contracts'
 import { formatDateTime } from '@/modules/operations/presentation'
 
-const { data, loading, error, load } = useApiResource(getAlerts)
+const page = ref(1)
+const source = ref<'' | 'acquisition' | 'processing' | 'storage'>('')
+const { data, loading, error, load } = useApiResource(() =>
+  getAlerts({ source: source.value || undefined, page: page.value, pageSize: 20 }),
+)
+
+function search() {
+  page.value = 1
+  void load()
+}
 const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' | 'info' }> = {
   critical: { label: '严重', type: 'danger' },
   warning: { label: '警告', type: 'warning' },
@@ -19,16 +30,28 @@ const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' |
     <PageHeader title="告警中心" description="集中查看任务、依赖、接口和系统异常。">
       <template #actions><el-button :loading="loading" @click="load">刷新</el-button></template>
     </PageHeader>
+    <el-card shadow="never" class="filter-card">
+      <el-form :inline="true" @submit.prevent="search">
+        <el-form-item label="来源">
+          <el-select v-model="source" clearable placeholder="全部" style="width: 160px">
+            <el-option label="采集" value="acquisition" />
+            <el-option label="加工" value="processing" />
+            <el-option label="存储" value="storage" />
+          </el-select>
+        </el-form-item>
+        <el-form-item><el-button type="primary" native-type="submit">查询</el-button></el-form-item>
+      </el-form>
+    </el-card>
     <el-card shadow="never" class="panel-card panel-card--table">
       <DataState
         :loading="loading"
         :error="error"
-        :empty="data?.length === 0"
+        :empty="data?.items.length === 0"
         empty-title="当前没有告警"
         empty-description="新的异常会按发生时间显示。"
         @retry="load"
       >
-        <el-table :data="data ?? []">
+        <el-table :data="data?.items ?? []">
           <el-table-column label="级别" width="90">
             <template #default="{ row }">
               <el-tag :type="levelMap[row.level as AlertLevel].type">
@@ -50,6 +73,16 @@ const levelMap: Record<AlertLevel, { label: string; type: 'danger' | 'warning' |
             </template>
           </el-table-column>
         </el-table>
+        <div class="pagination-row">
+          <el-pagination
+            v-model:current-page="page"
+            background
+            layout="total, prev, pager, next"
+            :total="data?.total ?? 0"
+            :page-size="20"
+            @current-change="load"
+          />
+        </div>
       </DataState>
     </el-card>
   </section>

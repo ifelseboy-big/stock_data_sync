@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     app_name: str = "Stock Data Sync"
+    app_version: str = "dev"
     app_debug: bool = False
     app_api_prefix: str = "/api/v1"
     app_cors_origins: list[AnyHttpUrl] = [AnyHttpUrl("http://localhost:5173")]
@@ -28,7 +29,12 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://stock_sync:stock_sync@localhost:5432/stock_data_sync"
     raw_data_dir: Path = ROOT_DIR / "data" / "raw"
+    raw_storage_warning_used_percent: float = Field(default=85, ge=1, le=99)
+    raw_storage_protect_used_percent: float = Field(default=92, ge=1, le=99)
+    raw_storage_warning_free_bytes: int = Field(default=20 * 1024**3, ge=0)
+    raw_storage_protect_free_bytes: int = Field(default=10 * 1024**3, ge=0)
     web_dist_dir: Path | None = None
+    admin_api_token: SecretStr = SecretStr("")
 
     tushare_token: SecretStr = SecretStr("")
     tushare_request_limit_per_minute: int = Field(default=500, ge=1)
@@ -40,13 +46,22 @@ class Settings(BaseSettings):
     scheduler_timezone: str = "Asia/Shanghai"
     scheduler_jobstore_table: str = "apscheduler_jobs"
     scheduler_advisory_lock_id: int = 731_500_001
+    processing_advisory_lock_id: int = 731_500_002
     scheduler_max_workers: int = Field(default=4, ge=1, le=32)
     scheduler_poll_seconds: int = Field(default=30, ge=5, le=300)
+    partition_months_ahead: int = Field(default=3, ge=0, le=24)
+    collection_max_workers: int = Field(default=4, ge=1, le=16)
+    collection_running_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
+    processing_running_timeout_seconds: int = Field(default=21600, ge=300, le=172800)
 
     @model_validator(mode="after")
     def validate_tushare_request_budget(self) -> "Settings":
         if self.tushare_request_budget_per_minute > self.tushare_request_limit_per_minute:
             raise ValueError("Tushare request budget cannot exceed the provider limit")
+        if self.raw_storage_warning_used_percent >= self.raw_storage_protect_used_percent:
+            raise ValueError("raw storage warning percent must be less than protect percent")
+        if self.raw_storage_warning_free_bytes <= self.raw_storage_protect_free_bytes:
+            raise ValueError("raw storage warning free bytes must exceed protect free bytes")
         return self
 
 

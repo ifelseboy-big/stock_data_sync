@@ -4,10 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.modules.system.schemas import HealthResponse
-from app.modules.system.service import is_database_ready
+from app.modules.system.schemas import HealthResponse, SystemResources
+from app.modules.system.service import get_system_resources, is_database_ready
 
 router = APIRouter()
+resources_router = APIRouter()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
@@ -24,3 +25,8 @@ async def readiness(db: DbSession) -> HealthResponse:
             detail="PostgreSQL is unavailable",
         )
     return HealthResponse(status="ok", database="postgresql")
+
+
+@resources_router.get("/resources", response_model=SystemResources)
+async def resources(db: DbSession) -> SystemResources:
+    return await get_system_resources(db)

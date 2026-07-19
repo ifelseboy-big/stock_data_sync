@@ -21,6 +21,7 @@ class ObservabilityMiddleware:
 
         started_at = perf_counter()
         request_id = str(uuid4())
+        scope.setdefault("state", {})["request_id"] = request_id
         method = str(scope.get("method", "UNKNOWN"))
         status_code = 500
         structlog.contextvars.bind_contextvars(request_id=request_id)

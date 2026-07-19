@@ -8,6 +8,7 @@ HTTP_PORT=""
 HTTP_BIND="0.0.0.0"
 POSTGRES_PORT="5432"
 SERVICE_USER="${SUDO_USER:-}"
+BACKUP_DIR=""
 START_AFTER_INSTALL=1
 PASSWORD_FILE=""
 
@@ -33,6 +34,7 @@ usage() {
   --http-bind ADDRESS   监听地址，默认 0.0.0.0
   --postgres-port PORT  PostgreSQL 本机端口，默认 5432
   --service-user USER   运行服务的 macOS 用户，默认使用 sudo 发起用户
+  --backup-dir PATH     安装目录外备份目标；配置后每日 03:00 自动备份
   --no-start            完成安装但不启动服务
   -h, --help            显示帮助
 
@@ -113,6 +115,43 @@ write_launchd_plist() {
 EOF
 }
 
+write_backup_launchd_plist() {
+  local label="com.stockdatasync.backup"
+  local plist="$INSTALL_DIR/config/launchd/$label.plist"
+
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$INSTALL_DIR/bin/run-service</string>
+    <string>backup</string>
+    <string>$BACKUP_DIR</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$INSTALL_DIR</string>
+  <key>UserName</key>
+  <string>$SERVICE_USER</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$INSTALL_DIR/logs/backup/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$INSTALL_DIR/logs/backup/launchd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
 while (( $# > 0 )); do
   case "$1" in
     --install-dir)
@@ -138,6 +177,11 @@ while (( $# > 0 )); do
     --service-user)
       (( $# >= 2 )) || fail "--service-user 缺少用户名"
       SERVICE_USER="$2"
+      shift 2
+      ;;
+    --backup-dir)
+      (( $# >= 2 )) || fail "--backup-dir 缺少路径"
+      BACKUP_DIR="$2"
       shift 2
       ;;
     --no-start)
@@ -173,6 +217,13 @@ fi
 validate_port "Web/API 端口" "$HTTP_PORT"
 validate_port "PostgreSQL 端口" "$POSTGRES_PORT"
 [[ "$HTTP_BIND" =~ ^[A-Za-z0-9.:_-]+$ ]] || fail "监听地址格式不正确"
+if [[ -n "$BACKUP_DIR" ]]; then
+  [[ "$BACKUP_DIR" == /* ]] || fail "备份目录必须是绝对路径"
+  [[ "$BACKUP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || \
+    fail "备份目录只能包含字母、数字、点、下划线、短横线和斜杠"
+  [[ "$BACKUP_DIR" != "$INSTALL_DIR" && "$BACKUP_DIR" != "$INSTALL_DIR/"* ]] || \
+    fail "备份目录不能位于安装目录内部"
+fi
 
 [[ -n "$SERVICE_USER" ]] || fail "无法确定服务用户，请传入 --service-user"
 [[ "$SERVICE_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "服务用户名格式不正确"
@@ -205,7 +256,9 @@ POSTGRES_BIN_DIR="$POSTGRES_PREFIX/bin"
 [[ -d "$PROJECT_ROOT/src/server" ]] || fail "发布包缺少 src/server"
 [[ -f "$PROJECT_ROOT/src/web/dist/index.html" ]] || fail "发布包缺少 Web 构建产物 src/web/dist"
 
-for label in com.stockdatasync.postgres com.stockdatasync.server com.stockdatasync.scheduler; do
+service_labels=(com.stockdatasync.postgres com.stockdatasync.server com.stockdatasync.scheduler)
+[[ -n "$BACKUP_DIR" ]] && service_labels+=(com.stockdatasync.backup)
+for label in "${service_labels[@]}"; do
   launchctl print "system/$label" >/dev/null 2>&1 && fail "服务已经注册：$label"
   [[ ! -e "/Library/LaunchDaemons/$label.plist" ]] || fail "launchd 配置已经存在：$label"
 done
@@ -239,9 +292,13 @@ install -d -m 0755 \
   "$INSTALL_DIR/config/launchd" \
   "$INSTALL_DIR/data/postgres" \
   "$INSTALL_DIR/data/raw" \
+  "$INSTALL_DIR/logs/backup" \
   "$INSTALL_DIR/logs/postgres" \
   "$INSTALL_DIR/logs/scheduler" \
   "$INSTALL_DIR/logs/server"
+if [[ -n "$BACKUP_DIR" ]]; then
+  install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$BACKUP_DIR"
+fi
 
 tar -C "$PROJECT_ROOT/src/server" \
   --exclude='.venv' \
@@ -278,7 +335,12 @@ umask 077
   write_env_value POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
   write_env_value DATABASE_URL "postgresql+psycopg://stock_sync:$POSTGRES_PASSWORD@127.0.0.1:$POSTGRES_PORT/stock_data_sync"
   write_env_value RAW_DATA_DIR "$INSTALL_DIR/data/raw"
+  write_env_value RAW_STORAGE_WARNING_USED_PERCENT 85
+  write_env_value RAW_STORAGE_PROTECT_USED_PERCENT 92
+  write_env_value RAW_STORAGE_WARNING_FREE_BYTES 21474836480
+  write_env_value RAW_STORAGE_PROTECT_FREE_BYTES 10737418240
   write_env_value WEB_DIST_DIR "$INSTALL_DIR/app/web"
+  write_env_value BACKUP_TARGET_DIR "$BACKUP_DIR"
   write_env_value TUSHARE_TOKEN "$TUSHARE_VALUE"
   write_env_value ADMIN_API_TOKEN "$ADMIN_API_TOKEN"
   write_env_value TUSHARE_REQUEST_LIMIT_PER_MINUTE 500
@@ -289,8 +351,13 @@ umask 077
   write_env_value SCHEDULER_TIMEZONE Asia/Shanghai
   write_env_value SCHEDULER_JOBSTORE_TABLE apscheduler_jobs
   write_env_value SCHEDULER_ADVISORY_LOCK_ID 731500001
+  write_env_value PROCESSING_ADVISORY_LOCK_ID 731500002
   write_env_value SCHEDULER_MAX_WORKERS 4
   write_env_value SCHEDULER_POLL_SECONDS 30
+  write_env_value PARTITION_MONTHS_AHEAD 3
+  write_env_value COLLECTION_MAX_WORKERS 4
+  write_env_value COLLECTION_RUNNING_TIMEOUT_SECONDS 1800
+  write_env_value PROCESSING_RUNNING_TIMEOUT_SECONDS 21600
 } > "$INSTALL_DIR/config/app.env"
 
 chown root:wheel "$INSTALL_DIR"
@@ -325,11 +392,14 @@ PASSWORD_FILE=""
 write_launchd_plist postgres
 write_launchd_plist server
 write_launchd_plist scheduler
+[[ -n "$BACKUP_DIR" ]] && write_backup_launchd_plist
 chown -R root:wheel "$INSTALL_DIR/config/launchd"
 chmod 0644 "$INSTALL_DIR/config/launchd"/*.plist
 plutil -lint "$INSTALL_DIR/config/launchd"/*.plist >/dev/null
 
-for service in postgres server scheduler; do
+install_services=(postgres server scheduler)
+[[ -n "$BACKUP_DIR" ]] && install_services+=(backup)
+for service in "${install_services[@]}"; do
   install -o root -g wheel -m 0644 \
     "$INSTALL_DIR/config/launchd/com.stockdatasync.$service.plist" \
     "/Library/LaunchDaemons/com.stockdatasync.$service.plist"

@@ -4,6 +4,7 @@ import {
   Collection,
   Connection,
   DataAnalysis,
+  DataBoard,
   Document,
   Fold,
   Link,
@@ -60,6 +61,10 @@ watch(isMobile, (mobile) => appStore.setSidebarCollapsed(mobile), { immediate: t
             <el-menu-item index="/dependencies">
               <el-icon><Link /></el-icon>
               <template #title>依赖观测</template>
+            </el-menu-item>
+            <el-menu-item index="/releases">
+              <el-icon><DataBoard /></el-icon>
+              <template #title>数据发布</template>
             </el-menu-item>
           </el-sub-menu>
           <el-sub-menu index="observability">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -8,9 +8,14 @@ import { useApiResource } from '@/composables/useApiResource'
 import { getProcessingQueue } from '@/modules/operations/api'
 import { formatDateTime, formatDuration, formatPriority } from '@/modules/operations/presentation'
 
-const { data, loading, error, load } = useApiResource(getProcessingQueue)
-const currentTask = computed(() => data.value?.find((item) => item.status === 'running'))
-const waitingTasks = computed(() => data.value?.filter((item) => item.status !== 'running') ?? [])
+const page = ref(1)
+const { data, loading, error, load } = useApiResource(() =>
+  getProcessingQueue({ page: page.value, pageSize: 50 }),
+)
+const currentTask = computed(() => data.value?.items.find((item) => item.status === 'running'))
+const waitingTasks = computed(
+  () => data.value?.items.filter((item) => item.status !== 'running') ?? [],
+)
 </script>
 
 <template>
@@ -75,6 +80,16 @@ const waitingTasks = computed(() => data.value?.filter((item) => item.status !==
             show-overflow-tooltip
           />
         </el-table>
+        <div class="pagination-row">
+          <el-pagination
+            v-model:current-page="page"
+            background
+            layout="total, prev, pager, next"
+            :total="data?.total ?? 0"
+            :page-size="50"
+            @current-change="load"
+          />
+        </div>
       </DataState>
     </el-card>
   </section>

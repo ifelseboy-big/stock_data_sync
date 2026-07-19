@@ -34,6 +34,7 @@ label_for() {
     postgres) printf 'com.stockdatasync.postgres\n' ;;
     server|web) printf 'com.stockdatasync.server\n' ;;
     scheduler) printf 'com.stockdatasync.scheduler\n' ;;
+    backup) printf 'com.stockdatasync.backup\n' ;;
     *) fail "不支持的服务：$1" ;;
   esac
 }
@@ -109,6 +110,7 @@ start_all() {
   run_migrations
   bootstrap_service server
   bootstrap_service scheduler
+  [[ -f "$(plist_for backup)" ]] && bootstrap_service backup
 }
 
 start_selected() {
@@ -135,7 +137,11 @@ print_service_status() {
   label="$(label_for "$service")"
   if is_loaded "$service"; then
     pid="$(launchctl print "system/$label" | awk '/pid =/ {print $3; exit}')"
-    printf '%-10s 运行中%s\n' "$service" "${pid:+ (PID $pid)}"
+    if [[ "$service" == "backup" && -z "$pid" ]]; then
+      printf '%-10s 已加载（每日定时）\n' "$service"
+    else
+      printf '%-10s 运行中%s\n' "$service" "${pid:+ (PID $pid)}"
+    fi
   else
     printf '%-10s 已停止\n' "$service"
   fi
@@ -147,6 +153,7 @@ show_logs() {
     postgres) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/postgres/*.log ;;
     server|web) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/server/*.log ;;
     scheduler) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/scheduler/*.log ;;
+    backup) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/backup/*.log ;;
     *) fail "不支持的服务：$service" ;;
   esac
 }
@@ -159,13 +166,18 @@ usage() {
   start [service...]    启动全部服务或指定服务
   stop [service...]     停止全部服务或指定服务
   restart [service...]  重启全部服务或指定服务
-  status                查看 PostgreSQL、API/Web 和 Scheduler 状态
+  status                查看 PostgreSQL、API/Web、Scheduler 和备份状态
   logs [service]        持续查看指定服务日志
   migrate               执行数据库迁移
   doctor                检查安装目录和运行依赖
   config                显示非敏感部署配置
+  backup TARGET_DIR [--full]
+                        备份数据库和 Parquet；目标必须在安装目录外
+  verify-backup DIR     校验备份清单、数据库和全部原始资产 SHA-256
+  restore DIR --confirm-database-replace
+                        替换数据库和原始资产；API 与 Scheduler 必须已停止
 
-服务名：postgres、server、scheduler；web 是 server 的别名。
+服务名：postgres、server、scheduler、backup；web 是 server 的别名。
 EOF
 }
 
@@ -192,6 +204,7 @@ case "$command_name" in
     ;;
   stop)
     if (( $# == 0 )); then
+      stop_service backup
       stop_service scheduler
       stop_service server
       stop_service postgres
@@ -203,6 +216,7 @@ case "$command_name" in
     ;;
   restart)
     if (( $# == 0 )); then
+      stop_service backup
       stop_service scheduler
       stop_service server
       stop_service postgres
@@ -219,6 +233,7 @@ case "$command_name" in
     print_service_status postgres
     print_service_status server
     print_service_status scheduler
+    [[ -f "$(plist_for backup)" ]] && print_service_status backup
     ;;
   logs)
     show_logs "${1:-server}"
@@ -230,11 +245,36 @@ case "$command_name" in
     run_migrations
     ;;
   doctor)
+    config_mode="$(stat -f '%Lp' "$ENV_FILE")"
+    config_owner="$(stat -f '%Su' "$ENV_FILE")"
+    [[ "$config_mode" == "600" ]] || fail "配置文件权限必须为 0600，当前为 $config_mode"
+    [[ "$config_owner" == "root" ]] || fail "配置文件必须由 root 持有"
+    [[ -n "$ADMIN_API_TOKEN" ]] || fail "ADMIN_API_TOKEN 未配置"
+    [[ -n "$TUSHARE_TOKEN" ]] || fail "TUSHARE_TOKEN 未配置"
+    (( TUSHARE_REQUEST_BUDGET_PER_MINUTE <= TUSHARE_REQUEST_LIMIT_PER_MINUTE )) || \
+      fail "Tushare 请求预算超过供应方限制"
     [[ -d "$INSTALL_DIR/app/server/.venv" ]] || fail "服务端虚拟环境不存在"
     [[ -f "$INSTALL_DIR/app/web/index.html" ]] || fail "Web 构建产物不存在"
     [[ -x "$POSTGRES_BIN_DIR/postgres" ]] || fail "PostgreSQL 可执行文件不存在"
-    [[ -d "$RAW_DATA_DIR" && -w "$RAW_DATA_DIR" ]] || fail "原始数据目录不可写"
-    plutil -lint "$(plist_for postgres)" "$(plist_for server)" "$(plist_for scheduler)"
+    /usr/bin/sudo -u "$SERVICE_USER" test -r "$ENV_FILE" || fail "服务用户无法读取配置文件"
+    /usr/bin/sudo -u "$SERVICE_USER" test -w "$RAW_DATA_DIR" || fail "服务用户无法写入原始数据目录"
+    "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null || \
+      fail "PostgreSQL 不可用"
+    (
+      cd "$INSTALL_DIR/app/server"
+      .venv/bin/python -c 'from app.core.config import Settings; Settings()'
+      .venv/bin/alembic current >/dev/null
+    )
+    doctor_plists=("$(plist_for postgres)" "$(plist_for server)" "$(plist_for scheduler)")
+    if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
+      [[ -d "$BACKUP_TARGET_DIR" ]] || fail "备份目标目录不存在"
+      /usr/bin/sudo -u "$SERVICE_USER" test -w "$BACKUP_TARGET_DIR" || \
+        fail "服务用户无法写入备份目标"
+      doctor_plists+=("$(plist_for backup)")
+    else
+      printf '警告：未配置每日外部备份，请使用 --backup-dir 安装或执行手工备份。\n' >&2
+    fi
+    plutil -lint "${doctor_plists[@]}"
     printf '安装检查通过\n'
     ;;
   config)
@@ -243,6 +283,30 @@ case "$command_name" in
     printf '访问地址：http://%s:%s\n' "$HTTP_BIND" "$HTTP_PORT"
     printf 'PostgreSQL：127.0.0.1:%s/%s\n' "$POSTGRES_PORT" "$POSTGRES_DB"
     printf '原始数据：%s\n' "$RAW_DATA_DIR"
+    printf '外部备份：%s\n' "${BACKUP_TARGET_DIR:-未配置}"
+    ;;
+  backup)
+    [[ $# == 1 || ( $# == 2 && "$2" == "--full" ) ]] || \
+      fail "用法：stock-data-sync backup TARGET_DIR [--full]"
+    "$BIN_DIR/run-service" backup "$1" "${2:-}"
+    ;;
+  verify-backup)
+    [[ $# == 1 ]] || fail "用法：stock-data-sync verify-backup BACKUP_DIR"
+    "$BIN_DIR/run-service" verify-backup "$1"
+    ;;
+  restore)
+    [[ $# == 2 && "$2" == "--confirm-database-replace" ]] || \
+      fail "用法：stock-data-sync restore BACKUP_DIR --confirm-database-replace"
+    ! is_loaded server || fail "恢复前必须停止 server"
+    ! is_loaded scheduler || fail "恢复前必须停止 scheduler"
+    bootstrap_service postgres
+    wait_for_postgres
+    ensure_database
+    "$BIN_DIR/run-service" restore "$1"
+    service_group="$(id -gn "$SERVICE_USER")"
+    chown -R "$SERVICE_USER:$service_group" "$RAW_DATA_DIR"
+    run_migrations
+    printf '恢复完成。旧原始数据目录已保留；验证成功后再由管理员清理。\n'
     ;;
   help|-h|--help)
     usage

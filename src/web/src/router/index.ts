@@ -32,6 +32,12 @@ const router = createRouter({
           meta: { title: '依赖观测' },
         },
         {
+          path: 'releases',
+          name: 'releases',
+          component: () => import('@/modules/operations/views/ReleasesView.vue'),
+          meta: { title: '数据发布' },
+        },
+        {
           path: 'providers',
           name: 'providers',
           component: () => import('@/modules/providers/views/ProviderMonitoringView.vue'),

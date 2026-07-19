@@ -1,0 +1,1 @@
+"""PostgreSQL monthly partition management."""

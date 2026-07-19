@@ -1,24 +1,29 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getDependencies } from '@/modules/operations/api'
+import type { ExecutionStatus } from '@/modules/operations/contracts'
 
 const keyword = ref('')
-const { data, loading, error, load } = useApiResource(getDependencies)
+const status = ref<ExecutionStatus | ''>('')
+const page = ref(1)
+const { data, loading, error, load } = useApiResource(() =>
+  getDependencies({
+    query: keyword.value.trim() || undefined,
+    status: status.value || undefined,
+    page: page.value,
+    pageSize: 20,
+  }),
+)
 
-const filteredItems = computed(() => {
-  const value = keyword.value.trim().toLowerCase()
-  if (!value) return data.value ?? []
-  return (data.value ?? []).filter((item) =>
-    [item.processingTaskName, item.batchCode, item.sourceEndpoint].some((field) =>
-      field.toLowerCase().includes(value),
-    ),
-  )
-})
+function search() {
+  page.value = 1
+  void load()
+}
 </script>
 
 <template>
@@ -28,25 +33,37 @@ const filteredItems = computed(() => {
     </PageHeader>
 
     <el-card shadow="never" class="filter-card">
-      <el-input
-        v-model="keyword"
-        clearable
-        placeholder="搜索加工任务、批次或来源接口"
-        aria-label="搜索依赖"
-        style="max-width: 380px"
-      />
+      <el-form :inline="true" @submit.prevent="search">
+        <el-form-item label="关键词">
+          <el-input
+            v-model="keyword"
+            clearable
+            placeholder="加工任务、批次或接口"
+            aria-label="搜索依赖"
+            style="width: 300px"
+          />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="status" clearable placeholder="全部" style="width: 140px">
+            <el-option label="等待依赖" value="pending" />
+            <el-option label="已就绪" value="succeeded" />
+            <el-option label="阻塞" value="blocked" />
+          </el-select>
+        </el-form-item>
+        <el-form-item><el-button type="primary" native-type="submit">查询</el-button></el-form-item>
+      </el-form>
     </el-card>
 
     <el-card shadow="never" class="panel-card panel-card--table">
       <DataState
         :loading="loading"
         :error="error"
-        :empty="filteredItems.length === 0"
+        :empty="data?.items.length === 0"
         empty-title="暂无依赖记录"
         empty-description="加工计划生成后会建立必要依赖检查记录。"
         @retry="load"
       >
-        <el-table :data="filteredItems" row-key="id">
+        <el-table :data="data?.items ?? []" row-key="id">
           <el-table-column
             prop="processingTaskName"
             label="加工任务"
@@ -73,6 +90,16 @@ const filteredItems = computed(() => {
           </el-table-column>
           <el-table-column prop="reason" label="未就绪原因" min-width="220" show-overflow-tooltip />
         </el-table>
+        <div class="pagination-row">
+          <el-pagination
+            v-model:current-page="page"
+            background
+            layout="total, prev, pager, next"
+            :total="data?.total ?? 0"
+            :page-size="20"
+            @current-change="load"
+          />
+        </div>
       </DataState>
     </el-card>
   </section>

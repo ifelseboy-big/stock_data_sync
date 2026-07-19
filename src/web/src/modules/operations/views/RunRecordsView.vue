@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { computed, ref } from 'vue'
 
+import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
-import { getRunRecords } from '@/modules/operations/api'
-import type { ExecutionStatus } from '@/modules/operations/contracts'
+import { getRunRecords, runTaskCommand } from '@/modules/operations/api'
+import type { ExecutionStatus, RunRecordItem, TaskTransition } from '@/modules/operations/contracts'
 import { formatDateTime, formatDuration } from '@/modules/operations/presentation'
 
 const runType = ref<'' | 'acquisition' | 'processing'>('')
 const status = ref<ExecutionStatus | ''>('')
 const page = ref(1)
+const commandTarget = ref<{ row: RunRecordItem; transition: TaskTransition } | null>(null)
+const commandLoading = ref(false)
 const { data, loading, error, load } = useApiResource(() =>
   getRunRecords({
     runType: runType.value || undefined,
@@ -24,6 +28,55 @@ const { data, loading, error, load } = useApiResource(() =>
 function search() {
   page.value = 1
   void load()
+}
+
+const commandTitle = computed(() => {
+  const target = commandTarget.value
+  if (!target) return ''
+  const verb = { retry: '重试', skip: '跳过', cancel: '取消' }[target.transition]
+  return `${verb}${target.row.runType === 'acquisition' ? '采集' : '加工'}任务`
+})
+
+function canRetry(value: unknown) {
+  const row = value as RunRecordItem
+  return row.runType === 'acquisition'
+    ? row.status === 'failed'
+    : ['failed', 'blocked', 'waiting_retry'].includes(row.status)
+}
+
+function canStop(value: unknown) {
+  const row = value as RunRecordItem
+  return ['pending', 'waiting_retry', 'blocked'].includes(row.status)
+}
+
+function openCommand(value: unknown, transition: TaskTransition) {
+  commandTarget.value = { row: value as RunRecordItem, transition }
+}
+
+async function submitCommand(value: {
+  reason: string
+  adminToken: string
+  idempotencyKey: string
+}) {
+  const target = commandTarget.value
+  if (!target) return
+  commandLoading.value = true
+  try {
+    await runTaskCommand(
+      target.row.runType,
+      target.row.id,
+      target.transition,
+      { reason: value.reason },
+      value,
+    )
+    ElMessage.success('人工命令已进入任务队列')
+    commandTarget.value = null
+    await load()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '人工命令提交失败')
+  } finally {
+    commandLoading.value = false
+  }
 }
 </script>
 
@@ -86,6 +139,32 @@ function search() {
             min-width="220"
             show-overflow-tooltip
           />
+          <el-table-column label="人工操作" width="190" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="canRetry(row)"
+                size="small"
+                link
+                type="primary"
+                @click="openCommand(row, 'retry')"
+              >
+                重试
+              </el-button>
+              <el-button v-if="canStop(row)" size="small" link @click="openCommand(row, 'skip')">
+                跳过
+              </el-button>
+              <el-button
+                v-if="canStop(row)"
+                size="small"
+                link
+                type="danger"
+                @click="openCommand(row, 'cancel')"
+              >
+                取消
+              </el-button>
+              <span v-if="!canRetry(row) && !canStop(row)">--</span>
+            </template>
+          </el-table-column>
         </el-table>
         <div class="pagination-row">
           <el-pagination
@@ -99,5 +178,14 @@ function search() {
         </div>
       </DataState>
     </el-card>
+
+    <AdminCommandDialog
+      :model-value="commandTarget !== null"
+      :title="commandTitle"
+      :description="`目标任务：${commandTarget?.row.taskName ?? ''}。命令只修改任务队列，不会在浏览器请求 Tushare 或直接写业务表。`"
+      :loading="commandLoading"
+      @update:model-value="!$event && (commandTarget = null)"
+      @submit="submitCommand"
+    />
   </section>
 </template>

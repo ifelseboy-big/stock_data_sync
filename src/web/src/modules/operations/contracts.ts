@@ -16,6 +16,7 @@ export interface PageResult<T> {
   total: number
   page: number
   pageSize: number
+  generatedAt: string
 }
 
 export interface OverviewMetrics {
@@ -137,6 +138,91 @@ export interface RunRecordQuery {
 }
 
 export interface ProviderMonitoring {
+  generatedAt: string
   quota: QuotaSnapshot | null
   endpoints: ProviderEndpointMetric[]
+}
+
+export interface DatasetReleaseItem {
+  datasetName: string
+  scopeType: string
+  scopeKey: string
+  businessDate: string | null
+  versionId: string
+  processId: string
+  processorVersion: string
+  rowCount: number
+  publishedAt: string
+}
+
+export interface DatasetReleaseQuery {
+  datasetName?: string
+  page?: number
+  pageSize?: number
+}
+
+export interface AdminCommandOptions {
+  adminToken: string
+  idempotencyKey: string
+}
+
+export interface OperationCommandResult {
+  commandId: string
+  action: string
+  targetType: string
+  targetId: string | null
+  status: 'accepted'
+  result: Record<string, unknown>
+  createdAt: string
+  completedAt: string
+}
+
+export interface CreateBackfillCommand {
+  startDate: string
+  endDate: string
+  apiNames: string[]
+  reason: string
+}
+
+export interface CreateRepairCommand {
+  businessDate: string | null
+  apiNames: string[]
+  reason: string
+}
+
+export interface TaskCommand {
+  reason: string
+}
+
+export type TaskTransition = 'retry' | 'skip' | 'cancel'
+
+export interface AcquisitionApiOption {
+  apiName: string
+  scheduleGroup: string
+}
+
+export interface ManualCommandOptions {
+  generatedAt: string
+  acquisitionApis: AcquisitionApiOption[]
+  maxBackfillDays: number
+}
+
+export interface ProcessingQueueQuery {
+  status?: ExecutionStatus
+  datasetName?: string
+  page?: number
+  pageSize?: number
+}
+
+export interface DependencyQuery {
+  status?: ExecutionStatus
+  query?: string
+  page?: number
+  pageSize?: number
+}
+
+export interface AlertQuery {
+  source?: 'acquisition' | 'processing' | 'storage'
+  page?: number
+  pageSize?: number
 }

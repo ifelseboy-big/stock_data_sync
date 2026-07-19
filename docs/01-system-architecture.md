@@ -65,7 +65,10 @@ src/server/app/
 │   ├── processing/          # 依赖解析、串行队列、加工和发布
 │   ├── partitions/          # 月分区创建与覆盖检查
 │   ├── operations/          # 运维查询模型和人工操作
-│   ├── stocks/              # 正式业务数据查询
+│   ├── stocks/              # 股票基础、行情、技术指标和资金流
+│   ├── topics/              # 概念、热点、龙虎榜和涨跌停专题
+│   ├── indices/             # 指数基础、行情、估值和权重
+│   ├── etfs/                # ETF 基础、行情和规模
 │   └── system/              # 健康、版本和配置摘要
 ├── scheduler/
 │   ├── planners.py          # 阶段计划、批次计划和加工计划
@@ -77,7 +80,7 @@ src/server/app/
 └── cli/                     # 补采、回填、恢复和诊断
 ```
 
-当前代码中的 `tasking` 是脚手架过渡模块，正式实现时拆入 `acquisition` 和 `processing`，不继续发展为同时承担采集、加工和调度的大模块。
+采集与加工分别由 `acquisition` 和 `processing` 承担，不设置同时包含两类状态和执行逻辑的通用 `tasking` 模块。
 
 业务模块遵循 `api → service → repository → models` 单向依赖。`catalog` 只包含声明和纯规则；外部数据源必须经过 `integrations`；文件通过 `storage`；Tushare SDK 或 DataFrame 类型不能传入业务仓储层。页面、APScheduler job 函数也不能直接操作 Repository。
 

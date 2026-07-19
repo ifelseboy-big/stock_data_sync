@@ -28,3 +28,14 @@ NN-topic.md
 计划状态统一使用：`待确认`、`已确认`、`实现中`、`已完成`、`已暂停`。
 
 设计尚未确认时只能编写计划草稿，不能进入实现；完成后必须记录对应提交和验收结果。
+
+## 当前计划
+
+1. [总体实现路线](00-roadmap.md)
+2. [控制面运行模型](01-control-plane-schema.md)
+3. [业务数据表与分区](02-business-schema.md)
+4. [接口目录与原始资产](03-catalog-and-raw-assets.md)
+5. [采集运行链路](04-acquisition-runtime.md)
+6. [加工与发布链路](05-processing-runtime.md)
+7. [运维后台闭环](06-operations-console.md)
+8. [生产验收与恢复](07-production-readiness.md)

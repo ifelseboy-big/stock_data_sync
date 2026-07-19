@@ -1,3 +1,4 @@
+import re
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -17,6 +18,24 @@ if config.config_file_name is not None:
 import_all_models()
 target_metadata = Base.metadata
 
+PARTITION_TABLE_NAME = re.compile(
+    r"^(?:stock_daily|stock_technical_daily|stock_moneyflow_daily|"
+    r"market_theme_member_daily)_p\d{6}$"
+)
+
+
+def include_object(
+    object_: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    del object_, compare_to
+    return not (
+        type_ == "table" and reflected and name is not None and PARTITION_TABLE_NAME.fullmatch(name)
+    )
+
 
 def run_migrations_offline() -> None:
     context.configure(
@@ -25,13 +44,19 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: object) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        include_object=include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
