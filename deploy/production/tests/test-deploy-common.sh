@@ -97,6 +97,10 @@ grep -Fq '/bin/bash "$MANAGER" "${UPGRADE_ARGS[@]}"' \
   "$PROJECT_ROOT/deploy/production/install.sh"
 grep -Fq '确认忽略时使用 --ignore-doctor' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'health_host="$HTTP_BIND"' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'http://$health_host:$HTTP_PORT$APP_API_PREFIX/health/live' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 if grep -Eq 'local release=.*bootstrap=.*\$release' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"; then
   printf 'upgrade bootstrap path expands release before local assignment completes\n' >&2

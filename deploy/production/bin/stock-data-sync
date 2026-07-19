@@ -330,7 +330,7 @@ doctor_check_release() {
 
 run_doctor() {
   local phase="runtime" target="$PROGRAM_DIR/current" require_running=1
-  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services
+  local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services health_host
   local shared_buffers_status shared_buffers_actual shared_buffers_bytes
   while (( $# > 0 )); do
     case "$1" in
@@ -465,7 +465,9 @@ run_doctor() {
     if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
       is_loaded backup && doctor_pass "Backup 定时服务已加载" || doctor_fail_check "Backup 定时服务未加载"
     fi
-    if curl -fsS --max-time 5 "http://127.0.0.1:$HTTP_PORT$APP_API_PREFIX/health/live" >/dev/null; then
+    health_host="$HTTP_BIND"
+    [[ "$health_host" == "0.0.0.0" ]] && health_host="127.0.0.1"
+    if curl -fsS --max-time 5 "http://$health_host:$HTTP_PORT$APP_API_PREFIX/health/live" >/dev/null; then
       doctor_pass "API 健康检查通过"
     else
       doctor_fail_check "API 健康检查失败"
