@@ -12,8 +12,6 @@ deploy_find_executable() {
   local service_home="${2:-}"
   local candidate
   for candidate in \
-    "/opt/homebrew/opt/node@22/bin/$name" \
-    "/usr/local/opt/node@22/bin/$name" \
     "$(command -v "$name" 2>/dev/null || true)" \
     "$service_home/.local/bin/$name" \
     "/opt/homebrew/bin/$name" \
@@ -24,6 +22,30 @@ deploy_find_executable() {
     fi
   done
   return 1
+}
+
+deploy_find_node_runtime() {
+  local service_home="${1:-}"
+  local candidate major best="" best_major=-1
+  for candidate in \
+    "$(command -v node 2>/dev/null || true)" \
+    "/opt/homebrew/opt/node/bin/node" \
+    "/usr/local/opt/node/bin/node" \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node" \
+    /opt/homebrew/opt/node@*/bin/node \
+    /usr/local/opt/node@*/bin/node \
+    "$service_home"/.nvm/versions/node/*/bin/node; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    major="$("$candidate" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+    [[ "$major" =~ ^[0-9]+$ ]] || continue
+    if (( 10#$major > best_major )); then
+      best="$candidate"
+      best_major=$((10#$major))
+    fi
+  done
+  [[ -n "$best" ]] || return 1
+  printf '%s\n' "$best"
 }
 
 deploy_service_home() {
@@ -187,13 +209,13 @@ deploy_prepare_release() {
   fi
 
   uv_bin="$(deploy_find_executable uv "$service_home" || true)"
-  npm_bin="$(deploy_find_executable npm "$service_home" || true)"
-  node_bin="$(deploy_find_executable node "$service_home" || true)"
+  node_bin="$(deploy_find_node_runtime "$service_home" || true)"
+  npm_bin="${node_bin:+$(dirname "$node_bin")/npm}"
   if [[ -z "$uv_bin" ]]; then deploy_fail "未安装 uv"; return 1; fi
-  if [[ -z "$npm_bin" || -z "$node_bin" ]]; then deploy_fail "未安装 Node.js/npm"; return 1; fi
+  if [[ -z "$node_bin" || ! -x "$npm_bin" ]]; then deploy_fail "未安装 Node.js/npm"; return 1; fi
   node_major="$("$node_bin" -p 'process.versions.node.split(".")[0]')"
-  if [[ "$node_major" != "22" ]]; then
-    deploy_fail "必须使用 Node.js 22，当前为 $("$node_bin" --version)"
+  if (( 10#$node_major < 22 )); then
+    deploy_fail "必须使用 Node.js 22 或更高版本，当前为 $("$node_bin" --version)"
     return 1
   fi
   build_path="$(dirname "$node_bin"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"

@@ -22,6 +22,11 @@ if deploy_validate_bind_ip "test" "300.0.0.1" >/dev/null 2>&1; then
   printf 'invalid bind IP was accepted\n' >&2
   exit 1
 fi
+node_runtime="$(deploy_find_node_runtime "${HOME:-}" || true)"
+[[ -n "$node_runtime" ]]
+node_runtime_major="$("$node_runtime" -p 'process.versions.node.split(".")[0]')"
+(( 10#$node_runtime_major >= 22 ))
+[[ -x "$(dirname "$node_runtime")/npm" ]]
 
 generated_installer() {
   sed \

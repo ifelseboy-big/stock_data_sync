@@ -51,7 +51,7 @@ doctor_fail() { printf 'FAIL  %s\n' "$*" >&2; DOCTOR_FAILURES=$((DOCTOR_FAILURES
 
 pre_install_doctor() {
   local service_home="$1"
-  local brew_bin postgres_prefix node_bin node_major disk_path available_kb
+  local brew_bin postgres_prefix node_bin npm_bin node_major disk_path available_kb
   DOCTOR_FAILURES=0
   printf '安装前检查：\n'
   [[ "$(uname -s)" == "Darwin" ]] && doctor_pass "操作系统为 macOS" || doctor_fail "仅支持 macOS"
@@ -69,14 +69,18 @@ pre_install_doctor() {
   [[ -n "$SERVICE_USER" ]] && id "$SERVICE_USER" >/dev/null 2>&1 && \
     doctor_pass "服务用户存在：$SERVICE_USER" || doctor_fail "服务用户不存在"
   [[ -n "$service_home" && -d "$service_home" ]] && doctor_pass "服务用户主目录可用" || doctor_fail "服务用户主目录不可用"
-  for command_name in git npm node uv openssl tar plutil launchctl curl; do
+  for command_name in git uv openssl tar plutil launchctl curl; do
     deploy_find_executable "$command_name" "$service_home" >/dev/null 2>&1 && \
       doctor_pass "依赖可用：$command_name" || doctor_fail "缺少依赖：$command_name"
   done
-  node_bin="$(deploy_find_executable node "$service_home" || true)"
-  if [[ -n "$node_bin" ]]; then
+  node_bin="$(deploy_find_node_runtime "$service_home" || true)"
+  npm_bin="${node_bin:+$(dirname "$node_bin")/npm}"
+  if [[ -n "$node_bin" && -x "$npm_bin" ]]; then
     node_major="$("$node_bin" -p 'process.versions.node.split(".")[0]')"
-    [[ "$node_major" == "22" ]] && doctor_pass "Node.js 22 版本正确" || doctor_fail "必须使用 Node.js 22"
+    (( 10#$node_major >= 22 )) && doctor_pass "Node.js 版本符合要求：$("$node_bin" --version)" || doctor_fail "必须使用 Node.js 22 或更高版本"
+    doctor_pass "npm 与所选 Node.js 来自同一安装"
+  else
+    doctor_fail "缺少可用的 Node.js/npm"
   fi
   brew_bin="$(deploy_find_executable brew "$service_home" || true)"
   if [[ -n "$brew_bin" ]]; then

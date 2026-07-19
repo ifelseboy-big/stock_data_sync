@@ -19,7 +19,7 @@
 - 管理员权限。
 - Homebrew。
 - Git。
-- Node.js 22 和 npm 10+。
+- Node.js 22 或更高版本，以及 npm 10+。安装器会选择机器上可用的最高 Node.js 版本。
 - uv。
 - PostgreSQL 18。
 - 能访问 GitHub、npm 和 Python 包源。
@@ -27,7 +27,7 @@
 安装依赖：
 
 ```bash
-brew install node@22 uv postgresql@18
+brew install node uv postgresql@18
 ```
 
 首次安装时应为项目选择一个未占用的 `--postgres-port`。项目使用独立 PostgreSQL 数据目录，不使用 Homebrew 默认数据目录；doctor 会拒绝使用已被其他 PostgreSQL 实例占用的端口。

@@ -339,13 +339,16 @@ run_doctor() {
       [[ "$(git --git-dir="$INSTALL_DIR/source/repository.git" remote get-url origin 2>/dev/null || true)" == "$SOURCE_REPOSITORY" ]] && \
         doctor_pass "源码镜像地址与配置一致" || doctor_fail_check "源码镜像地址与配置不一致"
     fi
-    for dependency in git npm node uv; do
+    for dependency in git uv; do
       deploy_find_executable "$dependency" "$service_home" >/dev/null 2>&1 && doctor_pass "升级依赖可用：$dependency" || doctor_fail_check "升级依赖缺失：$dependency"
     done
-    node_bin="$(deploy_find_executable node "$service_home" || true)"
+    node_bin="$(deploy_find_node_runtime "$service_home" || true)"
     if [[ -n "$node_bin" ]]; then
       node_major="$("$node_bin" -p 'process.versions.node.split(".")[0]')"
-      [[ "$node_major" == "22" ]] && doctor_pass "Node.js 22 版本正确" || doctor_fail_check "升级必须使用 Node.js 22"
+      (( 10#$node_major >= 22 )) && doctor_pass "Node.js 版本符合要求：$("$node_bin" --version)" || doctor_fail_check "升级必须使用 Node.js 22 或更高版本"
+      [[ -x "$(dirname "$node_bin")/npm" ]] && doctor_pass "npm 与所选 Node.js 可用" || doctor_fail_check "所选 Node.js 缺少 npm"
+    else
+      doctor_fail_check "升级缺少 Node.js 22 或更高版本"
     fi
     available_kb="$(df -Pk "$INSTALL_DIR" | awk 'NR == 2 {print $4}')"
     [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] && doctor_pass "升级磁盘至少有 5 GiB 可用空间" || doctor_fail_check "升级磁盘可用空间不足 5 GiB"
