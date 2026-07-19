@@ -6,7 +6,8 @@ DEFAULT_REPOSITORY="__STOCK_DATA_SYNC_REPOSITORY__"
 DEFAULT_VERSION="__STOCK_DATA_SYNC_VERSION__"
 UNSET_REPOSITORY="__STOCK_DATA_SYNC_"'REPOSITORY__'
 UNSET_VERSION="__STOCK_DATA_SYNC_"'VERSION__'
-INSTALL_DIR=""
+PROGRAM_DIR=""
+DATA_DIR=""
 HTTP_PORT=""
 HTTP_BIND=""
 POSTGRES_PORT=""
@@ -48,11 +49,12 @@ usage() {
   cat <<'EOF'
 用法：
   curl -fsSL RELEASE_INSTALLER_URL | sudo bash -s -- \
-    --install-dir PATH --http-bind IPv4 --http-port PORT \
+    --program-dir PATH --data-dir PATH --http-bind IPv4 --http-port PORT \
     --postgres-port PORT [选项]
 
 必填：
-  --install-dir PATH    首次安装目录；没有默认值，必须由用户明确指定
+  --program-dir PATH    主程序、源码和配置目录；必须位于启用 ownership 的磁盘
+  --data-dir PATH       PostgreSQL、行情数据和日志目录；允许外接盘关闭 ownership
   --http-bind IPv4      Web/API 监听 IPv4，例如 127.0.0.1 或 0.0.0.0
   --http-port PORT      Web/API 监听端口，范围 1-65535
   --postgres-port PORT  PostgreSQL 本机监听端口，范围 1-65535
@@ -73,9 +75,15 @@ EOF
 forwarded=()
 while (( $# > 0 )); do
   case "$1" in
-    --install-dir)
-      (( $# >= 2 )) || fail "--install-dir 缺少路径"
-      INSTALL_DIR="$2"
+    --program-dir)
+      (( $# >= 2 )) || fail "--program-dir 缺少路径"
+      PROGRAM_DIR="$2"
+      forwarded+=("$1" "$2")
+      shift 2
+      ;;
+    --data-dir)
+      (( $# >= 2 )) || fail "--data-dir 缺少路径"
+      DATA_DIR="$2"
       forwarded+=("$1" "$2")
       shift 2
       ;;
@@ -126,12 +134,19 @@ while (( $# > 0 )); do
   esac
 done
 
-[[ -n "$INSTALL_DIR" ]] || fail "首次安装必须传入 --install-dir"
+[[ -n "$PROGRAM_DIR" ]] || fail "首次安装必须传入 --program-dir"
+[[ -n "$DATA_DIR" ]] || fail "首次安装必须传入 --data-dir"
 [[ -n "$HTTP_BIND" ]] || fail "首次安装必须传入 --http-bind"
 [[ -n "$HTTP_PORT" ]] || fail "首次安装必须传入 --http-port"
 [[ -n "$POSTGRES_PORT" ]] || fail "首次安装必须传入 --postgres-port"
-[[ "$INSTALL_DIR" == /* && "$INSTALL_DIR" != "/" ]] || fail "安装目录必须是非根目录的绝对路径"
-[[ "$INSTALL_DIR" != *$'\n'* && "$INSTALL_DIR" != *$'\r'* ]] || fail "安装目录不能包含换行"
+[[ "$PROGRAM_DIR" == /* && "$PROGRAM_DIR" != "/" ]] || fail "主程序目录必须是非根目录的绝对路径"
+[[ "$DATA_DIR" == /* && "$DATA_DIR" != "/" ]] || fail "数据目录必须是非根目录的绝对路径"
+[[ "$PROGRAM_DIR" != *$'\n'* && "$PROGRAM_DIR" != *$'\r'* ]] || fail "主程序目录不能包含换行"
+[[ "$DATA_DIR" != *$'\n'* && "$DATA_DIR" != *$'\r'* ]] || fail "数据目录不能包含换行"
+[[ "$PROGRAM_DIR" != */ && "$PROGRAM_DIR" != *//* && "$PROGRAM_DIR" != */./* && "$PROGRAM_DIR" != */. && "$PROGRAM_DIR" != */../* && "$PROGRAM_DIR" != */.. ]] || fail "主程序目录必须使用规范绝对路径"
+[[ "$DATA_DIR" != */ && "$DATA_DIR" != *//* && "$DATA_DIR" != */./* && "$DATA_DIR" != */. && "$DATA_DIR" != */../* && "$DATA_DIR" != */.. ]] || fail "数据目录必须使用规范绝对路径"
+[[ "$PROGRAM_DIR" != "$DATA_DIR" && "$PROGRAM_DIR" != "$DATA_DIR/"* && "$DATA_DIR" != "$PROGRAM_DIR/"* ]] || \
+  fail "主程序目录与数据目录必须相互独立"
 validate_ipv4 "$HTTP_BIND"
 validate_port "Web/API 端口" "$HTTP_PORT"
 validate_port "PostgreSQL 端口" "$POSTGRES_PORT"

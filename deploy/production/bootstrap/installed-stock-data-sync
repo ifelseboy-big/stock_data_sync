@@ -2,12 +2,25 @@
 set -Eeuo pipefail
 
 BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
-TARGET="$INSTALL_DIR/current/deploy/production/bin/stock-data-sync"
+PROGRAM_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
+ENV_FILE="$PROGRAM_DIR/config/app.env"
+[[ -f "$ENV_FILE" && ! -L "$ENV_FILE" && "$(stat -f '%Su' "$ENV_FILE")" == "root" ]] || {
+  printf '错误：主程序配置不可信\n' >&2
+  exit 1
+}
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+TARGET="$PROGRAM_DIR/current/deploy/production/bin/stock-data-sync"
 [[ -x "$TARGET" ]] || {
   printf '错误：当前程序入口不存在：%s\n' "$TARGET" >&2
   exit 1
 }
-export STOCK_DATA_SYNC_INSTALL_DIR="$INSTALL_DIR"
+[[ -n "${DATA_DIR:-}" && "$DATA_DIR" == /* ]] || {
+  printf '错误：配置中的数据目录无效\n' >&2
+  exit 1
+}
+export STOCK_DATA_SYNC_PROGRAM_DIR="$PROGRAM_DIR"
+export STOCK_DATA_SYNC_DATA_DIR="$DATA_DIR"
 exec "$TARGET" "$@"
-

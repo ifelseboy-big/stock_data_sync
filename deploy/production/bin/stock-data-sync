@@ -3,14 +3,15 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_DIR="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
-INSTALL_DIR="${STOCK_DATA_SYNC_INSTALL_DIR:-}"
-[[ -n "$INSTALL_DIR" ]] || {
-  printf '错误：缺少 STOCK_DATA_SYNC_INSTALL_DIR\n' >&2
+PROGRAM_DIR="${STOCK_DATA_SYNC_PROGRAM_DIR:-}"
+DATA_DIR="${STOCK_DATA_SYNC_DATA_DIR:-}"
+[[ -n "$PROGRAM_DIR" && -n "$DATA_DIR" ]] || {
+  printf '错误：缺少主程序目录或数据目录上下文\n' >&2
   exit 1
 }
-ENV_FILE="$INSTALL_DIR/config/app.env"
+ENV_FILE="$PROGRAM_DIR/config/app.env"
 PLIST_DIR="/Library/LaunchDaemons"
-ROOT_RUN_SERVICE="$INSTALL_DIR/bin/run-service"
+SYSTEM_RUN_SERVICE="/usr/local/libexec/stock-data-sync/run-service"
 # shellcheck source=../lib/deploy-common.sh
 source "$SCRIPT_DIR/../lib/deploy-common.sh"
 
@@ -28,7 +29,7 @@ usage() {
   stop [service...]        停止全部服务或指定服务
   restart [service...]     重启全部服务或指定服务；不会自动修改数据库
   status                   查看服务状态和当前程序版本
-  version                  显示版本、commit 和安装目录
+  version                  显示版本、commit、主程序目录和数据目录
   upgrade [--version V]    从 Git 正式标签本地构建并原子更换程序
   rollback [--version V]   切换到已构建且数据库兼容的旧程序
   doctor [选项]            执行安装、升级和运行状态检查
@@ -58,29 +59,33 @@ require_root() {
 require_installation() {
   [[ "$(uname -s)" == "Darwin" ]] || fail "生产服务管理仅支持 macOS"
   [[ -f "$ENV_FILE" ]] || fail "缺少 $ENV_FILE"
-  [[ -x "$ROOT_RUN_SERVICE" ]] || fail "缺少 $ROOT_RUN_SERVICE"
-  [[ -L "$INSTALL_DIR/current" && -d "$INSTALL_DIR/current/server" ]] || fail "当前程序链接无效"
+  [[ -x "$SYSTEM_RUN_SERVICE" && "$(stat -f '%Su' "$SYSTEM_RUN_SERVICE")" == "root" ]] || fail "系统服务入口不可信：$SYSTEM_RUN_SERVICE"
+  [[ -L "$PROGRAM_DIR/current" && -d "$PROGRAM_DIR/current/server" ]] || fail "当前程序链接无效"
 }
 
 load_environment() {
-  local key expected_install_dir="$INSTALL_DIR"
+  local key expected_program_dir="$PROGRAM_DIR" expected_data_dir="$DATA_DIR"
   /bin/bash -n "$ENV_FILE" || fail "配置文件存在 Shell 语法错误"
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
   for key in \
-    INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_API_PREFIX HTTP_BIND HTTP_PORT \
+    PROGRAM_DIR DATA_DIR INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_API_PREFIX HTTP_BIND HTTP_PORT \
     POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL \
     RAW_DATA_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE \
     TUSHARE_REQUEST_BUDGET_PER_MINUTE; do
     [[ -n "${!key:-}" ]] || fail "配置文件缺少必填项：$key"
   done
-  [[ "$INSTALL_DIR" == "$expected_install_dir" ]] || fail "配置中的 INSTALL_DIR 与真实安装目录不一致"
-  export STOCK_DATA_SYNC_INSTALL_DIR="$expected_install_dir"
-  export INSTALL_DIR="$expected_install_dir"
-  export APP_VERSION="$(tr -d '[:space:]' < "$INSTALL_DIR/current/VERSION")"
-  export WEB_DIST_DIR="$INSTALL_DIR/current/web"
+  [[ "$PROGRAM_DIR" == "$expected_program_dir" ]] || fail "配置中的 PROGRAM_DIR 与真实主程序目录不一致"
+  [[ "$DATA_DIR" == "$expected_data_dir" && "$INSTALL_DIR" == "$expected_data_dir" ]] || fail "配置中的数据目录与真实数据目录不一致"
+  export STOCK_DATA_SYNC_PROGRAM_DIR="$expected_program_dir"
+  export STOCK_DATA_SYNC_DATA_DIR="$expected_data_dir"
+  export PROGRAM_DIR="$expected_program_dir"
+  export DATA_DIR="$expected_data_dir"
+  export INSTALL_DIR="$expected_data_dir"
+  export APP_VERSION="$(tr -d '[:space:]' < "$PROGRAM_DIR/current/VERSION")"
+  export WEB_DIST_DIR="$PROGRAM_DIR/current/web"
   export PGPASSWORD="$POSTGRES_PASSWORD"
 }
 
@@ -119,7 +124,7 @@ wait_for_postgres() {
     "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1 && return 0
     sleep 1
   done
-  fail "PostgreSQL 启动超时，请检查 $INSTALL_DIR/logs/postgres"
+  fail "PostgreSQL 启动超时，请检查 $DATA_DIR/logs/postgres"
 }
 
 ensure_database() {
@@ -133,7 +138,7 @@ ensure_database() {
 }
 
 require_database_compatibility() {
-  local target_release="${1:-$INSTALL_DIR/current}"
+  local target_release="${1:-$PROGRAM_DIR/current}"
   deploy_database_is_compatible "$target_release" || {
     printf '错误：数据库 revision 与目标程序不兼容。\n' >&2
     printf '普通启动和升级不会自动迁移或备份数据库，请使用明确的数据库升级流程。\n' >&2
@@ -155,26 +160,27 @@ start_selected() {
     return
   fi
   start_postgres
-  require_database_compatibility "$INSTALL_DIR/current"
+  require_database_compatibility "$PROGRAM_DIR/current"
   bootstrap_service "$service"
 }
 
 start_all() {
   start_postgres
-  require_database_compatibility "$INSTALL_DIR/current"
+  require_database_compatibility "$PROGRAM_DIR/current"
   bootstrap_service server
   bootstrap_service scheduler
   [[ -f "$(plist_for backup)" ]] && bootstrap_service backup
 }
 
 write_service_plist() {
-  local service="$1" label plist stdout_log stderr_log xml_run xml_install xml_user xml_stdout xml_stderr
+  local service="$1" label plist stdout_log stderr_log xml_run xml_program xml_data xml_user xml_stdout xml_stderr
   label="$(label_for "$service")"
-  plist="$INSTALL_DIR/config/launchd/$label.plist"
-  stdout_log="$INSTALL_DIR/logs/$service/launchd.out.log"
-  stderr_log="$INSTALL_DIR/logs/$service/launchd.err.log"
-  xml_run="$(deploy_xml_escape "$ROOT_RUN_SERVICE")"
-  xml_install="$(deploy_xml_escape "$INSTALL_DIR")"
+  plist="$PROGRAM_DIR/config/launchd/$label.plist"
+  stdout_log="$DATA_DIR/logs/$service/launchd.out.log"
+  stderr_log="$DATA_DIR/logs/$service/launchd.err.log"
+  xml_run="$(deploy_xml_escape "$SYSTEM_RUN_SERVICE")"
+  xml_program="$(deploy_xml_escape "$PROGRAM_DIR")"
+  xml_data="$(deploy_xml_escape "$DATA_DIR")"
   xml_user="$(deploy_xml_escape "$SERVICE_USER")"
   xml_stdout="$(deploy_xml_escape "$stdout_log")"
   xml_stderr="$(deploy_xml_escape "$stderr_log")"
@@ -183,8 +189,8 @@ write_service_plist() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$xml_run</string><string>$service</string></array>
-  <key>WorkingDirectory</key><string>$xml_install</string>
+  <key>ProgramArguments</key><array><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>$service</string></array>
+  <key>WorkingDirectory</key><string>$xml_program</string>
   <key>UserName</key><string>$xml_user</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -197,21 +203,22 @@ EOF
 }
 
 write_backup_plist() {
-  local label="com.stockdatasync.backup" plist="$INSTALL_DIR/config/launchd/com.stockdatasync.backup.plist"
-  local xml_run xml_backup xml_install xml_user xml_stdout xml_stderr
-  xml_run="$(deploy_xml_escape "$ROOT_RUN_SERVICE")"
+  local label="com.stockdatasync.backup" plist="$PROGRAM_DIR/config/launchd/com.stockdatasync.backup.plist"
+  local xml_run xml_backup xml_program xml_data xml_user xml_stdout xml_stderr
+  xml_run="$(deploy_xml_escape "$SYSTEM_RUN_SERVICE")"
   xml_backup="$(deploy_xml_escape "$BACKUP_TARGET_DIR")"
-  xml_install="$(deploy_xml_escape "$INSTALL_DIR")"
+  xml_program="$(deploy_xml_escape "$PROGRAM_DIR")"
+  xml_data="$(deploy_xml_escape "$DATA_DIR")"
   xml_user="$(deploy_xml_escape "$SERVICE_USER")"
-  xml_stdout="$(deploy_xml_escape "$INSTALL_DIR/logs/backup/launchd.out.log")"
-  xml_stderr="$(deploy_xml_escape "$INSTALL_DIR/logs/backup/launchd.err.log")"
+  xml_stdout="$(deploy_xml_escape "$DATA_DIR/logs/backup/launchd.out.log")"
+  xml_stderr="$(deploy_xml_escape "$DATA_DIR/logs/backup/launchd.err.log")"
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$xml_run</string><string>backup</string><string>$xml_backup</string></array>
-  <key>WorkingDirectory</key><string>$xml_install</string>
+  <key>ProgramArguments</key><array><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>backup</string><string>$xml_backup</string></array>
+  <key>WorkingDirectory</key><string>$xml_program</string>
   <key>UserName</key><string>$xml_user</string>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
   <key>ProcessType</key><string>Background</string>
@@ -231,15 +238,15 @@ install_services() {
   else
     stop_service backup
     rm -f -- \
-      "$INSTALL_DIR/config/launchd/com.stockdatasync.backup.plist" \
+      "$PROGRAM_DIR/config/launchd/com.stockdatasync.backup.plist" \
       "/Library/LaunchDaemons/com.stockdatasync.backup.plist"
   fi
-  chown -R root:wheel "$INSTALL_DIR/config/launchd"
-  chmod 0644 "$INSTALL_DIR/config/launchd"/*.plist
-  plutil -lint "$INSTALL_DIR/config/launchd"/*.plist >/dev/null
+  chown -R root:wheel "$PROGRAM_DIR/config/launchd"
+  chmod 0644 "$PROGRAM_DIR/config/launchd"/*.plist
+  plutil -lint "$PROGRAM_DIR/config/launchd"/*.plist >/dev/null
   for service in "${services[@]}"; do
     install -o root -g wheel -m 0644 \
-      "$INSTALL_DIR/config/launchd/com.stockdatasync.$service.plist" \
+      "$PROGRAM_DIR/config/launchd/com.stockdatasync.$service.plist" \
       "/Library/LaunchDaemons/com.stockdatasync.$service.plist"
     launchctl enable "system/$(label_for "$service")"
   done
@@ -274,7 +281,7 @@ doctor_check_release() {
 }
 
 run_doctor() {
-  local phase="runtime" target="$INSTALL_DIR/current" require_running=1
+  local phase="runtime" target="$PROGRAM_DIR/current" require_running=1
   local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services
   while (( $# > 0 )); do
     case "$1" in
@@ -287,6 +294,11 @@ run_doctor() {
   doctor_failures=0
   doctor_warnings=0
   printf 'Doctor 检查阶段：%s\n' "$phase"
+  deploy_volume_owners_enabled "$PROGRAM_DIR" && doctor_pass "主程序磁盘已启用 ownership" || doctor_fail_check "主程序磁盘必须启用 ownership"
+  [[ ! -L "$PROGRAM_DIR" && "$(stat -f '%Su' "$PROGRAM_DIR")" == "root" ]] && \
+    doctor_pass "主程序目录由 root 持有" || doctor_fail_check "主程序目录所有者不可信"
+  [[ -x "$SYSTEM_RUN_SERVICE" && "$(stat -f '%Su' "$SYSTEM_RUN_SERVICE")" == "root" ]] && \
+    doctor_pass "launchd 系统入口可信" || doctor_fail_check "launchd 系统入口缺失或所有者不可信"
   [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] && doctor_pass "配置文件存在且不是软链接" || doctor_fail_check "配置文件无效"
   if [[ -f "$ENV_FILE" ]]; then
     [[ "$(stat -f '%Lp' "$ENV_FILE")" == "600" ]] && doctor_pass "配置文件权限为 0600" || doctor_fail_check "配置文件权限必须为 0600"
@@ -310,7 +322,7 @@ run_doctor() {
     doctor_fail_check "Web/API 监听 IP 不属于本机：$HTTP_BIND"
   fi
   [[ "$HTTP_PORT" != "$POSTGRES_PORT" ]] && doctor_pass "应用与数据库端口不同" || doctor_fail_check "应用与数据库端口冲突"
-  releases_real="$(cd "$INSTALL_DIR/releases" && pwd -P)"
+  releases_real="$(cd "$PROGRAM_DIR/releases" && pwd -P)"
   if [[ -d "$target" ]]; then
     target_real="$(cd "$target" && pwd -P)"
     if [[ "$target_real" == "$releases_real/"* && "$(stat -f '%Su' "$target_real")" == "root" ]]; then
@@ -325,6 +337,7 @@ run_doctor() {
   fi
   [[ -x "$POSTGRES_BIN_DIR/postgres" ]] && doctor_pass "PostgreSQL 可执行文件存在" || doctor_fail_check "PostgreSQL 可执行文件缺失"
   /usr/bin/sudo -u "$SERVICE_USER" test -r "$ENV_FILE" && doctor_pass "服务用户可读取配置" || doctor_fail_check "服务用户不能读取配置"
+  /usr/bin/sudo -u "$SERVICE_USER" test -w "$DATA_DIR" && doctor_pass "服务用户可写数据目录" || doctor_fail_check "服务用户不能写数据目录"
   /usr/bin/sudo -u "$SERVICE_USER" test -w "$RAW_DATA_DIR" && doctor_pass "服务用户可写原始数据目录" || doctor_fail_check "服务用户不能写原始数据目录"
   if [[ -n "${BACKUP_TARGET_DIR:-}" ]]; then
     [[ -d "$BACKUP_TARGET_DIR" ]] && doctor_pass "外部备份目录存在" || doctor_fail_check "外部备份目录不存在"
@@ -334,9 +347,9 @@ run_doctor() {
   fi
   if [[ "$phase" == "pre-upgrade" ]]; then
     service_home="$(deploy_service_home "$SERVICE_USER" || true)"
-    [[ -d "$INSTALL_DIR/source/repository.git" ]] && doctor_pass "本地 Git 源码镜像存在" || doctor_fail_check "本地 Git 源码镜像缺失"
-    if [[ -d "$INSTALL_DIR/source/repository.git" ]]; then
-      [[ "$(git --git-dir="$INSTALL_DIR/source/repository.git" remote get-url origin 2>/dev/null || true)" == "$SOURCE_REPOSITORY" ]] && \
+    [[ -d "$PROGRAM_DIR/source/repository.git" ]] && doctor_pass "本地 Git 源码镜像存在" || doctor_fail_check "本地 Git 源码镜像缺失"
+    if [[ -d "$PROGRAM_DIR/source/repository.git" ]]; then
+      [[ "$(git --git-dir="$PROGRAM_DIR/source/repository.git" remote get-url origin 2>/dev/null || true)" == "$SOURCE_REPOSITORY" ]] && \
         doctor_pass "源码镜像地址与配置一致" || doctor_fail_check "源码镜像地址与配置不一致"
     fi
     for dependency in git uv; do
@@ -350,8 +363,8 @@ run_doctor() {
     else
       doctor_fail_check "升级缺少 Node.js 22 或更高版本"
     fi
-    available_kb="$(df -Pk "$INSTALL_DIR" | awk 'NR == 2 {print $4}')"
-    [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] && doctor_pass "升级磁盘至少有 5 GiB 可用空间" || doctor_fail_check "升级磁盘可用空间不足 5 GiB"
+    available_kb="$(df -Pk "$PROGRAM_DIR" | awk 'NR == 2 {print $4}')"
+    [[ "$available_kb" =~ ^[0-9]+$ && "$available_kb" -ge 5242880 ]] && doctor_pass "主程序磁盘至少有 5 GiB 可用空间" || doctor_fail_check "主程序磁盘可用空间不足 5 GiB"
   fi
   if "$POSTGRES_BIN_DIR/pg_isready" -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
     doctor_pass "PostgreSQL 可用"
@@ -363,12 +376,14 @@ run_doctor() {
   else
     doctor_fail_check "PostgreSQL 不可用"
   fi
-  local service services=(postgres server scheduler)
+  local service plist_program services=(postgres server scheduler)
   [[ -n "${BACKUP_TARGET_DIR:-}" ]] && services+=(backup)
   disabled_services="$(launchctl print-disabled system 2>/dev/null || true)"
   for service in "${services[@]}"; do
     [[ -f "$(plist_for "$service")" ]] && plutil -lint "$(plist_for "$service")" >/dev/null && \
       doctor_pass "launchd 配置有效：$service" || doctor_fail_check "launchd 配置无效：$service"
+    plist_program="$(plutil -extract ProgramArguments.0 raw "$(plist_for "$service")" 2>/dev/null || true)"
+    [[ "$plist_program" == "$SYSTEM_RUN_SERVICE" ]] && doctor_pass "launchd 使用系统入口：$service" || doctor_fail_check "launchd 未使用可信系统入口：$service"
     if [[ "$disabled_services" == *\"$(label_for "$service")\"*"=> disabled"* ]]; then
       doctor_fail_check "launchd 服务处于禁用状态：$service"
     else
@@ -408,24 +423,33 @@ print_service_status() {
 
 show_logs() {
   case "$1" in
-    postgres) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/postgres/*.log ;;
-    server|web) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/server/*.log ;;
-    scheduler) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/scheduler/*.log ;;
-    backup) tail -n "${LOG_TAIL_LINES:-200}" -F "$INSTALL_DIR"/logs/backup/*.log ;;
+    postgres) tail -n "${LOG_TAIL_LINES:-200}" -F "$DATA_DIR"/logs/postgres/*.log ;;
+    server|web) tail -n "${LOG_TAIL_LINES:-200}" -F "$DATA_DIR"/logs/server/*.log ;;
+    scheduler) tail -n "${LOG_TAIL_LINES:-200}" -F "$DATA_DIR"/logs/scheduler/*.log ;;
+    backup) tail -n "${LOG_TAIL_LINES:-200}" -F "$DATA_DIR"/logs/backup/*.log ;;
     *) fail "不支持的服务：$1" ;;
   esac
 }
 
 acquire_upgrade_lock() {
-  UPGRADE_LOCK="$INSTALL_DIR/.upgrade.lock"
+  UPGRADE_LOCK="$PROGRAM_DIR/.upgrade.lock"
   mkdir "$UPGRADE_LOCK" 2>/dev/null || fail "已有安装、升级或回滚正在执行"
   trap 'rmdir "$UPGRADE_LOCK" 2>/dev/null || true' EXIT
 }
 
 resolve_upgrade_target() {
-  local requested="$1" mirror="$INSTALL_DIR/source/repository.git"
+  local requested="$1" mirror="$PROGRAM_DIR/source/repository.git"
   git --git-dir="$mirror" fetch --quiet --prune --tags origin
   TARGET_TAG="$(deploy_resolve_tag "$mirror" "$requested")"
+}
+
+refresh_stable_entries() {
+  local release="$1" bootstrap="$release/deploy/production/bootstrap"
+  [[ -d "$bootstrap" ]] || fail "目标版本缺少稳定启动入口"
+  install -o root -g wheel -m 0755 "$bootstrap/installed-stock-data-sync" "$PROGRAM_DIR/bin/stock-data-sync"
+  install -o root -g wheel -m 0755 "$bootstrap/run-service" "$PROGRAM_DIR/bin/run-service"
+  install -o root -g wheel -m 0755 "$bootstrap/global-stock-data-sync" /usr/local/bin/stock-data-sync
+  install -o root -g wheel -m 0755 "$bootstrap/system-run-service" "$SYSTEM_RUN_SERVICE"
 }
 
 run_upgrade() {
@@ -442,33 +466,34 @@ run_upgrade() {
   resolve_upgrade_target "$requested"
   service_home="$(deploy_service_home "$SERVICE_USER")"
   service_group="$(id -gn "$SERVICE_USER")"
-  deploy_prepare_release "$INSTALL_DIR" "$SERVICE_USER" "$service_group" "$service_home" \
-    "$INSTALL_DIR/source/repository.git" "$TARGET_TAG" "$SOURCE_REPOSITORY"
+  deploy_prepare_release "$PROGRAM_DIR" "$SERVICE_USER" "$service_group" "$service_home" \
+    "$PROGRAM_DIR/source/repository.git" "$TARGET_TAG" "$SOURCE_REPOSITORY"
   target="$BUILT_RELEASE_DIR"
-  if [[ "$(cd "$target" && pwd -P)" == "$(cd "$INSTALL_DIR/current" && pwd -P)" ]]; then
+  if [[ "$(cd "$target" && pwd -P)" == "$(cd "$PROGRAM_DIR/current" && pwd -P)" ]]; then
     printf '已经是最新版本：%s\n' "$BUILT_RELEASE_VERSION"
     return 0
   fi
   run_doctor --phase build --release-dir "$target"
   require_database_compatibility "$target"
-  previous="$(cd "$INSTALL_DIR/current" && pwd -P)"
+  refresh_stable_entries "$target"
+  previous="$(cd "$PROGRAM_DIR/current" && pwd -P)"
   stop_service scheduler
   stop_service server
-  ln -sfn "releases/$(basename "$previous")" "$INSTALL_DIR/previous"
-  deploy_switch_current "$INSTALL_DIR" "$target"
+  ln -sfn "releases/$(basename "$previous")" "$PROGRAM_DIR/previous"
+  deploy_switch_current "$PROGRAM_DIR" "$target"
   bootstrap_service server
   bootstrap_service scheduler
   if ! run_doctor --phase post-upgrade; then
     printf '升级后检查失败，正在切回旧程序。\n' >&2
     stop_service scheduler
     stop_service server
-    deploy_switch_current "$INSTALL_DIR" "$previous"
+    deploy_switch_current "$PROGRAM_DIR" "$previous"
     bootstrap_service server
     bootstrap_service scheduler
     run_doctor --phase rollback || true
     fail "程序升级失败，已切回旧版本"
   fi
-  deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$INSTALL_DIR" "$SOURCE_REPOSITORY" "$BUILT_RELEASE_VERSION"
+  deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$PROGRAM_DIR" "$DATA_DIR" "$SOURCE_REPOSITORY" "$BUILT_RELEASE_VERSION"
   printf '升级完成：%s (%s)\n' "$BUILT_RELEASE_VERSION" "$BUILT_RELEASE_COMMIT"
 }
 
@@ -483,32 +508,32 @@ run_rollback() {
   acquire_upgrade_lock
   start_postgres
   run_doctor --phase pre-rollback
-  current="$(cd "$INSTALL_DIR/current" && pwd -P)"
+  current="$(cd "$PROGRAM_DIR/current" && pwd -P)"
   if [[ -n "$requested" ]]; then
-    for candidate in "$INSTALL_DIR/releases/$requested-"*; do
+    for candidate in "$PROGRAM_DIR/releases/$requested-"*; do
       [[ -f "$candidate/BUILD_COMPLETE" ]] && target="$candidate" && break
     done
-  elif [[ -L "$INSTALL_DIR/previous" ]]; then
-    target="$(cd "$INSTALL_DIR/previous" && pwd -P)"
+  elif [[ -L "$PROGRAM_DIR/previous" ]]; then
+    target="$(cd "$PROGRAM_DIR/previous" && pwd -P)"
   fi
   [[ -n "$target" && -d "$target" ]] || fail "找不到可回滚的已构建版本"
   [[ "$target" != "$current" ]] || fail "目标版本已经在运行"
   require_database_compatibility "$target"
   stop_service scheduler
   stop_service server
-  ln -sfn "releases/$(basename "$current")" "$INSTALL_DIR/previous"
-  deploy_switch_current "$INSTALL_DIR" "$target"
+  ln -sfn "releases/$(basename "$current")" "$PROGRAM_DIR/previous"
+  deploy_switch_current "$PROGRAM_DIR" "$target"
   bootstrap_service server
   bootstrap_service scheduler
   run_doctor --phase rollback || {
     stop_service scheduler; stop_service server
-    deploy_switch_current "$INSTALL_DIR" "$current"
+    deploy_switch_current "$PROGRAM_DIR" "$current"
     bootstrap_service server; bootstrap_service scheduler
     fail "回滚后检查失败，已恢复原程序"
   }
   service_home="$(deploy_service_home "$SERVICE_USER")"
   service_group="$(id -gn "$SERVICE_USER")"
-  deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$INSTALL_DIR" "$SOURCE_REPOSITORY" "$(tr -d '[:space:]' < "$target/VERSION")"
+  deploy_write_receipt "$SERVICE_USER" "$service_group" "$service_home" "$PROGRAM_DIR" "$DATA_DIR" "$SOURCE_REPOSITORY" "$(tr -d '[:space:]' < "$target/VERSION")"
   printf '程序已回滚到：%s\n' "$(tr -d '[:space:]' < "$target/VERSION")"
 }
 
@@ -522,9 +547,12 @@ validate_config_candidate() {
     target_server="$3"
     target_version="$4"
     target_web="$5"
-    actual_install_dir="$6"
+    actual_program_dir="$6"
+    actual_data_dir="$7"
     set -a
     source "$original"
+    original_program_dir="$PROGRAM_DIR"
+    original_data_dir="$DATA_DIR"
     original_install_dir="$INSTALL_DIR"
     original_service_user="$SERVICE_USER"
     original_repository="$SOURCE_REPOSITORY"
@@ -540,19 +568,20 @@ validate_config_candidate() {
     original_scheduler_jobstore_table="$SCHEDULER_JOBSTORE_TABLE"
     original_scheduler_advisory_lock_id="$SCHEDULER_ADVISORY_LOCK_ID"
     original_processing_advisory_lock_id="$PROCESSING_ADVISORY_LOCK_ID"
-    for key in INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_ENV APP_API_PREFIX HTTP_BIND HTTP_PORT POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR WEB_DIST_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE TUSHARE_REQUEST_BUDGET_PER_MINUTE SCHEDULER_JOBSTORE_TABLE SCHEDULER_ADVISORY_LOCK_ID PROCESSING_ADVISORY_LOCK_ID; do
+    for key in PROGRAM_DIR DATA_DIR INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_ENV APP_API_PREFIX HTTP_BIND HTTP_PORT POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR WEB_DIST_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE TUSHARE_REQUEST_BUDGET_PER_MINUTE SCHEDULER_JOBSTORE_TABLE SCHEDULER_ADVISORY_LOCK_ID PROCESSING_ADVISORY_LOCK_ID; do
       /usr/bin/grep -Eq "^[[:space:]]*${key}=" "$candidate" || { printf "缺少配置项：%s\\n" "$key" >&2; exit 1; }
     done
     source "$candidate"
     set +a
-    for key in INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_API_PREFIX HTTP_BIND HTTP_PORT POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE TUSHARE_REQUEST_BUDGET_PER_MINUTE; do
+    for key in PROGRAM_DIR DATA_DIR INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_API_PREFIX HTTP_BIND HTTP_PORT POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR ADMIN_API_TOKEN TUSHARE_REQUEST_LIMIT_PER_MINUTE TUSHARE_REQUEST_BUDGET_PER_MINUTE; do
       [[ -n "${!key:-}" ]] || { printf "缺少必填配置：%s\\n" "$key" >&2; exit 1; }
     done
-    for key in INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_ENV POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR WEB_DIST_DIR SCHEDULER_JOBSTORE_TABLE SCHEDULER_ADVISORY_LOCK_ID PROCESSING_ADVISORY_LOCK_ID; do
+    for key in PROGRAM_DIR DATA_DIR INSTALL_DIR SERVICE_USER SOURCE_REPOSITORY APP_ENV POSTGRES_BIN_DIR POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL RAW_DATA_DIR WEB_DIST_DIR SCHEDULER_JOBSTORE_TABLE SCHEDULER_ADVISORY_LOCK_ID PROCESSING_ADVISORY_LOCK_ID; do
       original_key="original_$(printf "%s" "$key" | tr "[:upper:]" "[:lower:]")"
       [[ "${!key}" == "${!original_key}" ]] || { printf "%s 由安装器维护，不允许修改\\n" "$key" >&2; exit 1; }
     done
-    [[ "$INSTALL_DIR" == "$actual_install_dir" ]] || { printf "INSTALL_DIR 与真实安装目录不一致\\n" >&2; exit 1; }
+    [[ "$PROGRAM_DIR" == "$actual_program_dir" ]] || { printf "PROGRAM_DIR 与真实主程序目录不一致\\n" >&2; exit 1; }
+    [[ "$DATA_DIR" == "$actual_data_dir" && "$INSTALL_DIR" == "$actual_data_dir" ]] || { printf "数据目录配置不一致\\n" >&2; exit 1; }
     [[ "$HTTP_BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { printf "HTTP_BIND 必须是 IPv4 地址\\n" >&2; exit 1; }
     IFS=. read -r bind_a bind_b bind_c bind_d <<< "$HTTP_BIND"
     for octet in "$bind_a" "$bind_b" "$bind_c" "$bind_d"; do
@@ -564,7 +593,7 @@ validate_config_candidate() {
     export WEB_DIST_DIR="$target_web"
     cd "$target_server"
     .venv/bin/python -c "from app.core.config import Settings; Settings()"
-  ' _ "$ENV_FILE" "$candidate" "$INSTALL_DIR/current/server" "$APP_VERSION" "$INSTALL_DIR/current/web" "$INSTALL_DIR"
+  ' _ "$ENV_FILE" "$candidate" "$PROGRAM_DIR/current/server" "$APP_VERSION" "$PROGRAM_DIR/current/web" "$PROGRAM_DIR" "$DATA_DIR"
 }
 
 run_config() {
@@ -572,7 +601,8 @@ run_config() {
   case "$action" in
     show)
       printf '配置文件：%s\n' "$ENV_FILE"
-      printf '安装目录：%s\n' "$INSTALL_DIR"
+      printf '主程序目录：%s\n' "$PROGRAM_DIR"
+      printf '数据目录：%s\n' "$DATA_DIR"
       printf '服务用户：%s\n' "$SERVICE_USER"
       printf '监听地址：http://%s:%s\n' "$HTTP_BIND" "$HTTP_PORT"
       printf 'PostgreSQL：127.0.0.1:%s/%s\n' "$POSTGRES_PORT" "$POSTGRES_DB"
@@ -584,7 +614,7 @@ run_config() {
       run_doctor --phase config
       ;;
     edit)
-      temporary="$(mktemp "$INSTALL_DIR/config/.app.env.XXXXXX")"
+      temporary="$(mktemp "$PROGRAM_DIR/config/.app.env.XXXXXX")"
       cp -p "$ENV_FILE" "$temporary"
       editor="${EDITOR:-vi}"
       "$editor" "$temporary"
@@ -604,10 +634,10 @@ run_config() {
 [[ -n "$command_name" ]] || { usage; exit 1; }
 shift
 if [[ "$command_name" == "version" ]]; then
-  [[ -s "$INSTALL_DIR/current/VERSION" && -s "$INSTALL_DIR/current/COMMIT" ]] || fail "当前版本元数据缺失"
-  printf '版本：%s\nCommit：%s\n安装目录：%s\n' \
-    "$(tr -d '[:space:]' < "$INSTALL_DIR/current/VERSION")" \
-    "$(cat "$INSTALL_DIR/current/COMMIT")" "$INSTALL_DIR"
+  [[ -s "$PROGRAM_DIR/current/VERSION" && -s "$PROGRAM_DIR/current/COMMIT" ]] || fail "当前版本元数据缺失"
+  printf '版本：%s\nCommit：%s\n主程序目录：%s\n数据目录：%s\n' \
+    "$(tr -d '[:space:]' < "$PROGRAM_DIR/current/VERSION")" \
+    "$(cat "$PROGRAM_DIR/current/COMMIT")" "$PROGRAM_DIR" "$DATA_DIR"
   exit 0
 fi
 require_installation
@@ -634,7 +664,7 @@ case "$command_name" in
     fi
     ;;
   status)
-    printf 'version    %s (%s)\n' "$APP_VERSION" "$(cut -c1-12 "$INSTALL_DIR/current/COMMIT")"
+    printf 'version    %s (%s)\n' "$APP_VERSION" "$(cut -c1-12 "$PROGRAM_DIR/current/COMMIT")"
     print_service_status postgres; print_service_status server; print_service_status scheduler
     [[ -f "$(plist_for backup)" ]] && print_service_status backup
     ;;
@@ -645,22 +675,22 @@ case "$command_name" in
   logs) show_logs "${1:-server}" ;;
   migrate)
     start_postgres
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" migrate
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" migrate
     ;;
   backup)
     [[ $# == 1 || ( $# == 2 && "$2" == "--full" ) ]] || fail "用法：stock-data-sync backup TARGET [--full]"
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" backup "$1" "${2:-}"
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" backup "$1" "${2:-}"
     ;;
   verify-backup)
     [[ $# == 1 ]] || fail "用法：stock-data-sync verify-backup DIR"
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" verify-backup "$1"
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" verify-backup "$1"
     ;;
   restore)
     [[ $# == 2 && "$2" == "--confirm-database-replace" ]] || fail "用法：stock-data-sync restore DIR --confirm-database-replace"
     ! is_loaded server || fail "恢复前必须停止 server"
     ! is_loaded scheduler || fail "恢复前必须停止 scheduler"
     start_postgres
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$ROOT_RUN_SERVICE" restore "$1"
+    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" restore "$1"
     chown -R "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$RAW_DATA_DIR"
     printf '恢复完成；数据库迁移未自动执行。\n'
     ;;

@@ -87,18 +87,19 @@ git tag v1.2.3
 git push origin v1.2.3
 ```
 
-GitHub Actions 会校验代码并生成 Release 安装入口。目标 Mac 从正式标签拉取源码并在本地构建。首次安装必须明确指定目录：
+GitHub Actions 会校验代码并生成 Release 安装入口。目标 Mac 从正式标签拉取源码并在本地构建。首次安装必须明确指定主程序目录和数据目录：
 
 ```bash
 curl -fsSL https://github.com/ORG/stock-data-sync/releases/latest/download/install.sh \
   | sudo bash -s -- \
-      --install-dir /用户指定的绝对路径 \
+      --program-dir /系统盘/用户指定的程序目录 \
+      --data-dir /外接硬盘/用户指定的数据目录 \
       --http-bind 0.0.0.0 \
       --http-port 18080 \
       --postgres-port 15432
 ```
 
-以后升级不需要再次指定目录：
+主程序目录所在磁盘必须启用 ownership；数据目录可以位于关闭 ownership 的外接盘。以后升级不需要再次指定目录：
 
 ```bash
 sudo stock-data-sync upgrade

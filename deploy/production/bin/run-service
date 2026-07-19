@@ -3,13 +3,15 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_DIR="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
-INSTALL_DIR="${STOCK_DATA_SYNC_INSTALL_DIR:-}"
-[[ -n "$INSTALL_DIR" ]] || {
-  printf '缺少 STOCK_DATA_SYNC_INSTALL_DIR\n' >&2
+PROGRAM_DIR="${STOCK_DATA_SYNC_PROGRAM_DIR:-}"
+DATA_DIR="${STOCK_DATA_SYNC_DATA_DIR:-}"
+[[ -n "$PROGRAM_DIR" && -n "$DATA_DIR" ]] || {
+  printf '缺少主程序目录或数据目录上下文\n' >&2
   exit 1
 }
-ENV_FILE="$INSTALL_DIR/config/app.env"
-ACTUAL_INSTALL_DIR="$INSTALL_DIR"
+ENV_FILE="$PROGRAM_DIR/config/app.env"
+ACTUAL_PROGRAM_DIR="$PROGRAM_DIR"
+ACTUAL_DATA_DIR="$DATA_DIR"
 [[ -f "$ENV_FILE" ]] || {
   printf '缺少运行配置：%s\n' "$ENV_FILE" >&2
   exit 1
@@ -19,8 +21,13 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
-export STOCK_DATA_SYNC_INSTALL_DIR="$ACTUAL_INSTALL_DIR"
-export INSTALL_DIR="$ACTUAL_INSTALL_DIR"
+[[ "$PROGRAM_DIR" == "$ACTUAL_PROGRAM_DIR" ]] || { printf '配置中的 PROGRAM_DIR 不一致\n' >&2; exit 1; }
+[[ "$DATA_DIR" == "$ACTUAL_DATA_DIR" && "$INSTALL_DIR" == "$ACTUAL_DATA_DIR" ]] || { printf '配置中的数据目录不一致\n' >&2; exit 1; }
+export STOCK_DATA_SYNC_PROGRAM_DIR="$ACTUAL_PROGRAM_DIR"
+export STOCK_DATA_SYNC_DATA_DIR="$ACTUAL_DATA_DIR"
+export PROGRAM_DIR="$ACTUAL_PROGRAM_DIR"
+export DATA_DIR="$ACTUAL_DATA_DIR"
+export INSTALL_DIR="$ACTUAL_DATA_DIR"
 export APP_VERSION="$(tr -d '[:space:]' < "$RELEASE_DIR/VERSION")"
 export WEB_DIST_DIR="$RELEASE_DIR/web"
 export PGPASSWORD="$POSTGRES_PASSWORD"
@@ -30,23 +37,23 @@ service_name="${1:-}"
 case "$service_name" in
   postgres)
     exec "$POSTGRES_BIN_DIR/postgres" \
-      -D "$INSTALL_DIR/data/postgres" \
+      -D "$DATA_DIR/data/postgres" \
       -p "$POSTGRES_PORT" \
       -c "listen_addresses=127.0.0.1" \
       -c "logging_collector=on" \
-      -c "log_directory=$INSTALL_DIR/logs/postgres" \
+      -c "log_directory=$DATA_DIR/logs/postgres" \
       -c "log_filename=postgresql-%Y-%m-%d.log" \
       -c "log_rotation_age=1d" \
       -c "log_truncate_on_rotation=on"
     ;;
   server)
-    export APP_LOG_FILE="$INSTALL_DIR/logs/server/server.log"
+    export APP_LOG_FILE="$DATA_DIR/logs/server/server.log"
     cd "$RELEASE_DIR/server"
     exec .venv/bin/python -m uvicorn app.main:app \
       --host "$HTTP_BIND" --port "$HTTP_PORT" --no-access-log
     ;;
   scheduler)
-    export APP_LOG_FILE="$INSTALL_DIR/logs/scheduler/scheduler.log"
+    export APP_LOG_FILE="$DATA_DIR/logs/scheduler/scheduler.log"
     cd "$RELEASE_DIR/server"
     exec .venv/bin/python -m app.scheduler.runner
     ;;

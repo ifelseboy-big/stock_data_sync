@@ -4,11 +4,11 @@
 
 ## 1. 基本原则
 
-- 首次安装目录、Web/API 监听 IPv4、Web/API 端口和 PostgreSQL 端口都没有默认值，必须由用户明确传入。
-- 安装成功后，安装位置记录在服务用户的 `~/.stock-data-sync/install.conf`；后续升级不再要求目录。
+- 首次安装的主程序目录、数据目录、Web/API 监听 IPv4、Web/API 端口和 PostgreSQL 端口都没有默认值，必须由用户明确传入。
+- 安装成功后，两个目录记录在服务用户的 `~/.stock-data-sync/install.conf`；后续升级不再要求目录。
 - Git 只拉取不可变的 `vX.Y.Z` 正式标签，不部署 `main`。
 - 每个版本独立构建，使用 `current` 软链接原子切换。
-- 配置、PostgreSQL、Parquet 和日志位于安装根目录，不随版本切换。
+- 源码、构建版本和配置位于主程序目录；PostgreSQL、Parquet、日志和备份位于数据目录，均不随版本切换。
 - 普通升级只更换程序，不备份、不恢复、不迁移数据库。
 - 目标程序需要不同数据库 revision 时，doctor 在停止服务前拒绝普通升级。
 - 首次初始化空数据库时允许执行 Alembic 初始迁移。
@@ -23,6 +23,8 @@
 - uv。
 - PostgreSQL 18。
 - 能访问 GitHub、npm 和 Python 包源。
+- 主程序目录所在磁盘必须启用 macOS ownership；系统盘默认满足要求。
+- 数据目录可以位于关闭 ownership 的外接磁盘。
 
 安装依赖：
 
@@ -55,24 +57,26 @@ SHA256SUMS
 
 ## 4. 首次安装
 
-首次安装必须在命令中明确指定安装目录：
+首次安装必须明确指定主程序目录和数据目录：
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://github.com/ORG/stock-data-sync/releases/latest/download/install.sh \
   | sudo bash -s -- \
-      --install-dir /Users/stockops/stock-data-sync \
+      --program-dir /Users/stockops/apps/stock-data-sync \
+      --data-dir /Volumes/disk1/apps/stock_data_sync \
       --http-bind 0.0.0.0 \
       --http-port 18080 \
       --postgres-port 15432
 ```
 
-缺少 `--install-dir`、`--http-bind`、`--http-port` 或 `--postgres-port` 时安装立即终止。目录必须是绝对路径且为空；监听地址必须是有效 IPv4；两个端口必须在 1-65535 之间且不能相同。doctor 还会在安装前确认端口未被占用。
+缺少 `--program-dir`、`--data-dir`、`--http-bind`、`--http-port` 或 `--postgres-port` 时安装立即终止。两个目录必须是相互独立的绝对路径且为空。主程序目录所在磁盘必须启用 ownership；数据目录允许关闭 ownership。doctor 还会检查端口冲突和两个磁盘的可用空间。
 
 首次安装必填参数：
 
 ```text
---install-dir PATH      安装目录
+--program-dir PATH      主程序、源码和配置目录
+--data-dir PATH         PostgreSQL、行情数据、日志和备份目录
 --http-bind IPv4        Web/API 监听 IPv4，例如 127.0.0.1 或 0.0.0.0
 --http-port PORT        Web/API 监听端口
 --postgres-port PORT    PostgreSQL 本机监听端口
@@ -83,13 +87,13 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```text
 --version VERSION       安装指定版本
 --service-user USER     服务用户，默认使用发起 sudo 的用户
---backup-dir PATH       可选的安装目录外备份目标
+--backup-dir PATH       可选的数据目录外备份目标
 --no-start              初始化完成后暂不启动 Server 和 Scheduler
 ```
 
 安装过程固定执行：
 
-1. `pre-install doctor` 检查系统、用户、目录、依赖、端口和服务冲突。
+1. `pre-install doctor` 检查系统、用户、双目录、主程序盘 ownership、依赖、端口和服务冲突。
 2. 克隆正式 Git 标签到本地源码镜像。
 3. 在独立版本目录执行前端和 Python 构建。
 4. 生成带逐项注释的 `config/app.env`。
@@ -100,12 +104,12 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 任何安装前检查失败都不会开始安装。
 
-## 5. 安装目录
+## 5. 目录布局
 
-假设用户选择 `/Users/stockops/stock-data-sync`：
+假设主程序目录选择 `/Users/stockops/apps/stock-data-sync`：
 
 ```text
-/Users/stockops/stock-data-sync/
+/Users/stockops/apps/stock-data-sync/
 ├── source/
 │   └── repository.git/       # Git bare mirror
 ├── releases/
@@ -114,9 +118,15 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ├── current -> releases/1.2.3-<commit>
 ├── previous -> releases/1.2.2-<commit>
 ├── bin/                      # 不随版本变化的薄入口
-├── config/
-│   ├── app.env               # 唯一运行配置文件
-│   └── launchd/
+└── config/
+    ├── app.env               # 唯一运行配置文件
+    └── launchd/
+```
+
+数据目录可以位于关闭 ownership 的外接磁盘：
+
+```text
+/Volumes/disk1/apps/stock_data_sync/
 ├── data/
 │   ├── postgres/
 │   └── raw/
@@ -124,20 +134,22 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 └── backups/
 ```
 
+launchd 直接执行系统盘上的 `/usr/local/libexec/stock-data-sync/run-service`，再由该受信任入口启动主程序目录中的当前版本。它不会直接执行关闭 ownership 的外接盘文件。
+
 服务用户主目录另有：
 
 ```text
 ~/.stock-data-sync/install.conf
 ```
 
-它只记录安装目录、Git 仓库、渠道和当前版本，不保存 Token、数据库密码或业务配置。全局 `/usr/local/bin/stock-data-sync` 通过该文件找到真实安装目录。
+它只记录主程序目录、数据目录、Git 仓库、渠道和当前版本，不保存 Token、数据库密码或业务配置。全局 `/usr/local/bin/stock-data-sync` 通过该文件找到两个目录。
 
 ## 6. 配置
 
 唯一配置文件为：
 
 ```text
-<INSTALL_DIR>/config/app.env
+<PROGRAM_DIR>/config/app.env
 ```
 
 文件权限为 `0600`、root 持有，并通过只读 ACL 允许服务用户读取。配置使用注释分组，每个 Key 上方说明含义以及“用户可修改”或“安装器维护”。
@@ -161,7 +173,7 @@ sudo stock-data-sync restart
 
 ## 7. 普通升级
 
-升级不需要再次指定安装目录：
+升级不需要再次指定主程序目录或数据目录：
 
 ```bash
 sudo stock-data-sync upgrade

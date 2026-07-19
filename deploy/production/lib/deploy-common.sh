@@ -66,6 +66,10 @@ deploy_validate_absolute_path() {
   if [[ "$value" != /* ]]; then deploy_fail "$name 必须是绝对路径"; return 1; fi
   if [[ "$value" == "/" ]]; then deploy_fail "$name 不能是根目录"; return 1; fi
   if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then deploy_fail "$name 不能包含换行"; return 1; fi
+  if [[ "$value" == */ || "$value" == *//* || "$value" == */./* || "$value" == */. || "$value" == */../* || "$value" == */.. ]]; then
+    deploy_fail "$name 必须使用不含重复分隔符或点路径段的规范绝对路径"
+    return 1
+  fi
 }
 
 deploy_validate_port() {
@@ -93,6 +97,29 @@ deploy_validate_bind_ip() {
   done
 }
 
+deploy_existing_parent() {
+  local path="$1"
+  while [[ ! -e "$path" && "$path" != "/" ]]; do
+    path="$(dirname "$path")"
+  done
+  printf '%s\n' "$path"
+}
+
+deploy_volume_owners_enabled() {
+  local path="$1" value info
+  info="$(LC_ALL=C /usr/sbin/diskutil info -plist "$path" 2>/dev/null)" || return 1
+  value="$(printf '%s' "$info" | /usr/bin/plutil -extract GlobalPermissionsEnabled raw - 2>/dev/null || true)"
+  if [[ "$value" == "true" || "$value" == "1" ]]; then
+    return 0
+  fi
+  if [[ -z "$value" ]]; then
+    value="$(LC_ALL=C /usr/sbin/diskutil info "$path" 2>/dev/null | \
+      awk -F: '$1 ~ /^[[:space:]]*Owners[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print tolower($2); exit}')"
+    [[ "$value" == "enabled" ]] && return 0
+  fi
+  return 1
+}
+
 deploy_write_env_value() {
   local key="$1"
   local value="$2"
@@ -118,9 +145,10 @@ deploy_write_receipt() {
   local service_user="$1"
   local service_group="$2"
   local service_home="$3"
-  local install_dir="$4"
-  local repository="$5"
-  local version="$6"
+  local program_dir="$4"
+  local data_dir="$5"
+  local repository="$6"
+  local version="$7"
   local receipt_dir="$service_home/.stock-data-sync"
   local receipt_file
   receipt_file="$(deploy_receipt_path "$service_home")"
@@ -129,7 +157,8 @@ deploy_write_receipt() {
   install -d -o "$service_user" -g "$service_group" -m 0700 "$receipt_dir"
   {
     printf '# Stock Data Sync 安装发现文件。仅记录安装位置，不保存运行配置或密钥。\n'
-    printf 'INSTALL_DIR=%s\n' "$install_dir"
+    printf 'PROGRAM_DIR=%s\n' "$program_dir"
+    printf 'DATA_DIR=%s\n' "$data_dir"
     printf 'REPOSITORY=%s\n' "$repository"
     printf 'CHANNEL=stable\n'
     printf 'INSTALLED_VERSION=%s\n' "$version"
@@ -240,7 +269,7 @@ deploy_prepare_release() {
     --exclude='tests' \
     -cf - . | tar -C "$release_dir/server" -xf -
   tar -C "$source_dir/src/web/dist" -cf - . | tar -C "$release_dir/web" -xf -
-  tar -C "$source_dir/deploy/production" -cf - bin lib | \
+  tar -C "$source_dir/deploy/production" -cf - bin lib bootstrap | \
     tar -C "$release_dir/deploy/production" -xf -
   chown -R "$service_user:$service_group" "$release_dir"
 

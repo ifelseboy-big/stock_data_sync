@@ -16,14 +16,17 @@ receipt="$service_home/.stock-data-sync/install.conf"
   printf '错误：安装记录的所有者或权限不正确\n' >&2
   exit 1
 }
-install_dir="$(awk -F= '$1 == "INSTALL_DIR" {sub(/^[^=]*=/, ""); print; exit}' "$receipt")"
-[[ -n "$install_dir" && "$install_dir" == /* ]] || {
-  printf '错误：安装记录中的目录无效\n' >&2
+program_dir="$(awk -F= '$1 == "PROGRAM_DIR" {sub(/^[^=]*=/, ""); print; exit}' "$receipt")"
+data_dir="$(awk -F= '$1 == "DATA_DIR" {sub(/^[^=]*=/, ""); print; exit}' "$receipt")"
+[[ -n "$program_dir" && "$program_dir" == /* && -n "$data_dir" && "$data_dir" == /* ]] || {
+  printf '错误：安装记录中的主程序目录或数据目录无效\n' >&2
   exit 1
 }
-target="$install_dir/bin/stock-data-sync"
+target="$program_dir/bin/stock-data-sync"
 [[ -x "$target" && ! -L "$target" && "$(stat -f '%Su' "$target")" == "root" ]] || {
-  printf '错误：安装目录中的管理入口不可信\n' >&2
+  printf '错误：主程序目录中的管理入口不可信\n' >&2
   exit 1
 }
+export STOCK_DATA_SYNC_PROGRAM_DIR="$program_dir"
+export STOCK_DATA_SYNC_DATA_DIR="$data_dir"
 exec "$target" "$@"

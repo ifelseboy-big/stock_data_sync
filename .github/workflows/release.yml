@@ -54,6 +54,7 @@ jobs:
           bash -n deploy/production/bootstrap/installed-stock-data-sync
           bash -n deploy/production/bootstrap/global-stock-data-sync
           bash -n deploy/production/bootstrap/run-service
+          bash -n deploy/production/bootstrap/system-run-service
           deploy/production/tests/test-deploy-common.sh
 
       - name: Prepare release assets

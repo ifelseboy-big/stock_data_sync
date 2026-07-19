@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+(( $# >= 2 )) || {
+  printf '错误：launchd 主程序目录无效\n' >&2
+  exit 1
+}
+PROGRAM_DIR="$1"
+DATA_DIR="$2"
+shift 2
+
+[[ "$PROGRAM_DIR" == /* && "$PROGRAM_DIR" != "/" ]] || {
+  printf '错误：launchd 主程序目录无效\n' >&2
+  exit 1
+}
+[[ "$DATA_DIR" == /* && "$DATA_DIR" != "/" ]] || {
+  printf '错误：launchd 数据目录无效\n' >&2
+  exit 1
+}
+[[ ! -L "$PROGRAM_DIR" && "$(stat -f '%Su' "$PROGRAM_DIR")" == "root" ]] || {
+  printf '错误：主程序目录所有者不可信：%s\n' "$PROGRAM_DIR" >&2
+  exit 1
+}
+TARGET="$PROGRAM_DIR/current/deploy/production/bin/run-service"
+[[ -x "$TARGET" && "$(stat -f '%Su' "$TARGET")" == "root" ]] || {
+  printf '错误：当前服务入口不可信：%s\n' "$TARGET" >&2
+  exit 1
+}
+
+export STOCK_DATA_SYNC_PROGRAM_DIR="$PROGRAM_DIR"
+export STOCK_DATA_SYNC_DATA_DIR="$DATA_DIR"
+exec /bin/bash "$TARGET" "$@"

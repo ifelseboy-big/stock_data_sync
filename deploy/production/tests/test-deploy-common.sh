@@ -22,6 +22,11 @@ if deploy_validate_bind_ip "test" "300.0.0.1" >/dev/null 2>&1; then
   printf 'invalid bind IP was accepted\n' >&2
   exit 1
 fi
+deploy_validate_absolute_path "test" "/tmp/program" >/dev/null
+if deploy_validate_absolute_path "test" "/tmp/program/../data" >/dev/null 2>&1; then
+  printf 'non-canonical absolute path was accepted\n' >&2
+  exit 1
+fi
 node_runtime="$(deploy_find_node_runtime "${HOME:-}" || true)"
 [[ -n "$node_runtime" ]]
 node_runtime_major="$("$node_runtime" -p 'process.versions.node.split(".")[0]')"
@@ -48,11 +53,25 @@ assert_installer_error() {
   }
 }
 
+assert_installer_error "首次安装必须传入 --program-dir"
+assert_installer_error "首次安装必须传入 --data-dir" \
+  --program-dir /tmp/stock-data-sync-program
 assert_installer_error "首次安装必须传入 --postgres-port" \
-  --install-dir /tmp/stock-data-sync-test --http-bind 127.0.0.1 --http-port 18080
+  --program-dir /tmp/stock-data-sync-program --data-dir /tmp/stock-data-sync-data \
+  --http-bind 127.0.0.1 --http-port 18080
 assert_installer_error "Web/API 与 PostgreSQL 端口不能相同" \
-  --install-dir /tmp/stock-data-sync-test --http-bind 127.0.0.1 \
+  --program-dir /tmp/stock-data-sync-program --data-dir /tmp/stock-data-sync-data \
+  --http-bind 127.0.0.1 \
   --http-port 18080 --postgres-port 18080
+assert_installer_error "主程序目录与数据目录必须相互独立" \
+  --program-dir /tmp/stock-data-sync --data-dir /tmp/stock-data-sync/data \
+  --http-bind 127.0.0.1 --http-port 18080 --postgres-port 15432
+
+if system_entry_output="$("$PROJECT_ROOT/deploy/production/bootstrap/system-run-service" 2>&1)"; then
+  printf 'system service entry accepted missing directories\n' >&2
+  exit 1
+fi
+[[ "$system_entry_output" == *"launchd 主程序目录无效"* ]]
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"
@@ -81,16 +100,16 @@ cp "$PROJECT_ROOT/deploy/production/bin/stock-data-sync" \
   "$release_dir/deploy/production/bin/stock-data-sync"
 cp "$PROJECT_ROOT/deploy/production/lib/deploy-common.sh" \
   "$release_dir/deploy/production/lib/deploy-common.sh"
-cp "$PROJECT_ROOT/deploy/production/bootstrap/installed-stock-data-sync" \
-  "$TEST_ROOT/bin/stock-data-sync"
 printf '1.2.3\n' > "$release_dir/VERSION"
 printf 'abcdef1234567890\n' > "$release_dir/COMMIT"
-printf '# test\n' > "$TEST_ROOT/config/app.env"
+printf 'PROGRAM_DIR=%s\nDATA_DIR=%s\nINSTALL_DIR=%s\n' "$TEST_ROOT" "$TEST_ROOT/data" "$TEST_ROOT/data" > "$TEST_ROOT/config/app.env"
 ln -s 'releases/1.2.3-abcdef123456' "$TEST_ROOT/current"
 
-version_output="$("$TEST_ROOT/bin/stock-data-sync" version)"
+version_output="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_DIR="$TEST_ROOT/data" \
+  "$release_dir/deploy/production/bin/stock-data-sync" version)"
 [[ "$version_output" == *"版本：1.2.3"* ]]
 [[ "$version_output" == *"Commit：abcdef1234567890"* ]]
-[[ "$version_output" == *"安装目录：$TEST_ROOT"* ]]
+[[ "$version_output" == *"主程序目录：$TEST_ROOT"* ]]
+[[ "$version_output" == *"数据目录：$TEST_ROOT/data"* ]]
 
 printf 'deployment helper tests passed\n'
