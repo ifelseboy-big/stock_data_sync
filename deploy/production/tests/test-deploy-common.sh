@@ -91,6 +91,11 @@ grep -Fq '/bin/bash "$MANAGER" "${UPGRADE_ARGS[@]}"' \
   "$PROJECT_ROOT/deploy/production/install.sh"
 grep -Fq '确认忽略时使用 --ignore-doctor' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+if grep -Eq 'local release=.*bootstrap=.*\$release' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"; then
+  printf 'upgrade bootstrap path expands release before local assignment completes\n' >&2
+  exit 1
+fi
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"

@@ -483,7 +483,8 @@ resolve_upgrade_target() {
 }
 
 refresh_stable_entries() {
-  local release="$1" bootstrap="$release/deploy/production/bootstrap"
+  local release="$1"
+  local bootstrap="$release/deploy/production/bootstrap"
   [[ -d "$bootstrap" ]] || fail "目标版本缺少稳定启动入口"
   install -o root -g wheel -m 0755 "$bootstrap/installed-stock-data-sync" "$PROGRAM_DIR/bin/stock-data-sync"
   install -o root -g wheel -m 0755 "$bootstrap/run-service" "$PROGRAM_DIR/bin/run-service"
