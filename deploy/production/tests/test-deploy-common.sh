@@ -78,6 +78,10 @@ grep -Fq 'stdout_log="$PROGRAM_DIR/logs/launchd/$service.out.log"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq -- '-c "shared_buffers=2GB"' \
   "$PROJECT_ROOT/deploy/production/bin/run-service"
+grep -Fq 'export LC_ALL="C.UTF-8"' \
+  "$PROJECT_ROOT/deploy/production/bin/run-service"
+grep -Fq '<key>LC_ALL</key><string>C.UTF-8</string>' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"

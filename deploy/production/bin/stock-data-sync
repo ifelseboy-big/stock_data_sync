@@ -192,6 +192,7 @@ write_service_plist() {
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>$service</string></array>
   <key>WorkingDirectory</key><string>$xml_program</string>
   <key>UserName</key><string>$xml_user</string>
+  <key>EnvironmentVariables</key><dict><key>LANG</key><string>C.UTF-8</string><key>LC_ALL</key><string>C.UTF-8</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -220,6 +221,7 @@ write_backup_plist() {
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>backup</string><string>$xml_backup</string></array>
   <key>WorkingDirectory</key><string>$xml_program</string>
   <key>UserName</key><string>$xml_user</string>
+  <key>EnvironmentVariables</key><dict><key>LANG</key><string>C.UTF-8</string><key>LC_ALL</key><string>C.UTF-8</string></dict>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>$xml_stdout</string>
@@ -380,7 +382,7 @@ run_doctor() {
   else
     doctor_fail_check "PostgreSQL 不可用"
   fi
-  local service plist_program plist_script services=(postgres server scheduler)
+  local service plist_program plist_script plist_locale services=(postgres server scheduler)
   [[ -n "${BACKUP_TARGET_DIR:-}" ]] && services+=(backup)
   disabled_services="$(launchctl print-disabled system 2>/dev/null || true)"
   for service in "${services[@]}"; do
@@ -388,8 +390,10 @@ run_doctor() {
       doctor_pass "launchd 配置有效：$service" || doctor_fail_check "launchd 配置无效：$service"
     plist_program="$(plutil -extract ProgramArguments.0 raw "$(plist_for "$service")" 2>/dev/null || true)"
     plist_script="$(plutil -extract ProgramArguments.1 raw "$(plist_for "$service")" 2>/dev/null || true)"
+    plist_locale="$(plutil -extract EnvironmentVariables.LC_ALL raw "$(plist_for "$service")" 2>/dev/null || true)"
     [[ "$plist_program" == "/bin/bash" && "$plist_script" == "$SYSTEM_RUN_SERVICE" ]] && \
       doctor_pass "launchd 使用系统 Bash 与可信脚本：$service" || doctor_fail_check "launchd 启动链路不可信：$service"
+    [[ "$plist_locale" == "C.UTF-8" ]] && doctor_pass "launchd locale 有效：$service" || doctor_fail_check "launchd locale 未配置：$service"
     if [[ "$disabled_services" == *\"$(label_for "$service")\"*"=> disabled"* ]]; then
       doctor_fail_check "launchd 服务处于禁用状态：$service"
     else
