@@ -217,6 +217,7 @@ class ProcessingRepository:
             task.started_at = now
             task.finished_at = None
             task.error_message = None
+            task.warning_message = None
             return ClaimedProcessingTask(
                 process_id=task.process_id,
                 source_batch_id=task.source_batch_id,
@@ -309,6 +310,7 @@ class ProcessingRepository:
             process.rows_rejected = rows_rejected + publication.rows_rejected
             process.rows_written = rows_written
             process.error_message = None
+            process.warning_message = "\n".join(prepared.warning_messages)[:4000] or None
             self._resolve_downstream_after_success(session, process.process_id, published_at)
             return ProcessingTransition(
                 task.process_id,

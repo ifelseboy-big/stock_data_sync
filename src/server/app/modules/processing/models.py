@@ -108,6 +108,7 @@ class ProcessingTask(Base):
     rows_rejected: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rows_written: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warning_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ProcessingDependency(Base):

@@ -52,6 +52,27 @@ def test_closed_batch_is_presented_as_a_result_status() -> None:
     assert _batch_status(BatchStatus.CANCELLED.value, failed_count=0) == "failed"
 
 
+def test_processing_data_quality_warning_is_presented_as_warning() -> None:
+    now = datetime.now(UTC)
+
+    alert = OperationsService._alert_item(
+        {
+            "id": "process-id",
+            "source": "processing",
+            "task_name": "stock_top_list_daily",
+            "status": "SUCCESS",
+            "error_code": "DATA_QUALITY_WARNING",
+            "error_message": "已保留字段更完整的重复记录",
+            "occurred_at": now,
+        },
+        now,
+    )
+
+    assert alert.level == "warning"
+    assert alert.title == "stock_top_list_daily 数据质量提醒"
+    assert alert.detail == "已保留字段更完整的重复记录"
+
+
 @pytest.mark.asyncio
 async def test_release_coverage_distinguishes_missing_and_in_progress_dates() -> None:
     expected = {

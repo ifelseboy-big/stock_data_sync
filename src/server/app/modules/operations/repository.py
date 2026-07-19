@@ -699,6 +699,10 @@ class OperationsRepository:
             ProcessingTask.queued_at,
             CollectionBatch.scheduled_at,
         )
+        processing_warning = (
+            (ProcessingTask.status == ProcessingTaskStatus.SUCCESS.value)
+            & ProcessingTask.warning_message.is_not(None)
+        )
         scheduler_occurred_at = func.coalesce(
             ScheduledJobExecution.finished_at,
             ScheduledJobExecution.started_at,
@@ -730,26 +734,35 @@ class OperationsRepository:
                 literal("processing").label("source"),
                 ProcessingTask.output_dataset.label("task_name"),
                 ProcessingTask.status.label("status"),
-                literal(None).label("error_code"),
-                ProcessingTask.error_message.label("error_message"),
+                case(
+                    (processing_warning, "DATA_QUALITY_WARNING"),
+                    else_=None,
+                ).label("error_code"),
+                case(
+                    (processing_warning, ProcessingTask.warning_message),
+                    else_=ProcessingTask.error_message,
+                ).label("error_message"),
                 processing_occurred_at.label("occurred_at"),
             )
             .join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
             .where(
-                ProcessingTask.status.in_(
-                    (ProcessingTaskStatus.FAILED.value, ProcessingTaskStatus.BLOCKED.value)
+                or_(
+                    processing_warning,
+                    ProcessingTask.status.in_(
+                        (ProcessingTaskStatus.FAILED.value, ProcessingTaskStatus.BLOCKED.value)
+                    )
+                    & ~select(literal(1))
+                    .where(
+                        recovered_processing.output_dataset == ProcessingTask.output_dataset,
+                        recovered_processing.business_date.is_not_distinct_from(
+                            ProcessingTask.business_date
+                        ),
+                        recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
+                        recovered_processing.finished_at > processing_occurred_at,
+                    )
+                    .exists(),
                 ),
                 processing_occurred_at >= since,
-                ~select(literal(1))
-                .where(
-                    recovered_processing.output_dataset == ProcessingTask.output_dataset,
-                    recovered_processing.business_date.is_not_distinct_from(
-                        ProcessingTask.business_date
-                    ),
-                    recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
-                    recovered_processing.finished_at > processing_occurred_at,
-                )
-                .exists(),
             )
         )
         scheduler = select(

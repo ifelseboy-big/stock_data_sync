@@ -554,11 +554,12 @@ class StockTopListDailyProcessor:
             _top_list_row,
         )
         payload = cast(DatedRows, prepared.payload)
-        rows = _deduplicate_top_list_rows(payload.rows)
+        rows, warning_messages = _deduplicate_top_list_rows(payload.rows)
         return PreparedDataset(
             DatedRows(payload.business_date, rows),
             prepared.rows_read,
             prepared.rows_read - len(rows),
+            warning_messages,
         )
 
     def write(
@@ -895,15 +896,39 @@ def _top_list_row(source: RawRow, business_date: date) -> PreparedRow:
 
 def _deduplicate_top_list_rows(
     rows: tuple[PreparedRow, ...],
-) -> tuple[PreparedRow, ...]:
+) -> tuple[tuple[PreparedRow, ...], tuple[str, ...]]:
     unique: dict[tuple[object, object, object], PreparedRow] = {}
+    warning_messages: list[str] = []
     for row in rows:
         key = (row["trade_date"], row["ts_code"], row["reason"])
         existing = unique.get(key)
-        if existing is not None and existing != row:
+        if existing is None:
+            unique[key] = row
+            continue
+        if existing == row:
+            continue
+        if _row_is_compatible_subset(existing, row):
+            kept, discarded = row, existing
+            unique[key] = row
+        elif _row_is_compatible_subset(row, existing):
+            kept, discarded = existing, row
+        else:
             raise ProcessingError(f"top_list contains conflicting duplicate key: {key}")
-        unique[key] = row
-    return tuple(unique.values())
+        missing_fields = tuple(
+            field
+            for field, value in discarded.items()
+            if value is None and kept[field] is not None
+        )
+        warning_messages.append(
+            "top_list 重复记录字段不完整，已保留较完整记录："
+            f"日期 {key[0]}，股票 {key[1]}，上榜原因“{key[2]}”；"
+            f"缺失字段：{', '.join(missing_fields)}"
+        )
+    return tuple(unique.values()), tuple(warning_messages)
+
+
+def _row_is_compatible_subset(candidate: PreparedRow, complete: PreparedRow) -> bool:
+    return all(value is None or value == complete[field] for field, value in candidate.items())
 
 
 def _top_inst_row(source: RawRow, business_date: date) -> PreparedRow:

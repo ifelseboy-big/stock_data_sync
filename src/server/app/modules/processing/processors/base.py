@@ -13,6 +13,7 @@ class PreparedDataset:
     payload: object
     rows_read: int
     rows_rejected: int = 0
+    warning_messages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

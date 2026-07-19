@@ -39,6 +39,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     batch_id = uuid4()
     collection_task_id = uuid4()
     published_process_id = uuid4()
+    warning_process_id = uuid4()
     blocked_process_id = uuid4()
     recovered_failure_id = uuid4()
     recovered_success_id = uuid4()
@@ -124,6 +125,24 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     max_attempts=3,
                     queued_at=now - timedelta(minutes=5),
                     error_message="required asset is missing",
+                ),
+                ProcessingTask(
+                    process_id=warning_process_id,
+                    source_batch_id=batch_id,
+                    process_type="stock_top_list_daily@1",
+                    business_date=now.date(),
+                    output_dataset="stock_top_list_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    rows_read=2,
+                    rows_rejected=1,
+                    rows_written=1,
+                    warning_message="已保留字段更完整的重复记录",
                 ),
                 ProcessingTask(
                     process_id=recovered_failure_id,
@@ -245,6 +264,13 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
     assert resources.json()["database"]["sharedBuffersBytes"] > 0
     assert any(item["id"] == f"processing:{blocked_process_id}" for item in alerts.json()["items"])
+    warning_alert = next(
+        item
+        for item in alerts.json()["items"]
+        if item["id"] == f"processing:{warning_process_id}"
+    )
+    assert warning_alert["level"] == "warning"
+    assert warning_alert["title"] == "stock_top_list_daily 数据质量提醒"
     assert all(
         item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]
     )

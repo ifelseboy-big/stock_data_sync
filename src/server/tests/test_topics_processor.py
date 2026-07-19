@@ -4,9 +4,11 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pyarrow as pa
+import pytest
 
 from app.catalog import ApiSpec
 from app.catalog.tushare import THS_INDEX_SPEC, TOP_LIST_SPEC
+from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.processors.topics import (
     ConceptBoardProcessor,
@@ -89,6 +91,72 @@ def test_top_list_processor_deduplicates_identical_provider_rows(tmp_path: Path)
     assert len(payload.rows) == 1
     assert prepared.rows_read == 3
     assert prepared.rows_rejected == 2
+
+
+def test_top_list_processor_keeps_more_complete_duplicate_and_warns(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    sparse = _top_list_row()
+    complete = sparse | {
+        "l_sell": 80742933.2,
+        "l_buy": 120952075.83,
+        "l_amount": 201695009.03,
+        "net_amount": 40209142.63,
+        "net_rate": 4.84,
+        "amount_rate": 24.27,
+    }
+    dependency = _asset(store, batch_id, TOP_LIST_SPEC, [sparse, complete])
+
+    prepared = StockTopListDailyProcessor().prepare(
+        _task(batch_id),
+        (dependency,),
+        store,
+    )
+
+    payload = cast(DatedRows, prepared.payload)
+    assert len(payload.rows) == 1
+    assert str(payload.rows[0]["l_buy"]) == "120952075.83"
+    assert prepared.rows_rejected == 1
+    assert len(prepared.warning_messages) == 1
+    assert "920211.BJ" in prepared.warning_messages[0]
+    assert "l_sell, l_buy, l_amount, net_amount, net_rate, amount_rate" in (
+        prepared.warning_messages[0]
+    )
+
+
+def test_top_list_processor_still_rejects_true_duplicate_conflicts(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    first = _top_list_row() | {"l_buy": 100.0}
+    second = _top_list_row() | {"l_buy": 200.0}
+    dependency = _asset(store, batch_id, TOP_LIST_SPEC, [first, second])
+
+    with pytest.raises(ProcessingError, match="conflicting duplicate key"):
+        StockTopListDailyProcessor().prepare(
+            _task(batch_id),
+            (dependency,),
+            store,
+        )
+
+
+def _top_list_row() -> dict[str, object]:
+    return {
+        "trade_date": "20260713",
+        "ts_code": "920211.BJ",
+        "name": "新睿电子",
+        "close": 180.5,
+        "pct_change": 14.0384,
+        "turnover_rate": 53.54,
+        "amount": 831086200.0,
+        "l_sell": None,
+        "l_buy": None,
+        "l_amount": None,
+        "net_amount": None,
+        "net_rate": None,
+        "amount_rate": None,
+        "float_values": 1039680000.0,
+        "reason": "北交所股票连续3个交易日内日收盘价涨跌幅偏离值累计达到+40%(-40%)",
+    }
 
 
 def _asset(
