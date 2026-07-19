@@ -18,7 +18,7 @@
 
 | 项目 | 最终口径 |
 |-|-|
-| 数据库 | PostgreSQL 16；日期使用 date，时间使用 timestamptz，日内时段原文使用 varchar。 |
+| 数据库 | PostgreSQL 18；日期使用 date，时间使用 timestamptz，日内时段原文使用 varchar。 |
 | 证券代码 | 股票和ETF统一 varchar(16)，指数和板块统一 varchar(20)。不把股票、ETF、指数合并为一张证券表。 |
 | 价格/点位 | numeric(20,6)。 |
 | 金额 | 统一人民币元 numeric(24,4)。源单位千元乘1000，万元乘10000，亿元乘100000000。 |
@@ -33,7 +33,7 @@
 
 ### 物理分区设计
 
-分区只用于持续增长且补采、重算、清理均以交易日为边界的大事实表。依据[PostgreSQL 16声明式分区规则](https://www.postgresql.org/docs/16/ddl-partitioning.html)，采用trade_date月度RANGE分区；范围左闭右开，主键必须包含trade_date。其他表保持普通表，避免无收益的分区数量、DDL和查询规划成本。
+分区只用于持续增长且补采、重算、清理均以交易日为边界的大事实表。依据[PostgreSQL 18声明式分区规则](https://www.postgresql.org/docs/18/ddl-partitioning.html)，采用trade_date月度RANGE分区；范围左闭右开，主键必须包含trade_date。其他表保持普通表，避免无收益的分区数量、DDL和查询规划成本。
 
 | 表 | 分区策略 | 原因 |
 |-|-|-|

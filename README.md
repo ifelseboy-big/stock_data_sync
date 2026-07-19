@@ -34,12 +34,12 @@
 
 ## 本地启动
 
-本地开发需要可访问的 PostgreSQL 16。Mac 上安装并启动：
+本地开发需要可访问的 PostgreSQL 18。Mac 上安装并启动：
 
 ```bash
-brew install postgresql@16
-export PATH="$(brew --prefix postgresql@16)/bin:$PATH"
-brew services start postgresql@16
+brew install postgresql@18
+export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
+brew services start postgresql@18
 psql postgres -c "CREATE ROLE stock_sync LOGIN PASSWORD 'stock_sync';"
 createdb --owner=stock_sync stock_data_sync
 ```

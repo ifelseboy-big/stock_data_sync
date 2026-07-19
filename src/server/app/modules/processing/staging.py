@@ -2,6 +2,8 @@ from collections.abc import Mapping, Sequence
 from typing import cast
 from uuid import uuid4
 
+from psycopg import Connection as PsycopgConnection
+from psycopg import sql
 from sqlalchemy import Column, MetaData, Table, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
@@ -37,8 +39,7 @@ class PostgresStagingPublisher:
         _require_target_columns(target, columns)
 
         stage = _create_stage_table(session, target, columns)
-        for offset in range(0, len(rows), chunk_size):
-            session.execute(stage.insert(), rows[offset : offset + chunk_size])
+        _copy_stage_rows(session, stage, columns, rows, chunk_size=chunk_size)
         self._validate_stage(session, stage, key_columns, expected_rows=len(rows))
 
         if strategy in {WriteStrategy.MASTER_MERGE, WriteStrategy.UPSERT_KEY}:
@@ -169,6 +170,30 @@ def _create_stage_table(
     )
     stage.create(session.connection())
     return stage
+
+
+def _copy_stage_rows(
+    session: Session,
+    stage: Table,
+    columns: tuple[str, ...],
+    rows: Sequence[PreparedRow],
+    *,
+    chunk_size: int,
+) -> None:
+    if not rows:
+        return
+    driver_connection = cast(
+        PsycopgConnection[tuple[object, ...]],
+        session.connection().connection.driver_connection,
+    )
+    statement = sql.SQL("COPY {} ({}) FROM STDIN").format(
+        sql.Identifier(stage.name),
+        sql.SQL(", ").join(sql.Identifier(column) for column in columns),
+    )
+    with driver_connection.cursor() as cursor, cursor.copy(statement) as copy:
+        for offset in range(0, len(rows), chunk_size):
+            for row in rows[offset : offset + chunk_size]:
+                copy.write_row(tuple(row.get(column) for column in columns))
 
 
 def _clone_column(column: SchemaColumn[object]) -> Column[object]:

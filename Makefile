@@ -1,4 +1,4 @@
-.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check release
+.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check performance release
 
 server-install:
 	cd src/server && uv sync --all-groups
@@ -22,6 +22,9 @@ web-check:
 	cd src/web && npm run lint && npm run type-check && npm run test:run && npm run build
 
 check: server-check web-check
+
+performance:
+	./scripts/run-performance-tests.sh
 
 release:
 	@test -n "$(VERSION)" || (echo "用法: make release VERSION=0.1.0" && exit 1)

@@ -38,8 +38,8 @@ usage() {
   --no-start            完成安装但不启动服务
   -h, --help            显示帮助
 
-安装目录输入为空时立即终止。数据库、原始数据、日志、备份、配置和应用环境
-全部位于用户指定的安装目录。
+安装目录输入为空时立即终止。数据库、原始数据、日志、配置和应用环境全部位于
+用户指定的安装目录；有效备份必须写入用户另行指定的安装目录外路径。
 EOF
 }
 
@@ -247,11 +247,11 @@ UV_BIN="$(find_executable uv "$SERVICE_HOME" || true)"
 [[ -n "$UV_BIN" ]] || fail "未安装 uv，请先执行：brew install uv"
 BREW_BIN="$(find_executable brew "$SERVICE_HOME" || true)"
 [[ -n "$BREW_BIN" ]] || fail "未安装 Homebrew"
-POSTGRES_PREFIX="$(/usr/bin/sudo -u "$SERVICE_USER" -H "$BREW_BIN" --prefix postgresql@16 2>/dev/null || true)"
-[[ -n "$POSTGRES_PREFIX" ]] || fail "未安装 PostgreSQL 16，请先执行：brew install postgresql@16"
+POSTGRES_PREFIX="$(/usr/bin/sudo -u "$SERVICE_USER" -H "$BREW_BIN" --prefix postgresql@18 2>/dev/null || true)"
+[[ -n "$POSTGRES_PREFIX" ]] || fail "未安装 PostgreSQL 18，请先执行：brew install postgresql@18"
 POSTGRES_BIN_DIR="$POSTGRES_PREFIX/bin"
-[[ -x "$POSTGRES_BIN_DIR/postgres" ]] || fail "未安装 PostgreSQL 16，请先执行：brew install postgresql@16"
-"$POSTGRES_BIN_DIR/postgres" --version | grep -q ' 16\.' || fail "必须使用 PostgreSQL 16"
+[[ -x "$POSTGRES_BIN_DIR/postgres" ]] || fail "未安装 PostgreSQL 18，请先执行：brew install postgresql@18"
+"$POSTGRES_BIN_DIR/postgres" --version | grep -q ' 18\.' || fail "必须使用 PostgreSQL 18"
 
 [[ -d "$PROJECT_ROOT/src/server" ]] || fail "发布包缺少 src/server"
 [[ -f "$PROJECT_ROOT/src/web/dist/index.html" ]] || fail "发布包缺少 Web 构建产物 src/web/dist"

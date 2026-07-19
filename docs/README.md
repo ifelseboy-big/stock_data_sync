@@ -4,7 +4,7 @@
 
 ## 已确认的设计基线
 
-- 后端采用 Python 3.12、uv、FastAPI、SQLAlchemy、Alembic、APScheduler 和 PostgreSQL 16；前端采用 Vue 3、TypeScript、Vite 和 Element Plus。
+- 后端采用 Python 3.12、uv、FastAPI、SQLAlchemy、Alembic、APScheduler 和 PostgreSQL 18；前端采用 Vue 3、TypeScript、Vite 和 Element Plus。
 - 采集任务只负责调用 Tushare 并封存不可变 Parquet；加工任务依赖一个或多个已封存资产，负责清洗、聚合、校验和正式入库。
 - 采集批次关闭后统一生成加工计划；全部加工任务共用一个全局串行入口。
 - Tushare 账户限制为 500 次/分钟，应用预算为 480 次/分钟；所有采集来源共享同一额度。
