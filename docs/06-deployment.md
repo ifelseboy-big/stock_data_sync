@@ -32,6 +32,7 @@ brew install node uv postgresql@18
 ```
 
 首次安装时应为项目选择一个未占用的 `--postgres-port`。项目使用独立 PostgreSQL 数据目录，不使用 Homebrew 默认数据目录；doctor 会拒绝使用已被其他 PostgreSQL 实例占用的端口。
+PostgreSQL 服务启动时固定使用 `shared_buffers=2GB`，覆盖 `initdb` 生成的初始值。
 
 ## 3. GitHub 发布
 

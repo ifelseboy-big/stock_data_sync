@@ -76,6 +76,8 @@ grep -Fq '<key>ProgramArguments</key><array><string>/bin/bash</string><string>$x
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'stdout_log="$PROGRAM_DIR/logs/launchd/$service.out.log"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq -- '-c "shared_buffers=2GB"' \
+  "$PROJECT_ROOT/deploy/production/bin/run-service"
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"
