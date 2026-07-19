@@ -12,6 +12,7 @@ HTTP_PORT=""
 HTTP_BIND=""
 POSTGRES_PORT=""
 UPGRADE_EXISTING=0
+IGNORE_DOCTOR=0
 REPOSITORY="${STOCK_DATA_SYNC_REPOSITORY:-$DEFAULT_REPOSITORY}"
 VERSION="${STOCK_DATA_SYNC_VERSION:-$DEFAULT_VERSION}"
 BOOTSTRAP_DIR=""
@@ -50,7 +51,7 @@ usage() {
   cat <<'EOF'
 用法：
   # 已有安装：由当前发布版本接管升级
-  curl -fsSL RELEASE_INSTALLER_URL | sudo bash -s -- --upgrade
+  curl -fsSL RELEASE_INSTALLER_URL | sudo bash -s -- --upgrade [--ignore-doctor]
 
   # 首次安装
   curl -fsSL RELEASE_INSTALLER_URL | sudo bash -s -- \
@@ -66,6 +67,7 @@ usage() {
 
 选项：
   --upgrade            从安装记录发现目录并升级，不再要求安装参数
+  --ignore-doctor      忽略升级前 doctor 失败；升级后检查仍必须通过
   --repository URL     Git 仓库地址；正式 GitHub Release 安装器已内置
   --version VERSION    安装指定 vX.Y.Z；默认选择仓库最新稳定标签
   --service-user USER  服务用户，默认使用发起 sudo 的用户
@@ -134,6 +136,10 @@ while (( $# > 0 )); do
       UPGRADE_EXISTING=1
       shift
       ;;
+    --ignore-doctor)
+      IGNORE_DOCTOR=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -143,6 +149,9 @@ while (( $# > 0 )); do
       ;;
   esac
 done
+
+(( IGNORE_DOCTOR == 0 || UPGRADE_EXISTING == 1 )) || \
+  fail "--ignore-doctor 只能与 --upgrade 同时使用"
 
 if (( UPGRADE_EXISTING == 1 )); then
   (( EUID == 0 )) || fail "请使用 sudo 执行升级"
@@ -216,9 +225,11 @@ LOCAL_INSTALLER="$SOURCE_DIR/deploy/production/install-local.sh"
 if (( UPGRADE_EXISTING == 1 )); then
   MANAGER="$SOURCE_DIR/deploy/production/bin/stock-data-sync"
   [[ -f "$MANAGER" ]] || fail "目标版本缺少升级管理程序"
+  UPGRADE_ARGS=(upgrade --version "$tag")
+  (( IGNORE_DOCTOR == 1 )) && UPGRADE_ARGS+=(--ignore-doctor)
   STOCK_DATA_SYNC_PROGRAM_DIR="$PROGRAM_DIR" \
   STOCK_DATA_SYNC_DATA_DIR="$DATA_DIR" \
-    /bin/bash "$MANAGER" upgrade --version "$tag"
+    /bin/bash "$MANAGER" "${UPGRADE_ARGS[@]}"
   exit 0
 fi
 

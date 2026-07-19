@@ -30,7 +30,8 @@ usage() {
   restart [service...]     重启全部服务或指定服务；不会自动修改数据库
   status                   查看服务状态和当前程序版本
   version                  显示版本、commit、主程序目录和数据目录
-  upgrade [--version V]    从 Git 正式标签本地构建并原子更换程序
+  upgrade [--version V] [--ignore-doctor]
+                           从 Git 正式标签本地构建并原子更换程序
   rollback [--version V]   切换到已构建且数据库兼容的旧程序
   doctor [选项]            执行安装、升级和运行状态检查
   config [show|path|validate|edit]
@@ -491,16 +492,20 @@ refresh_stable_entries() {
 }
 
 run_upgrade() {
-  local requested="" previous target service_home service_group
+  local requested="" previous target service_home service_group ignore_doctor=0
   while (( $# > 0 )); do
     case "$1" in
       --version) (( $# >= 2 )) || fail "--version 缺少版本"; requested="$2"; shift 2 ;;
+      --ignore-doctor) ignore_doctor=1; shift ;;
       *) fail "upgrade 未知参数：$1" ;;
     esac
   done
   acquire_upgrade_lock
   start_postgres
-  run_doctor --phase pre-upgrade
+  if ! run_doctor --phase pre-upgrade; then
+    (( ignore_doctor == 1 )) || fail "升级前 doctor 检查失败；确认忽略时使用 --ignore-doctor"
+    printf '警告：已按用户选择忽略升级前 doctor 失败，继续升级。\n' >&2
+  fi
   resolve_upgrade_target "$requested"
   service_home="$(deploy_service_home "$SERVICE_USER")"
   service_group="$(id -gn "$SERVICE_USER")"

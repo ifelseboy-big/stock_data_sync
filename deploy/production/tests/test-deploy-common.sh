@@ -54,6 +54,7 @@ assert_installer_error() {
 }
 
 assert_installer_error "首次安装必须传入 --program-dir"
+assert_installer_error "--ignore-doctor 只能与 --upgrade 同时使用" --ignore-doctor
 assert_installer_error "首次安装必须传入 --data-dir" \
   --program-dir /tmp/stock-data-sync-program
 assert_installer_error "首次安装必须传入 --postgres-port" \
@@ -86,8 +87,10 @@ grep -Fq 'launchctl kickstart -k "system/$(label_for "$service")"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'disabled_marker="\"$(label_for "$service")\" => disabled"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
-grep -Fq '/bin/bash "$MANAGER" upgrade --version "$tag"' \
+grep -Fq '/bin/bash "$MANAGER" "${UPGRADE_ARGS[@]}"' \
   "$PROJECT_ROOT/deploy/production/install.sh"
+grep -Fq '确认忽略时使用 --ignore-doctor' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"

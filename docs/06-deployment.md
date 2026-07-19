@@ -183,11 +183,17 @@ sudo stock-data-sync restart
 sudo stock-data-sync upgrade
 ```
 
+如果确认升级前 doctor 的失败项不影响本次更换程序，可显式忽略并继续；升级后的 doctor 仍必须通过：
+
+```bash
+sudo stock-data-sync upgrade --ignore-doctor
+```
+
 如果旧版本自身的 doctor 缺陷阻止普通升级，可由新版本安装器读取安装记录并接管升级：
 
 ```bash
 curl -fsSL https://github.com/ORG/stock_data_sync/releases/latest/download/install.sh \
-  | sudo bash -s -- --upgrade
+  | sudo bash -s -- --upgrade --ignore-doctor
 ```
 
 指定版本：
