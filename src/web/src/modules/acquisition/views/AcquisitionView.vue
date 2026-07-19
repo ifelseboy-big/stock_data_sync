@@ -532,7 +532,7 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
           prop="reason"
           :rules="[
             { required: true, message: '请输入操作原因', trigger: 'blur' },
-            { min: 3, max: 500, message: '原因长度为 3 到 500 个字符', trigger: 'blur' },
+            { max: 500, message: '原因最多 500 个字符', trigger: 'blur' },
           ]"
         >
           <el-input v-model="commandForm.reason" type="textarea" :rows="3" maxlength="500" />
