@@ -133,7 +133,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 └── backups/
 ```
 
-launchd 直接执行系统盘上的 `/usr/local/libexec/stock-data-sync/run-service`，再由该受信任入口启动主程序目录中的当前版本。它不会直接执行关闭 ownership 的外接盘文件。
+launchd 直接执行 macOS 自带的 `/bin/bash`，并将系统盘上的 `/usr/local/libexec/stock-data-sync/run-service` 作为受信任脚本参数，再启动主程序目录中的当前版本。它不会直接 `posix_spawn` 未签名的项目脚本，也不会执行关闭 ownership 的外接盘文件。
 
 服务用户主目录另有：
 

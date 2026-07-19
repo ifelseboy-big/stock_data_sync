@@ -189,7 +189,7 @@ write_service_plist() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>$service</string></array>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>$service</string></array>
   <key>WorkingDirectory</key><string>$xml_program</string>
   <key>UserName</key><string>$xml_user</string>
   <key>RunAtLoad</key><true/>
@@ -217,7 +217,7 @@ write_backup_plist() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>backup</string><string>$xml_backup</string></array>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$xml_run</string><string>$xml_program</string><string>$xml_data</string><string>backup</string><string>$xml_backup</string></array>
   <key>WorkingDirectory</key><string>$xml_program</string>
   <key>UserName</key><string>$xml_user</string>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
@@ -379,14 +379,16 @@ run_doctor() {
   else
     doctor_fail_check "PostgreSQL 不可用"
   fi
-  local service plist_program services=(postgres server scheduler)
+  local service plist_program plist_script services=(postgres server scheduler)
   [[ -n "${BACKUP_TARGET_DIR:-}" ]] && services+=(backup)
   disabled_services="$(launchctl print-disabled system 2>/dev/null || true)"
   for service in "${services[@]}"; do
     [[ -f "$(plist_for "$service")" ]] && plutil -lint "$(plist_for "$service")" >/dev/null && \
       doctor_pass "launchd 配置有效：$service" || doctor_fail_check "launchd 配置无效：$service"
     plist_program="$(plutil -extract ProgramArguments.0 raw "$(plist_for "$service")" 2>/dev/null || true)"
-    [[ "$plist_program" == "$SYSTEM_RUN_SERVICE" ]] && doctor_pass "launchd 使用系统入口：$service" || doctor_fail_check "launchd 未使用可信系统入口：$service"
+    plist_script="$(plutil -extract ProgramArguments.1 raw "$(plist_for "$service")" 2>/dev/null || true)"
+    [[ "$plist_program" == "/bin/bash" && "$plist_script" == "$SYSTEM_RUN_SERVICE" ]] && \
+      doctor_pass "launchd 使用系统 Bash 与可信脚本：$service" || doctor_fail_check "launchd 启动链路不可信：$service"
     if [[ "$disabled_services" == *\"$(label_for "$service")\"*"=> disabled"* ]]; then
       doctor_fail_check "launchd 服务处于禁用状态：$service"
     else
@@ -678,22 +680,22 @@ case "$command_name" in
   logs) show_logs "${1:-server}" ;;
   migrate)
     start_postgres
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" migrate
+    /usr/bin/sudo -u "$SERVICE_USER" -H /bin/bash "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" migrate
     ;;
   backup)
     [[ $# == 1 || ( $# == 2 && "$2" == "--full" ) ]] || fail "用法：stock-data-sync backup TARGET [--full]"
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" backup "$1" "${2:-}"
+    /usr/bin/sudo -u "$SERVICE_USER" -H /bin/bash "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" backup "$1" "${2:-}"
     ;;
   verify-backup)
     [[ $# == 1 ]] || fail "用法：stock-data-sync verify-backup DIR"
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" verify-backup "$1"
+    /usr/bin/sudo -u "$SERVICE_USER" -H /bin/bash "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" verify-backup "$1"
     ;;
   restore)
     [[ $# == 2 && "$2" == "--confirm-database-replace" ]] || fail "用法：stock-data-sync restore DIR --confirm-database-replace"
     ! is_loaded server || fail "恢复前必须停止 server"
     ! is_loaded scheduler || fail "恢复前必须停止 scheduler"
     start_postgres
-    /usr/bin/sudo -u "$SERVICE_USER" -H "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" restore "$1"
+    /usr/bin/sudo -u "$SERVICE_USER" -H /bin/bash "$SYSTEM_RUN_SERVICE" "$PROGRAM_DIR" "$DATA_DIR" restore "$1"
     chown -R "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$RAW_DATA_DIR"
     printf '恢复完成；数据库迁移未自动执行。\n'
     ;;

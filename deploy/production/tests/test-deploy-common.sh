@@ -72,6 +72,8 @@ if system_entry_output="$("$PROJECT_ROOT/deploy/production/bootstrap/system-run-
   exit 1
 fi
 [[ "$system_entry_output" == *"launchd 主程序目录无效"* ]]
+grep -Fq '<key>ProgramArguments</key><array><string>/bin/bash</string><string>$xml_run</string>' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"
