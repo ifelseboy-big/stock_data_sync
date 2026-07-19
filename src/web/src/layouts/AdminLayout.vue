@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import {
+  Bell,
+  Collection,
+  Connection,
   DataAnalysis,
+  Document,
   Fold,
-  List,
+  Link,
   Menu as MenuIcon,
   Monitor,
-  Operation,
+  SetUp,
 } from '@element-plus/icons-vue'
 import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
@@ -34,26 +38,52 @@ watch(isMobile, (mobile) => appStore.setSidebarCollapsed(mobile), { immediate: t
       <nav aria-label="主导航">
         <el-menu
           :default-active="activeMenu"
+          :default-openeds="['runtime', 'observability']"
           :collapse="sidebarCollapsed"
           :collapse-transition="false"
           router
         >
-          <el-menu-item index="/">
-            <el-icon><DataAnalysis /></el-icon>
-            <template #title>运行概览</template>
-          </el-menu-item>
-          <el-menu-item index="/tasks">
-            <el-icon><List /></el-icon>
-            <template #title>任务管理</template>
-          </el-menu-item>
-          <el-menu-item index="/operations">
-            <el-icon><Operation /></el-icon>
-            <template #title>运行记录</template>
-          </el-menu-item>
-          <el-menu-item index="/system">
-            <el-icon><Monitor /></el-icon>
-            <template #title>系统运维</template>
-          </el-menu-item>
+          <el-sub-menu index="runtime">
+            <template #title>
+              <el-icon><DataAnalysis /></el-icon>
+              <span>运行中心</span>
+            </template>
+            <el-menu-item index="/">运行概览</el-menu-item>
+            <el-menu-item index="/acquisition">
+              <el-icon><Collection /></el-icon>
+              <template #title>采集运行</template>
+            </el-menu-item>
+            <el-menu-item index="/processing">
+              <el-icon><SetUp /></el-icon>
+              <template #title>加工队列</template>
+            </el-menu-item>
+            <el-menu-item index="/dependencies">
+              <el-icon><Link /></el-icon>
+              <template #title>依赖观测</template>
+            </el-menu-item>
+          </el-sub-menu>
+          <el-sub-menu index="observability">
+            <template #title>
+              <el-icon><Monitor /></el-icon>
+              <span>观测中心</span>
+            </template>
+            <el-menu-item index="/providers">
+              <el-icon><Connection /></el-icon>
+              <template #title>接口监控</template>
+            </el-menu-item>
+            <el-menu-item index="/runs">
+              <el-icon><Document /></el-icon>
+              <template #title>运行记录</template>
+            </el-menu-item>
+            <el-menu-item index="/alerts">
+              <el-icon><Bell /></el-icon>
+              <template #title>告警中心</template>
+            </el-menu-item>
+            <el-menu-item index="/system">
+              <el-icon><Monitor /></el-icon>
+              <template #title>系统运维</template>
+            </el-menu-item>
+          </el-sub-menu>
         </el-menu>
       </nav>
     </el-aside>

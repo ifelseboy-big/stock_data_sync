@@ -29,6 +29,8 @@
 - [工程分层](docs/architecture.md)
 - [核心依赖](docs/dependencies.md)
 - [Tushare 请求策略](docs/request-strategy.md)
+- [任务处理需求](docs/task-processing-requirements.md)
+- [管理后台设计与指标口径](docs/admin-console-design.md)
 - [发布与部署](docs/deployment.md)
 
 ## 本地启动
