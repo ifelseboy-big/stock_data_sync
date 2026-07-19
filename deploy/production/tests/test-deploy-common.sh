@@ -112,4 +112,12 @@ version_output="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_
 [[ "$version_output" == *"主程序目录：$TEST_ROOT"* ]]
 [[ "$version_output" == *"数据目录：$TEST_ROOT/data"* ]]
 
+switch_root="$TEST_ROOT/switch"
+mkdir -p "$switch_root/releases/1.2.3-test"
+saved_umask="$(umask)"
+umask 077
+deploy_switch_current "$switch_root" "$switch_root/releases/1.2.3-test"
+umask "$saved_umask"
+[[ "$(stat -f '%Lp' "$switch_root/current")" == "755" ]]
+
 printf 'deployment helper tests passed\n'

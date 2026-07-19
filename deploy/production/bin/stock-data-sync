@@ -298,6 +298,8 @@ run_doctor() {
     doctor_pass "主程序目录由 root 持有" || doctor_fail_check "主程序目录所有者不可信"
   [[ -x "$SYSTEM_RUN_SERVICE" && "$(stat -f '%Su' "$SYSTEM_RUN_SERVICE")" == "root" ]] && \
     doctor_pass "launchd 系统入口可信" || doctor_fail_check "launchd 系统入口缺失或所有者不可信"
+  /usr/bin/sudo -u "$SERVICE_USER" test -x "$SYSTEM_RUN_SERVICE" && \
+    doctor_pass "服务用户可执行 launchd 系统入口" || doctor_fail_check "服务用户无法执行 launchd 系统入口"
   [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] && doctor_pass "配置文件存在且不是软链接" || doctor_fail_check "配置文件无效"
   if [[ -f "$ENV_FILE" ]]; then
     [[ "$(stat -f '%Lp' "$ENV_FILE")" == "600" ]] && doctor_pass "配置文件权限为 0600" || doctor_fail_check "配置文件权限必须为 0600"
@@ -331,6 +333,8 @@ run_doctor() {
   if (( target_trusted == 1 )); then
     target="$target_real"
     doctor_check_release "$target"
+    /usr/bin/sudo -u "$SERVICE_USER" test -x "$target/deploy/production/bin/run-service" && \
+      doctor_pass "服务用户可执行目标程序入口" || doctor_fail_check "服务用户无法执行目标程序入口"
   else
     doctor_fail_check "目标程序目录不在受信任的 releases 目录中"
   fi

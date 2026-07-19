@@ -286,6 +286,7 @@ deploy_switch_current() {
   local relative_target="releases/$(basename "$release_dir")"
   local temporary="$install_dir/.current.new.$$"
   ln -s "$relative_target" "$temporary"
+  chmod -h 0755 "$temporary"
   mv -fh "$temporary" "$install_dir/current"
 }
 

@@ -187,6 +187,7 @@ APP_VERSION="$BUILT_RELEASE_VERSION"
 
 POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 ADMIN_API_TOKEN="$(openssl rand -hex 32)"
+ORIGINAL_UMASK="$(umask)"
 umask 077
 {
   printf '# Stock Data Sync 生产配置。修改后执行：sudo stock-data-sync config validate\n'
@@ -246,19 +247,26 @@ umask 077
 chown root:wheel "$PROGRAM_DIR/config/app.env"
 chmod 0600 "$PROGRAM_DIR/config/app.env"
 chmod +a "$SERVICE_USER allow read" "$PROGRAM_DIR/config/app.env"
+umask "$ORIGINAL_UMASK"
 
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/installed-stock-data-sync" "$PROGRAM_DIR/bin/stock-data-sync"
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/run-service" "$PROGRAM_DIR/bin/run-service"
 install -d -o root -g wheel -m 0755 /usr/local/bin
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/global-stock-data-sync" /usr/local/bin/stock-data-sync
+install -d -o root -g wheel -m 0755 /usr/local/libexec
 install -d -o root -g wheel -m 0755 /usr/local/libexec/stock-data-sync
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/system-run-service" /usr/local/libexec/stock-data-sync/run-service
 
 deploy_switch_current "$PROGRAM_DIR" "$RELEASE_DIR"
 deploy_write_receipt "$SERVICE_USER" "$SERVICE_GROUP" "$SERVICE_HOME" "$PROGRAM_DIR" "$DATA_DIR" "$REPOSITORY" "$APP_VERSION"
 
+/usr/bin/sudo -u "$SERVICE_USER" test -x /usr/local/libexec/stock-data-sync/run-service || \
+  fail "服务用户无法执行系统启动入口"
+/usr/bin/sudo -u "$SERVICE_USER" test -x "$PROGRAM_DIR/current/deploy/production/bin/run-service" || \
+  fail "服务用户无法执行当前程序入口"
+
 PASSWORD_FILE="$PROGRAM_DIR/config/.postgres-password"
-printf '%s\n' "$POSTGRES_PASSWORD" > "$PASSWORD_FILE"
+(umask 077; printf '%s\n' "$POSTGRES_PASSWORD" > "$PASSWORD_FILE")
 chown "$SERVICE_USER:$SERVICE_GROUP" "$PASSWORD_FILE"
 chmod 0600 "$PASSWORD_FILE"
 /usr/bin/sudo -u "$SERVICE_USER" -H "$POSTGRES_BIN_DIR/initdb" \
