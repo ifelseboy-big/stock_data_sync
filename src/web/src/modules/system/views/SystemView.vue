@@ -138,13 +138,16 @@ function formatBytes(value: number | undefined): string {
         <div class="panel-card__header">
           <div>
             <h3>资源状态</h3>
-            <p>数据库连接、长事务和原始数据目录容量。</p>
+            <p>数据库运行配置、API 进程资源和原始数据目录容量。</p>
           </div>
         </div>
       </template>
       <el-descriptions :column="2" border>
         <el-descriptions-item label="数据库大小">
           {{ formatBytes(resources?.database.sizeBytes) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="PostgreSQL 共享缓冲区（运行值）">
+          {{ formatBytes(resources?.database.sharedBuffersBytes) }}
         </el-descriptions-item>
         <el-descriptions-item label="活动连接">
           {{ resources?.database.activeConnectionCount ?? '--' }}
@@ -155,7 +158,7 @@ function formatBytes(value: number | undefined): string {
         <el-descriptions-item label="CPU 核数">
           {{ resources?.process.cpuCount ?? '--' }}
         </el-descriptions-item>
-        <el-descriptions-item label="进程内存高水位">
+        <el-descriptions-item label="API 进程峰值内存">
           {{ formatBytes(resources?.process.memoryHighWaterBytes) }}
         </el-descriptions-item>
         <el-descriptions-item label="1 分钟系统负载">
@@ -174,6 +177,10 @@ function formatBytes(value: number | undefined): string {
           {{ resources?.storage.level ?? '--' }}
         </el-descriptions-item>
       </el-descriptions>
+      <p class="resource-explanation">
+        PostgreSQL 共享缓冲区从当前数据库实例实时读取；API
+        进程峰值内存是服务启动以来的最大常驻内存，不代表当前占用。
+      </p>
     </el-card>
 
     <el-alert
@@ -186,3 +193,12 @@ function formatBytes(value: number | undefined): string {
     />
   </section>
 </template>
+
+<style scoped>
+.resource-explanation {
+  margin: 12px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+</style>

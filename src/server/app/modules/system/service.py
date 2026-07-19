@@ -34,6 +34,9 @@ async def get_system_resources(
     now = datetime.now(ZoneInfo(config.scheduler_timezone))
     version = await db.scalar(select(func.version()))
     database_size = await db.scalar(select(func.pg_database_size(func.current_database())))
+    shared_buffers = await db.scalar(
+        text("SELECT pg_size_bytes(current_setting('shared_buffers'))")
+    )
     active_connections = await db.scalar(select(func.count()).select_from(text("pg_stat_activity")))
     long_transactions = await db.scalar(
         select(func.count())
@@ -65,6 +68,7 @@ async def get_system_resources(
             status="ok",
             version=str(version or "unknown"),
             size_bytes=int(database_size or 0),
+            shared_buffers_bytes=int(shared_buffers or 0),
             active_connection_count=int(active_connections or 0),
             long_transaction_count=int(long_transactions or 0),
         ),

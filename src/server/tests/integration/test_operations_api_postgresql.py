@@ -243,6 +243,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert any(item["datasetName"] == "test_daily" for item in releases.json()["items"])
     assert any(item["endpoint"] == "daily" for item in provider.json()["endpoints"])
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
+    assert resources.json()["database"]["sharedBuffersBytes"] > 0
     assert any(item["id"] == f"processing:{blocked_process_id}" for item in alerts.json()["items"])
     assert all(
         item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]

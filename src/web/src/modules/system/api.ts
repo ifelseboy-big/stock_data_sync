@@ -11,6 +11,7 @@ export interface SystemResources {
     status: string
     version: string
     sizeBytes: number
+    sharedBuffersBytes: number
     activeConnectionCount: number
     longTransactionCount: number
   }

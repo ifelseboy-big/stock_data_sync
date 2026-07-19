@@ -25,6 +25,7 @@ class DatabaseResources(ResourceModel):
     status: str
     version: str
     size_bytes: int
+    shared_buffers_bytes: int
     active_connection_count: int
     long_transaction_count: int
 
