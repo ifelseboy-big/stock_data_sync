@@ -412,6 +412,32 @@ class AcquisitionRepository:
             task.error_message = error_message
             return TaskTransition(task_id, status, retry_at)
 
+    def recover_interrupted_task(
+        self,
+        task_id: UUID,
+        *,
+        now: datetime,
+    ) -> TaskTransition:
+        with self._session_factory() as session, session.begin():
+            task = session.scalar(
+                select(CollectionTask).where(CollectionTask.task_id == task_id).with_for_update()
+            )
+            if task is None:
+                raise RuntimeError(f"unknown collection task: {task_id}")
+
+            status = CollectionTaskStatus(task.status)
+            if status != CollectionTaskStatus.RUNNING:
+                return TaskTransition(task_id, status, task.next_retry_at)
+
+            task.status = CollectionTaskStatus.RETRY_WAIT.value
+            task.attempt_count = max(task.attempt_count - 1, 0)
+            task.next_retry_at = now
+            task.started_at = None
+            task.finished_at = None
+            task.error_code = "INTERRUPTED"
+            task.error_message = "scheduler stopped while the collection task was running"
+            return TaskTransition(task_id, CollectionTaskStatus.RETRY_WAIT, now)
+
     def close_ready_batches(self, *, now: datetime) -> tuple[UUID, ...]:
         closed_ids: list[UUID] = []
         with self._session_factory() as session, session.begin():

@@ -365,19 +365,12 @@ class ProcessingRepository:
                 )
             tasks = session.scalars(statement.with_for_update(skip_locked=True)).all()
             for task in tasks:
-                if task.attempt_count < task.max_attempts:
-                    task.status = ProcessingTaskStatus.RETRY_WAIT.value
-                    task.next_retry_at = now
-                    task.error_message = "scheduler stopped while processing task was running"
-                else:
-                    task.status = ProcessingTaskStatus.FAILED.value
-                    task.finished_at = now
-                    task.error_message = "processing task interrupted after maximum attempts"
-                    self._block_downstream_after_failure(
-                        session,
-                        task.process_id,
-                        task.error_message,
-                    )
+                task.status = ProcessingTaskStatus.RETRY_WAIT.value
+                task.attempt_count = max(task.attempt_count - 1, 0)
+                task.next_retry_at = now
+                task.started_at = None
+                task.finished_at = None
+                task.error_message = "scheduler stopped while processing task was running"
             return len(tasks)
 
     def _upsert_processing_task(

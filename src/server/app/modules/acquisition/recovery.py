@@ -102,13 +102,9 @@ class AcquisitionRecovery:
                 continue
 
             if is_stale:
-                transition = self._repository.fail_task(
+                transition = self._repository.recover_interrupted_task(
                     task.task_id,
-                    error_code="INTERRUPTED",
-                    error_message="scheduler stopped while the collection task was running",
-                    request_count=0,
-                    retry_at=now,
-                    completed_at=now,
+                    now=now,
                 )
                 retried_tasks += int(transition.next_retry_at is not None)
 

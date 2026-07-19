@@ -152,3 +152,41 @@ def test_backfill_claims_the_most_recent_business_date_first() -> None:
         completed_at=scheduled_at,
         skipped=True,
     )
+
+
+def test_interrupted_final_collection_attempt_is_retried_without_spending_an_attempt() -> None:
+    repository = AcquisitionRepository(SyncSessionFactory)
+    now = datetime(2037, 1, 23, 9, 0, tzinfo=TIMEZONE)
+    batch_id = repository.create_or_get_batch(
+        batch_type=BatchType.REPAIR,
+        business_date=now.date(),
+        scheduled_at=now,
+    )
+    repository.append_tasks(
+        batch_id,
+        (TaskBlueprint("TUSHARE", "restart_recovery", "full-market", {}, 1),),
+        finalize=True,
+        now=now,
+    )
+
+    interrupted = repository.claim_next(allowed_batch_types={BatchType.REPAIR}, now=now)
+    assert interrupted is not None
+    assert interrupted.attempt_count == interrupted.max_attempts == 1
+
+    transition = repository.recover_interrupted_task(interrupted.task_id, now=now)
+    assert transition.status == CollectionTaskStatus.RETRY_WAIT
+
+    resumed = repository.claim_next(allowed_batch_types={BatchType.REPAIR}, now=now)
+    assert resumed is not None
+    assert resumed.task_id == interrupted.task_id
+    assert resumed.attempt_count == resumed.max_attempts == 1
+
+    terminal = repository.fail_task(
+        resumed.task_id,
+        error_code="TEST_COMPLETE",
+        error_message="real failure still spends the final attempt",
+        request_count=0,
+        retry_at=now,
+        completed_at=now,
+    )
+    assert terminal.status == CollectionTaskStatus.FAILED

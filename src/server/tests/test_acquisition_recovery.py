@@ -29,6 +29,7 @@ class FakeRepository:
         self.task = task
         self.completed = False
         self.failed = False
+        self.recovered = False
 
     def assets(self) -> tuple[object, ...]:
         return ()
@@ -43,6 +44,10 @@ class FakeRepository:
     def fail_task(self, task_id: Any, **values: Any) -> TaskTransition:
         self.failed = True
         return TaskTransition(task_id, CollectionTaskStatus.RETRY_WAIT, values["retry_at"])
+
+    def recover_interrupted_task(self, task_id: Any, **values: Any) -> TaskTransition:
+        self.recovered = True
+        return TaskTransition(task_id, CollectionTaskStatus.RETRY_WAIT, values["now"])
 
     def mark_asset_missing(self, task_id: Any, **values: Any) -> None:
         raise AssertionError("no registered asset should be checked in this test")
@@ -108,4 +113,36 @@ def test_startup_recovery_registers_sealed_orphan_without_refetch(tmp_path: Path
 
     assert report.completed_tasks == 1
     assert repository.completed
+    assert not repository.failed
+    assert not repository.recovered
+
+
+def test_startup_recovery_requeues_an_interrupted_final_attempt(tmp_path: Path) -> None:
+    task = _task()
+    task = RunningTaskSnapshot(
+        task_id=task.task_id,
+        batch_id=task.batch_id,
+        business_date=task.business_date,
+        provider=task.provider,
+        api_name=task.api_name,
+        request_params=task.request_params,
+        attempt_count=task.max_attempts,
+        max_attempts=task.max_attempts,
+        started_at=task.started_at,
+    )
+    repository = FakeRepository(task)
+    registry = SpecRegistry[ApiSpec](lambda item: item.api_name)
+    registry.register(_spec())
+    recovery = AcquisitionRecovery(
+        repository=repository,  # type: ignore[arg-type]
+        asset_store=LocalRawAssetStore(tmp_path),
+        api_specs=registry,
+        timezone=TIMEZONE,
+        running_timeout_seconds=300,
+    )
+
+    report = recovery.reconcile(recover_all_running=True)
+
+    assert report.retried_tasks == 1
+    assert repository.recovered
     assert not repository.failed
