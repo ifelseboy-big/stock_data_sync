@@ -409,7 +409,7 @@ run_doctor() {
   else
     doctor_fail_check "PostgreSQL 不可用"
   fi
-  local service plist_program plist_script plist_locale services=(postgres server scheduler)
+  local service plist_program plist_script plist_locale disabled_marker services=(postgres server scheduler)
   [[ -n "${BACKUP_TARGET_DIR:-}" ]] && services+=(backup)
   disabled_services="$(launchctl print-disabled system 2>/dev/null || true)"
   for service in "${services[@]}"; do
@@ -421,7 +421,8 @@ run_doctor() {
     [[ "$plist_program" == "/bin/bash" && "$plist_script" == "$SYSTEM_RUN_SERVICE" ]] && \
       doctor_pass "launchd 使用系统 Bash 与可信脚本：$service" || doctor_fail_check "launchd 启动链路不可信：$service"
     [[ "$plist_locale" == "C.UTF-8" ]] && doctor_pass "launchd locale 有效：$service" || doctor_fail_check "launchd locale 未配置：$service"
-    if [[ "$disabled_services" == *\"$(label_for "$service")\"*"=> disabled"* ]]; then
+    disabled_marker="\"$(label_for "$service")\" => disabled"
+    if [[ "$disabled_services" == *"$disabled_marker"* ]]; then
       doctor_fail_check "launchd 服务处于禁用状态：$service"
     else
       doctor_pass "launchd 服务已启用：$service"

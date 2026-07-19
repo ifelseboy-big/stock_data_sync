@@ -183,6 +183,13 @@ sudo stock-data-sync restart
 sudo stock-data-sync upgrade
 ```
 
+如果旧版本自身的 doctor 缺陷阻止普通升级，可由新版本安装器读取安装记录并接管升级：
+
+```bash
+curl -fsSL https://github.com/ORG/stock_data_sync/releases/latest/download/install.sh \
+  | sudo bash -s -- --upgrade
+```
+
 指定版本：
 
 ```bash

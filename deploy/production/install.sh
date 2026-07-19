@@ -11,6 +11,7 @@ DATA_DIR=""
 HTTP_PORT=""
 HTTP_BIND=""
 POSTGRES_PORT=""
+UPGRADE_EXISTING=0
 REPOSITORY="${STOCK_DATA_SYNC_REPOSITORY:-$DEFAULT_REPOSITORY}"
 VERSION="${STOCK_DATA_SYNC_VERSION:-$DEFAULT_VERSION}"
 BOOTSTRAP_DIR=""
@@ -48,6 +49,10 @@ trap cleanup EXIT
 usage() {
   cat <<'EOF'
 用法：
+  # 已有安装：由当前发布版本接管升级
+  curl -fsSL RELEASE_INSTALLER_URL | sudo bash -s -- --upgrade
+
+  # 首次安装
   curl -fsSL RELEASE_INSTALLER_URL | sudo bash -s -- \
     --program-dir PATH --data-dir PATH --http-bind IPv4 --http-port PORT \
     --postgres-port PORT [选项]
@@ -60,6 +65,7 @@ usage() {
   --postgres-port PORT  PostgreSQL 本机监听端口，范围 1-65535
 
 选项：
+  --upgrade            从安装记录发现目录并升级，不再要求安装参数
   --repository URL     Git 仓库地址；正式 GitHub Release 安装器已内置
   --version VERSION    安装指定 vX.Y.Z；默认选择仓库最新稳定标签
   --service-user USER  服务用户，默认使用发起 sudo 的用户
@@ -124,6 +130,10 @@ while (( $# > 0 )); do
       forwarded+=("$1")
       shift
       ;;
+    --upgrade)
+      UPGRADE_EXISTING=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -134,11 +144,28 @@ while (( $# > 0 )); do
   esac
 done
 
-[[ -n "$PROGRAM_DIR" ]] || fail "首次安装必须传入 --program-dir"
-[[ -n "$DATA_DIR" ]] || fail "首次安装必须传入 --data-dir"
-[[ -n "$HTTP_BIND" ]] || fail "首次安装必须传入 --http-bind"
-[[ -n "$HTTP_PORT" ]] || fail "首次安装必须传入 --http-port"
-[[ -n "$POSTGRES_PORT" ]] || fail "首次安装必须传入 --postgres-port"
+if (( UPGRADE_EXISTING == 1 )); then
+  (( EUID == 0 )) || fail "请使用 sudo 执行升级"
+  [[ "$(uname -s)" == "Darwin" ]] || fail "生产升级仅支持 macOS"
+  (( ${#forwarded[@]} == 0 )) || fail "--upgrade 不能与首次安装参数同时使用"
+  CALLING_USER="${SUDO_USER:-}"
+  [[ -n "$CALLING_USER" && "$CALLING_USER" != "root" ]] || \
+    fail "无法确定安装所属用户，请从首次安装使用的用户执行升级"
+  SERVICE_HOME="$(dscl . -read "/Users/$CALLING_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+  RECEIPT="$SERVICE_HOME/.stock-data-sync/install.conf"
+  [[ -f "$RECEIPT" && ! -L "$RECEIPT" ]] || fail "找不到安装记录：$RECEIPT"
+  [[ "$(stat -f '%Su' "$RECEIPT")" == "$CALLING_USER" && "$(stat -f '%Lp' "$RECEIPT")" == "600" ]] || \
+    fail "安装记录的所有者或权限不正确"
+  PROGRAM_DIR="$(awk -F= '$1 == "PROGRAM_DIR" {sub(/^[^=]*=/, ""); print; exit}' "$RECEIPT")"
+  DATA_DIR="$(awk -F= '$1 == "DATA_DIR" {sub(/^[^=]*=/, ""); print; exit}' "$RECEIPT")"
+else
+  [[ -n "$PROGRAM_DIR" ]] || fail "首次安装必须传入 --program-dir"
+  [[ -n "$DATA_DIR" ]] || fail "首次安装必须传入 --data-dir"
+  [[ -n "$HTTP_BIND" ]] || fail "首次安装必须传入 --http-bind"
+  [[ -n "$HTTP_PORT" ]] || fail "首次安装必须传入 --http-port"
+  [[ -n "$POSTGRES_PORT" ]] || fail "首次安装必须传入 --postgres-port"
+fi
+
 [[ "$PROGRAM_DIR" == /* && "$PROGRAM_DIR" != "/" ]] || fail "主程序目录必须是非根目录的绝对路径"
 [[ "$DATA_DIR" == /* && "$DATA_DIR" != "/" ]] || fail "数据目录必须是非根目录的绝对路径"
 [[ "$PROGRAM_DIR" != *$'\n'* && "$PROGRAM_DIR" != *$'\r'* ]] || fail "主程序目录不能包含换行"
@@ -147,12 +174,14 @@ done
 [[ "$DATA_DIR" != */ && "$DATA_DIR" != *//* && "$DATA_DIR" != */./* && "$DATA_DIR" != */. && "$DATA_DIR" != */../* && "$DATA_DIR" != */.. ]] || fail "数据目录必须使用规范绝对路径"
 [[ "$PROGRAM_DIR" != "$DATA_DIR" && "$PROGRAM_DIR" != "$DATA_DIR/"* && "$DATA_DIR" != "$PROGRAM_DIR/"* ]] || \
   fail "主程序目录与数据目录必须相互独立"
-validate_ipv4 "$HTTP_BIND"
-validate_port "Web/API 端口" "$HTTP_PORT"
-validate_port "PostgreSQL 端口" "$POSTGRES_PORT"
-[[ "$HTTP_PORT" != "$POSTGRES_PORT" ]] || fail "Web/API 与 PostgreSQL 端口不能相同"
-(( EUID == 0 )) || fail "请使用 sudo 执行安装"
-[[ "$(uname -s)" == "Darwin" ]] || fail "生产安装器仅支持 macOS"
+if (( UPGRADE_EXISTING == 0 )); then
+  validate_ipv4 "$HTTP_BIND"
+  validate_port "Web/API 端口" "$HTTP_PORT"
+  validate_port "PostgreSQL 端口" "$POSTGRES_PORT"
+  [[ "$HTTP_PORT" != "$POSTGRES_PORT" ]] || fail "Web/API 与 PostgreSQL 端口不能相同"
+  (( EUID == 0 )) || fail "请使用 sudo 执行安装"
+  [[ "$(uname -s)" == "Darwin" ]] || fail "生产安装器仅支持 macOS"
+fi
 command -v git >/dev/null 2>&1 || fail "缺少 Git"
 command -v tar >/dev/null 2>&1 || fail "缺少 tar"
 
@@ -183,6 +212,15 @@ mkdir -p "$SOURCE_DIR"
 git --git-dir="$MIRROR" archive "$tag^{commit}" | tar -C "$SOURCE_DIR" -xf -
 LOCAL_INSTALLER="$SOURCE_DIR/deploy/production/install-local.sh"
 [[ -x "$LOCAL_INSTALLER" || -f "$LOCAL_INSTALLER" ]] || fail "目标版本缺少 install-local.sh"
+
+if (( UPGRADE_EXISTING == 1 )); then
+  MANAGER="$SOURCE_DIR/deploy/production/bin/stock-data-sync"
+  [[ -f "$MANAGER" ]] || fail "目标版本缺少升级管理程序"
+  STOCK_DATA_SYNC_PROGRAM_DIR="$PROGRAM_DIR" \
+  STOCK_DATA_SYNC_DATA_DIR="$DATA_DIR" \
+    /bin/bash "$MANAGER" upgrade --version "$tag"
+  exit 0
+fi
 
 bash "$LOCAL_INSTALLER" \
   "${forwarded[@]}" \

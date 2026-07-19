@@ -84,6 +84,10 @@ grep -Fq '<key>LC_ALL</key><string>C.UTF-8</string>' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'launchctl kickstart -k "system/$(label_for "$service")"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'disabled_marker="\"$(label_for "$service")\" => disabled"' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq '/bin/bash "$MANAGER" upgrade --version "$tag"' \
+  "$PROJECT_ROOT/deploy/production/install.sh"
 
 git_work="$TEST_ROOT/git-work"
 git_mirror="$TEST_ROOT/git-mirror.git"
