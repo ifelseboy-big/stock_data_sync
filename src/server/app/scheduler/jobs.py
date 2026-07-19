@@ -24,7 +24,6 @@ from app.catalog.tushare import (
     MONTHLY_INDEX_SPECS,
     TRADE_CAL_SPEC,
     next_year_trade_calendar_scopes,
-    theme_member_scopes,
     ths_member_scopes,
 )
 from app.common.errors import CalendarCoverageError, ClosedBatchPlanMismatchError
@@ -48,7 +47,7 @@ from app.modules.processing.factory import (
 )
 from app.modules.processing.models import DatasetRelease
 from app.modules.stocks.models import TradeCalendar
-from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
+from app.modules.topics.models import ConceptBoard, ThemeIndex
 
 
 def dispatch_collection_tasks() -> None:
@@ -116,18 +115,8 @@ def plan_deferred_collection_stages() -> None:
                 )
                 if release_ready is None:
                     continue
-                theme_codes = tuple(
-                    session.scalars(
-                        select(MarketThemeDaily.theme_code)
-                        .where(
-                            MarketThemeDaily.source == "DC",
-                            MarketThemeDaily.trade_date == stage_date,
-                        )
-                        .order_by(MarketThemeDaily.theme_code)
-                    )
-                )
-                dynamic_spec = _theme_member_spec(stage.api_name, stage_date, theme_codes)
-                scope_count = len(theme_codes)
+                dynamic_spec = get_api_specs().get(stage.api_name)
+                scope_count = 1
             elif stage.api_name == "ths_member":
                 ready_datasets = set(
                     session.scalars(
@@ -190,18 +179,7 @@ def plan_deferred_collection_stages() -> None:
 
 def dispatch_processing_task() -> None:
     now = datetime.now(ZoneInfo(settings.scheduler_timezone))
-    get_processing_runtime().dispatch(now=now)
-
-
-def _theme_member_spec(
-    api_name: str,
-    business_date: date,
-    codes: tuple[str, ...],
-) -> ApiSpec:
-    return replace(
-        get_api_specs().get(api_name),
-        scope_builder=lambda ignored_date: theme_member_scopes(business_date, codes),
-    )
+    get_processing_runtime().wake(now=now)
 
 
 def _ths_member_spec(api_name: str, codes: tuple[str, ...]) -> ApiSpec:
@@ -436,33 +414,12 @@ def plan_theme_members() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)
     business_date = now.date()
-    with SyncSessionFactory() as session:
-        theme_codes = tuple(
-            session.scalars(
-                select(MarketThemeDaily.theme_code)
-                .where(
-                    MarketThemeDaily.source == "DC",
-                    MarketThemeDaily.trade_date == business_date,
-                )
-                .order_by(MarketThemeDaily.theme_code)
-            )
-        )
-    if not theme_codes:
-        structlog.get_logger("scheduler").info(
-            "theme_member_waiting_for_daily_theme",
-            business_date=business_date.isoformat(),
-        )
-        return
-    dynamic_spec = replace(
-        DELAYED_THEME_SPECS[0],
-        scope_builder=lambda ignored_date: theme_member_scopes(business_date, theme_codes),
-    )
     _plan_stage(
         StagePlan(
             batch_type=BatchType.DELAYED,
             business_date=business_date,
             scheduled_at=datetime.combine(business_date, time(hour=20), timezone),
-            api_specs=(dynamic_spec,),
+            api_specs=DELAYED_THEME_SPECS,
             finalize=True,
         ),
         now=now,

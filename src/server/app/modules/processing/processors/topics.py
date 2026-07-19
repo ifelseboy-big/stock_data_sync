@@ -5,7 +5,7 @@ from datetime import date, datetime, time
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Table, delete, insert, select
+from sqlalchemy import Table, delete, func, insert, select
 from sqlalchemy.orm import Session
 
 from app.catalog import ApiSpec, WriteStrategy
@@ -463,7 +463,7 @@ class MarketThemeDailyProcessor:
             session,
             target=cast(Table, MarketThemeDaily.__table__),
             rows=rows,
-            strategy=WriteStrategy.REPLACE_DATE,
+            strategy=WriteStrategy.UPSERT_KEY,
             key_columns=("source", "theme_code", "trade_date"),
             update_columns=(
                 "name",
@@ -497,20 +497,35 @@ class MarketThemeMemberDailyProcessor:
     ) -> PreparedDataset:
         business_date = _business_date(task, self.name)
         raw = read_raw_assets(dependencies, asset_store, (DC_CONCEPT_CONS_SPEC,))
-        rows = tuple(
+        source_rows = tuple(
             _theme_member_row(row, business_date) for row in raw.rows_by_api["dc_concept_cons"]
         )
-        return PreparedDataset(DatedRows(business_date, rows), raw.row_count)
+        rows, warning_messages = _deduplicate_theme_member_rows(source_rows)
+        return PreparedDataset(
+            DatedRows(business_date, rows),
+            raw.row_count,
+            raw.row_count - len(rows),
+            warning_messages,
+        )
 
     def write(
         self, session: Session, prepared: PreparedDataset, *, published_at: datetime
     ) -> PublicationResult:
         payload = cast(DatedRows, prepared.payload)
+        latest_parent_sync = session.scalar(
+            select(func.max(MarketThemeDaily.synced_at)).where(
+                MarketThemeDaily.trade_date == payload.business_date,
+                MarketThemeDaily.source == "DC",
+            )
+        )
+        if latest_parent_sync is None:
+            raise ProcessingError("market_theme_daily has no current parent rows")
         theme_codes = set(
             session.scalars(
                 select(MarketThemeDaily.theme_code).where(
                     MarketThemeDaily.trade_date == payload.business_date,
                     MarketThemeDaily.source == "DC",
+                    MarketThemeDaily.synced_at == latest_parent_sync,
                 )
             )
         )
@@ -529,6 +544,13 @@ class MarketThemeMemberDailyProcessor:
             key_columns=("source", "trade_date", "theme_code", "ts_code"),
             update_columns=("name", "industry_code", "industry", "reason", "hot_num", "synced_at"),
             replace_filters={"trade_date": payload.business_date},
+        )
+        session.execute(
+            delete(MarketThemeDaily).where(
+                MarketThemeDaily.trade_date == payload.business_date,
+                MarketThemeDaily.source == "DC",
+                MarketThemeDaily.synced_at < latest_parent_sync,
+            )
         )
         return PublicationResult(written, len(payload.rows) - len(matched))
 
@@ -925,6 +947,28 @@ def _deduplicate_top_list_rows(
             f"缺失字段：{', '.join(missing_fields)}"
         )
     return tuple(unique.values()), tuple(warning_messages)
+
+
+def _deduplicate_theme_member_rows(
+    rows: tuple[PreparedRow, ...],
+) -> tuple[tuple[PreparedRow, ...], tuple[str, ...]]:
+    unique: dict[tuple[object, object, object, object], PreparedRow] = {}
+    duplicate_count = 0
+    for row in rows:
+        key = (row["source"], row["trade_date"], row["theme_code"], row["ts_code"])
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = row
+            continue
+        if existing != row:
+            raise ProcessingError(f"dc_concept_cons contains conflicting duplicate key: {key}")
+        duplicate_count += 1
+    warnings = (
+        (f"dc_concept_cons 返回 {duplicate_count} 条完全重复记录，加工时已确定性去重",)
+        if duplicate_count
+        else ()
+    )
+    return tuple(unique.values()), warnings
 
 
 def _row_is_compatible_subset(candidate: PreparedRow, complete: PreparedRow) -> bool:

@@ -222,7 +222,7 @@ class OperationsOverview(OperationsModel):
     generated_at: datetime
     metrics: OverviewMetrics
     quota: QuotaSnapshot | None
-    current_processing: ProcessingQueueItem | None
+    current_processing_tasks: list[ProcessingQueueItem]
     recent_batches: list[AcquisitionBatchItem]
     recent_alerts: list[AlertItem]
 

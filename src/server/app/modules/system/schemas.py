@@ -34,6 +34,7 @@ class SchedulerResources(ResourceModel):
     status: str
     singleton_lock_held: bool
     processing_running_count: int
+    processing_max_workers: int
 
 
 class StorageResources(ResourceModel):

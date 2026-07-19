@@ -85,6 +85,8 @@ grep -Fq 'PostgreSQL shared_buffers 已生效：$shared_buffers_actual' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'EXPECTED_SHARED_BUFFERS_BYTES="2147483648"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'deploy_write_env_value PROCESSING_MAX_WORKERS 3' \
+  "$PROJECT_ROOT/deploy/production/install-local.sh"
 grep -Fq 'export LC_ALL="C.UTF-8"' \
   "$PROJECT_ROOT/deploy/production/bin/run-service"
 grep -Fq '<key>LC_ALL</key><string>C.UTF-8</string>' \

@@ -6,6 +6,7 @@ import structlog
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.modules.acquisition.factory import shutdown_acquisition_runtime
+from app.modules.processing.factory import shutdown_processing_runtime
 from app.scheduler.factory import create_scheduler
 from app.scheduler.jobs import (
     plan_due_collection_stages,
@@ -62,6 +63,7 @@ def main() -> None:
         except (KeyboardInterrupt, SystemExit):
             logger.info("scheduler_stopped")
         finally:
+            shutdown_processing_runtime()
             shutdown_acquisition_runtime()
 
 

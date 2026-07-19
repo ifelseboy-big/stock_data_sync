@@ -128,6 +128,7 @@ class DatasetDependencySpec:
     name: str
     scope: ReleaseScope
     triggers_recompute: bool = True
+    merge_previous_scopes: bool = True
 
     def __post_init__(self) -> None:
         if not self.name:

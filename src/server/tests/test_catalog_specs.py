@@ -102,3 +102,14 @@ def test_dataset_release_dependency_can_be_prerequisite_without_recompute_trigge
     )
 
     assert dependency.triggers_recompute is False
+
+
+def test_raw_dependency_can_disable_previous_scope_merging() -> None:
+    dependency = DatasetDependencySpec(
+        kind=DependencyKind.RAW_ASSET,
+        name="dc_concept_cons",
+        scope=ReleaseScope.DATE,
+        merge_previous_scopes=False,
+    )
+
+    assert dependency.merge_previous_scopes is False

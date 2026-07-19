@@ -50,18 +50,20 @@ def get_acquisition_recovery() -> AcquisitionRecovery:
 @lru_cache
 def get_acquisition_runtime() -> AcquisitionRuntime:
     repository = get_acquisition_repository()
+    timezone = ZoneInfo(settings.scheduler_timezone)
     executor = CollectionExecutor(
         repository=repository,
         provider=TushareProvider(call_recorder=PostgresProviderCallRecorder(SyncSessionFactory)),
         api_specs=get_api_specs(),
         asset_store=get_raw_asset_store(),
-        timezone=ZoneInfo(settings.scheduler_timezone),
+        timezone=timezone,
     )
     return AcquisitionRuntime(
         repository=repository,
         executor=executor,
         capacity_gate=RawStorageCapacityGate(settings.raw_data_dir, settings),
         max_workers=settings.collection_max_workers,
+        timezone=timezone,
     )
 
 

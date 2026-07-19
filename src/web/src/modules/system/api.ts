@@ -19,6 +19,7 @@ export interface SystemResources {
     status: string
     singletonLockHeld: boolean
     processingRunningCount: number
+    processingMaxWorkers: number
   }
   storage: {
     level: 'NORMAL' | 'WARNING' | 'PROTECT'

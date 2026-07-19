@@ -11,6 +11,7 @@ from app.catalog import ApiSpec, EmptyPolicy, SpecRegistry, SplitPolicy
 from app.common.errors import CollectionError, ProviderError
 from app.integrations.market_data.base import MarketDataProvider
 from app.modules.acquisition.domain import ClaimedCollectionTask, TaskTransition
+from app.modules.acquisition.models import BatchType
 from app.modules.acquisition.repository import AcquisitionRepository
 from app.observability.provider_calls import collection_task_context
 from app.storage import LocalRawAssetStore, RawAssetContext, schema_fingerprint
@@ -314,7 +315,7 @@ class CollectionExecutor:
                 spec.retry_policy.max_wait_seconds,
             )
             candidate = now + timedelta(seconds=wait_seconds)
-            if not _past_cutoff(
+            if task.batch_type in {BatchType.BACKFILL, BatchType.REPAIR} or not _past_cutoff(
                 candidate,
                 business_date=task.business_date,
                 cutoff_time=spec.retry_policy.cutoff_time,

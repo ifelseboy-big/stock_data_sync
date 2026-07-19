@@ -239,10 +239,11 @@ umask 077
   printf '# Scheduler 单例 advisory lock ID。[安装器维护，请勿修改]\n'; deploy_write_env_value SCHEDULER_ADVISORY_LOCK_ID 731500001
   printf '# Processing advisory lock ID。[安装器维护，请勿修改]\n'; deploy_write_env_value PROCESSING_ADVISORY_LOCK_ID 731500002
   printf '# Scheduler 最大工作线程数。[用户可修改]\n'; deploy_write_env_value SCHEDULER_MAX_WORKERS 4
-  printf '# Scheduler 轮询间隔秒数。[用户可修改]\n'; deploy_write_env_value SCHEDULER_POLL_SECONDS 30
+  printf '# Scheduler 轮询间隔秒数。[用户可修改]\n'; deploy_write_env_value SCHEDULER_POLL_SECONDS 10
   printf '# 提前创建的月分区数量。[用户可修改]\n'; deploy_write_env_value PARTITION_MONTHS_AHEAD 3
   printf '# 采集任务最大并发数。[用户可修改]\n'; deploy_write_env_value COLLECTION_MAX_WORKERS 4
   printf '# 采集任务运行超时秒数。[用户可修改]\n'; deploy_write_env_value COLLECTION_RUNNING_TIMEOUT_SECONDS 1800
+  printf '# 加工任务最大并发数；同一数据集仍保持串行。[用户可修改]\n'; deploy_write_env_value PROCESSING_MAX_WORKERS 3
   printf '# 加工任务运行超时秒数。[用户可修改]\n'; deploy_write_env_value PROCESSING_RUNNING_TIMEOUT_SECONDS 21600
 } > "$PROGRAM_DIR/config/app.env"
 chown root:wheel "$PROGRAM_DIR/config/app.env"

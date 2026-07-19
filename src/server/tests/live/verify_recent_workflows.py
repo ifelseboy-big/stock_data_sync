@@ -55,6 +55,7 @@ from app.modules.processing.factory import (
     get_dataset_specs,
     get_processing_repository,
     get_processing_runtime,
+    shutdown_processing_runtime,
 )
 from app.modules.processing.models import (
     DatasetRelease,
@@ -156,7 +157,7 @@ def _validate_environment() -> str:
         alembic_version = session.scalar(text("SELECT version_num FROM alembic_version"))
     if database_name != "stock_data_sync":
         raise LiveWorkflowError(f"unexpected database: {database_name}")
-    if alembic_version != "20260719_0007":
+    if alembic_version != "20260720_0009":
         raise LiveWorkflowError(f"database migration is not current: {alembic_version}")
     _progress(f"database={database_name}, postgresql={version}, migration={alembic_version}")
     return database_name
@@ -291,19 +292,13 @@ def _plan_and_drain_processing(batch_ids: Sequence[UUID], label: str) -> int:
         f"{label} processing plan: created={result.created_task_count}, "
         f"queued={result.queued_task_count}, blocked={result.blocked_task_count}"
     )
-    transition_count = 0
-    while True:
-        transition = get_processing_runtime().dispatch(
-            now=datetime.now(TIMEZONE),
-            source_batch_ids=batch_ids,
-        )
-        if transition is None:
-            break
-        transition_count += 1
-        if transition.status != ProcessingTaskStatus.SUCCESS:
-            raise LiveWorkflowError(
-                f"{label} processing failed: {transition.process_id} {transition.status.value}"
-            )
+    runtime = get_processing_runtime()
+    try:
+        runtime.wake(now=datetime.now(TIMEZONE))
+        while runtime.inflight_count():
+            time.sleep(0.05)
+    finally:
+        shutdown_processing_runtime()
     with SyncSessionFactory() as session:
         tasks = list(
             session.scalars(
@@ -334,23 +329,51 @@ def _plan_and_drain_processing(batch_ids: Sequence[UUID], label: str) -> int:
             f"tasks={[(str(item.process_id), item.status) for item in not_successful]}, "
             f"dependencies={dependency_failures}"
         )
-    _assert_processing_serial(tasks, label)
-    _progress(f"{label}: {len(tasks)} processing tasks succeeded globally serial")
-    return transition_count
+    max_concurrency = _assert_processing_concurrency(tasks, label)
+    _progress(
+        f"{label}: {len(tasks)} processing tasks succeeded, "
+        f"maxConcurrency={max_concurrency}"
+    )
+    return len(tasks)
 
 
-def _assert_processing_serial(tasks: Sequence[ProcessingTask], label: str) -> None:
+def _assert_processing_concurrency(tasks: Sequence[ProcessingTask], label: str) -> int:
     completed = sorted(
         (task for task in tasks if task.started_at is not None and task.finished_at is not None),
         key=lambda task: task.started_at or datetime.min.replace(tzinfo=UTC),
     )
-    for previous, current in zip(completed, completed[1:], strict=False):
-        if current.started_at is None or previous.finished_at is None:
-            continue
-        if current.started_at < previous.finished_at:
+    events = sorted(
+        (
+            *((task.started_at, 1) for task in completed if task.started_at is not None),
+            *((task.finished_at, -1) for task in completed if task.finished_at is not None),
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    active = 0
+    max_concurrency = 0
+    for _occurred_at, delta in events:
+        active += delta
+        max_concurrency = max(max_concurrency, active)
+    if max_concurrency > settings.processing_max_workers:
+        raise LiveWorkflowError(
+            f"{label} processing concurrency {max_concurrency} exceeds "
+            f"configured limit {settings.processing_max_workers}"
+        )
+
+    by_dataset: dict[str, list[ProcessingTask]] = {}
+    for task in completed:
+        by_dataset.setdefault(task.output_dataset, []).append(task)
+    for dataset, dataset_tasks in by_dataset.items():
+        for previous, current in zip(dataset_tasks, dataset_tasks[1:], strict=False):
+            if current.started_at is None or previous.finished_at is None:
+                continue
+            if current.started_at >= previous.finished_at:
+                continue
             raise LiveWorkflowError(
-                f"{label} processing overlapped: {previous.process_id} and {current.process_id}"
+                f"{label} dataset {dataset} overlapped: "
+                f"{previous.process_id} and {current.process_id}"
             )
+    return max_concurrency
 
 
 def _trading_dates(start_date: date, end_date: date) -> tuple[date, ...]:

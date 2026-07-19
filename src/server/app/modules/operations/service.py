@@ -83,9 +83,9 @@ class OperationsService:
                 provider_p95_duration_ms=_optional_float(counts["provider_p95"]),
             ),
             quota=quota,
-            current_processing=next(
-                (item for item in queue.items if item.status == "running"), None
-            ),
+            current_processing_tasks=[
+                item for item in queue.items if item.status == "running"
+            ],
             recent_batches=[self._batch_item(row, now) for row in batch_rows],
             recent_alerts=alerts.items,
         )

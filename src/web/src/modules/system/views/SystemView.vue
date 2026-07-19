@@ -119,17 +119,22 @@ function formatBytes(value: number | undefined): string {
             ><el-icon><SetUp /></el-icon
           ></span>
           <el-tag
-            :type="(resources?.scheduler.processingRunningCount ?? 0) <= 1 ? 'success' : 'danger'"
+            :type="
+              (resources?.scheduler.processingRunningCount ?? 0) <=
+              (resources?.scheduler.processingMaxWorkers ?? 0)
+                ? 'success'
+                : 'danger'
+            "
           >
             {{
               resourcesLoading
                 ? '检查中'
-                : `${resources?.scheduler.processingRunningCount ?? 0} 个运行中`
+                : `${resources?.scheduler.processingRunningCount ?? 0} / ${resources?.scheduler.processingMaxWorkers ?? '--'} 运行中`
             }}
           </el-tag>
         </div>
         <h3>加工执行器</h3>
-        <p>全局串行槽位，正常值为 0 或 1</p>
+        <p>受控并发执行；同一数据集保持串行发布</p>
       </el-card>
     </div>
 

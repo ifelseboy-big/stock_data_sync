@@ -169,8 +169,11 @@ class ProcessingRepository:
         *,
         now: datetime,
         advisory_lock_id: int,
+        max_running_tasks: int = 1,
         source_batch_ids: Sequence[UUID] | None = None,
     ) -> ClaimedProcessingTask | None:
+        if max_running_tasks < 1:
+            raise ValueError("max_running_tasks must be positive")
         with self._session_factory() as session, session.begin():
             lock_acquired = session.scalar(
                 text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
@@ -183,15 +186,19 @@ class ProcessingRepository:
                 .select_from(ProcessingTask)
                 .where(ProcessingTask.status == ProcessingTaskStatus.RUNNING.value)
             )
-            if running_count:
+            if int(running_count or 0) >= max_running_tasks:
                 return None
+            running_datasets = select(ProcessingTask.output_dataset).where(
+                ProcessingTask.status == ProcessingTaskStatus.RUNNING.value
+            )
             task_statement = select(ProcessingTask).where(
                 or_(
                     ProcessingTask.status == ProcessingTaskStatus.QUEUED.value,
                     (ProcessingTask.status == ProcessingTaskStatus.RETRY_WAIT.value)
                     & (ProcessingTask.next_retry_at.is_not(None))
                     & (ProcessingTask.next_retry_at <= now),
-                )
+                ),
+                ProcessingTask.output_dataset.not_in(running_datasets),
             )
             if source_batch_ids is not None:
                 if not source_batch_ids:
@@ -426,12 +433,16 @@ class ProcessingRepository:
                 current_scope_keys = {
                     collection_task.scope_key for collection_task, _asset in current_rows
                 }
-                latest_rows = self._latest_raw_assets(
-                    session,
-                    source_batch=source_batch,
-                    api_name=dependency.name,
-                    scope=dependency.scope,
-                    business_date=task.business_date,
+                latest_rows = (
+                    []
+                    if current_rows and not dependency.merge_previous_scopes
+                    else self._latest_raw_assets(
+                        session,
+                        source_batch=source_batch,
+                        api_name=dependency.name,
+                        scope=dependency.scope,
+                        business_date=task.business_date,
+                    )
                 )
                 selected_rows: list[tuple[CollectionTask, RawDataAsset | None]] = [
                     (collection_task, asset) for collection_task, asset in current_rows

@@ -25,8 +25,8 @@ def _service(*scalar_results: tuple[str, ...]) -> tuple[OperationCommandService,
 
 
 @pytest.mark.asyncio
-async def test_repair_defers_both_dynamic_member_apis_until_their_masters_publish() -> None:
-    service, session = _service((), (), ())
+async def test_repair_only_defers_ths_members_until_their_master_publishes() -> None:
+    service, session = _service((), ())
     specs = tuple(
         service._api_specs.get(api_name)
         for api_name in ("dc_concept", "dc_concept_cons", "ths_index", "ths_member")
@@ -39,20 +39,24 @@ async def test_repair_defers_both_dynamic_member_apis_until_their_masters_publis
         command_id=uuid4(),
     )
 
-    assert {spec.api_name for spec in planned} == {"dc_concept", "ths_index"}
-    assert deferred_count == 2
+    assert {spec.api_name for spec in planned} == {
+        "dc_concept",
+        "dc_concept_cons",
+        "ths_index",
+    }
+    assert deferred_count == 1
     stages = [
         call.args[0]
         for call in session.add.call_args_list
         if isinstance(call.args[0], DeferredCollectionStage)
     ]
-    assert {stage.api_name for stage in stages} == {"dc_concept_cons", "ths_member"}
+    assert {stage.api_name for stage in stages} == {"ths_member"}
     assert {stage.batch_type for stage in stages} == {BatchType.REPAIR.value}
 
 
 @pytest.mark.asyncio
-async def test_dynamic_member_apis_run_immediately_when_published_masters_are_reused() -> None:
-    service, session = _service(("DC001",), ("885001.TI",), ("700001.TI",))
+async def test_member_apis_run_immediately_when_ths_master_is_reused() -> None:
+    service, session = _service(("885001.TI",), ("700001.TI",))
     specs = tuple(
         service._api_specs.get(api_name) for api_name in ("dc_concept_cons", "ths_member")
     )
@@ -70,8 +74,8 @@ async def test_dynamic_member_apis_run_immediately_when_published_masters_are_re
 
 
 @pytest.mark.asyncio
-async def test_backfill_waits_for_fresh_theme_master_selected_in_the_same_command() -> None:
-    service, session = _service(("OLD001",))
+async def test_backfill_collects_theme_master_and_paginated_members_together() -> None:
+    service, session = _service()
     specs = tuple(
         service._api_specs.get(api_name) for api_name in ("dc_concept", "dc_concept_cons")
     )
@@ -83,9 +87,6 @@ async def test_backfill_waits_for_fresh_theme_master_selected_in_the_same_comman
         command_id=uuid4(),
     )
 
-    assert [spec.api_name for spec in planned] == ["dc_concept"]
-    assert deferred_count == 1
-    stage = session.add.call_args.args[0]
-    assert isinstance(stage, DeferredCollectionStage)
-    assert stage.api_name == "dc_concept_cons"
-    assert stage.batch_type == BatchType.BACKFILL.value
+    assert [spec.api_name for spec in planned] == ["dc_concept", "dc_concept_cons"]
+    assert deferred_count == 0
+    session.add.assert_not_called()

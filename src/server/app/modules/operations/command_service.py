@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog import ApiSpec, ScheduleGroup, SpecRegistry
 from app.catalog.specs import ParameterValue, RequestScope
-from app.catalog.tushare import theme_member_scopes, ths_member_scopes
+from app.catalog.tushare import ths_member_scopes
 from app.modules.acquisition.models import (
     BatchStatus,
     BatchType,
@@ -35,7 +35,7 @@ from app.modules.processing.models import (
     ProcessingTaskStatus,
 )
 from app.modules.stocks.models import TradeCalendar
-from app.modules.topics.models import ConceptBoard, MarketThemeDaily, ThemeIndex
+from app.modules.topics.models import ConceptBoard, ThemeIndex
 from app.scheduler.catalog import SCHEDULED_JOB_BY_ID, ScheduledJobDefinition
 
 COLLECTION_RETRYABLE = frozenset(
@@ -718,34 +718,6 @@ class OperationCommandService:
     ) -> tuple[tuple[ApiSpec, ...], int]:
         planned_specs = list(specs)
         deferred_count = 0
-        theme_member_spec = next(
-            (spec for spec in planned_specs if spec.api_name == "dc_concept_cons"),
-            None,
-        )
-        if theme_member_spec is not None:
-            if business_date is None:
-                raise OperationCommandError(
-                    "采集东方财富题材成分必须指定业务日期",
-                    status_code=422,
-                )
-            planned_specs = [
-                spec for spec in planned_specs if spec.api_name != theme_member_spec.api_name
-            ]
-            refreshes_theme_master = any(spec.api_name == "dc_concept" for spec in planned_specs)
-            theme_codes = await self._theme_codes(business_date)
-            if theme_codes and not refreshes_theme_master:
-                planned_specs.append(theme_member_spec)
-            else:
-                if not refreshes_theme_master:
-                    planned_specs.append(self._api_specs.get("dc_concept"))
-                self._add_deferred_stage(
-                    command_id=command_id,
-                    api_name=theme_member_spec.api_name,
-                    business_date=business_date,
-                    batch_type=batch_type,
-                )
-                deferred_count += 1
-
         ths_member_spec = next(
             (spec for spec in planned_specs if spec.api_name == "ths_member"),
             None,
@@ -803,28 +775,7 @@ class OperationCommandService:
             if not codes:
                 raise OperationCommandError("同花顺概念和主题主数据尚未发布，不能采集板块成分")
             return ths_member_scopes(codes)
-        if spec.api_name == "dc_concept_cons":
-            if business_date is None:
-                raise OperationCommandError("题材成分采集必须指定业务日期")
-            theme_codes = await self._theme_codes(business_date)
-            if not theme_codes:
-                raise OperationCommandError(
-                    "该日期题材主数据尚未发布，必须先完成dc_concept采集和加工"
-                )
-            return theme_member_scopes(business_date, theme_codes)
         return tuple(spec.scope_builder(business_date))
-
-    async def _theme_codes(self, business_date: date) -> tuple[str, ...]:
-        return tuple(
-            await self._session.scalars(
-                select(MarketThemeDaily.theme_code)
-                .where(
-                    MarketThemeDaily.source == "DC",
-                    MarketThemeDaily.trade_date == business_date,
-                )
-                .order_by(MarketThemeDaily.theme_code)
-            )
-        )
 
     async def _ths_board_codes(self) -> tuple[str, ...]:
         concept_codes = tuple(

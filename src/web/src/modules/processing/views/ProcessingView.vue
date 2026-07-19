@@ -28,7 +28,9 @@ const { data, loading, error, load } = useApiResource(() =>
     pageSize: 50,
   }),
 )
-const currentTask = computed(() => data.value?.items.find((item) => item.status === 'running'))
+const currentTasks = computed(
+  () => data.value?.items.filter((item) => item.status === 'running') ?? [],
+)
 const waitingTasks = computed(
   () => data.value?.items.filter((item) => item.status !== 'running') ?? [],
 )
@@ -71,7 +73,7 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
       { reason: value.reason },
       value,
     )
-    ElMessage.success('加工任务已重新进入全局串行队列')
+    ElMessage.success('加工任务已重新进入受控并发队列')
     retryTarget.value = null
     await Promise.all([load(), loadFailed()])
   } catch (error) {
@@ -84,24 +86,26 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
 
 <template>
   <section>
-    <PageHeader title="加工队列" description="加工任务全局串行；重试退避不占用唯一执行槽位。">
+    <PageHeader title="加工队列" description="按配置受控并发执行；同一数据集保持串行发布。">
       <template #actions><el-button :loading="loading" @click="load">刷新</el-button></template>
     </PageHeader>
 
     <el-card shadow="never" class="execution-slot">
-      <div class="execution-slot__label">全局执行槽位</div>
-      <div v-if="currentTask" class="execution-slot__content">
+      <div class="execution-slot__label">当前运行任务 {{ currentTasks.length }} 个</div>
+      <div v-for="task in currentTasks" :key="task.id" class="execution-slot__content">
         <div>
-          <strong>{{ currentTask.taskName }}</strong>
-          <p>{{ currentTask.batchCode }} · {{ currentTask.dataCycle }}</p>
+          <strong>{{ task.taskName }}</strong>
+          <p>{{ task.batchCode }} · {{ task.dataCycle }}</p>
         </div>
         <div class="execution-slot__meta">
-          <StatusTag :status="currentTask.status" />
-          <span>开始于 {{ formatDateTime(currentTask.startedAt) }}</span>
-          <span>已运行 {{ formatDuration(currentTask.durationMs) }}</span>
+          <StatusTag :status="task.status" />
+          <span>开始于 {{ formatDateTime(task.startedAt) }}</span>
+          <span>已运行 {{ formatDuration(task.durationMs) }}</span>
         </div>
       </div>
-      <div v-else class="execution-slot__empty">空闲，等待可执行任务进入队列</div>
+      <div v-if="!currentTasks.length" class="execution-slot__empty">
+        空闲，等待可执行任务进入队列
+      </div>
     </el-card>
 
     <el-card shadow="never" class="panel-card panel-card--table failed-panel">
@@ -266,7 +270,7 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
     <AdminCommandDialog
       :model-value="retryTarget !== null"
       title="重试加工任务"
-      :description="`任务：${retryTarget?.taskDisplayName ?? ''}。系统只重新读取已经封存的原始数据，并重新进入全局串行加工队列。`"
+      :description="`任务：${retryTarget?.taskDisplayName ?? ''}。系统只重新读取已经封存的原始数据，并重新进入受控并发加工队列。`"
       confirm-text="确认重试"
       :loading="retryLoading"
       @update:model-value="!$event && (retryTarget = null)"

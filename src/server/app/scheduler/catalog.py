@@ -15,9 +15,9 @@ SCHEDULED_JOB_DEFINITIONS = (
     ScheduledJobDefinition(
         "dispatch-collection-tasks",
         "执行待采集接口",
-        "按修复、日常、历史回填的优先级领取任务，调用 Tushare 并封存原始数据。",
+        "唤醒采集执行器；任务完成后立即补位，按优先级调用 Tushare 并封存原始数据。",
         "runtime",
-        "每 5 秒",
+        "每 5 秒兜底唤醒，繁忙时连续补位",
     ),
     ScheduledJobDefinition(
         "close-collection-batches",
@@ -35,10 +35,10 @@ SCHEDULED_JOB_DEFINITIONS = (
     ),
     ScheduledJobDefinition(
         "dispatch-processing-task",
-        "串行执行清洗入库",
-        "全局一次只执行一个加工任务，完成清洗、质量校验、正式表写入和发布。",
+        "执行清洗入库队列",
+        "唤醒受控并发执行器，连续完成清洗、质量校验、正式表写入和发布。",
         "runtime",
-        "每 5 秒",
+        "每 5 秒兜底唤醒，繁忙时连续补位",
     ),
     ScheduledJobDefinition(
         "reconcile-collection-runtime",
@@ -141,7 +141,7 @@ SCHEDULED_JOB_DEFINITIONS = (
     ScheduledJobDefinition(
         "plan-theme-members",
         "采集东方财富题材成分",
-        "在题材列表就绪后，逐个采集当天东方财富动态题材包含的股票。",
+        "按交易日连续分页采集东方财富动态题材包含的全部股票。",
         "daily",
         "20–21 点每 10 分钟",
     ),

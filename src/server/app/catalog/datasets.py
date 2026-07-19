@@ -423,7 +423,7 @@ MARKET_THEME_DAILY_DATASET = DatasetSpec(
             DependencyKind.DATASET_RELEASE, "trade_calendar", ReleaseScope.GLOBAL
         ),
     ),
-    write_strategy=WriteStrategy.REPLACE_DATE,
+    write_strategy=WriteStrategy.UPSERT_KEY,
     release_scope=ReleaseScope.DATE,
     quality_rules=(
         QualityRuleSpec("natural_key_unique", {"columns": ("source", "theme_code", "trade_date")}),
@@ -435,7 +435,12 @@ MARKET_THEME_MEMBER_DAILY_DATASET = DatasetSpec(
     processor="market_theme_member_daily",
     processor_version="1",
     dependencies=(
-        DatasetDependencySpec(DependencyKind.RAW_ASSET, "dc_concept_cons", ReleaseScope.DATE),
+        DatasetDependencySpec(
+            DependencyKind.RAW_ASSET,
+            "dc_concept_cons",
+            ReleaseScope.DATE,
+            merge_previous_scopes=False,
+        ),
         DatasetDependencySpec(
             DependencyKind.DATASET_RELEASE, "market_theme_daily", ReleaseScope.DATE
         ),

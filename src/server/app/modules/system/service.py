@@ -76,6 +76,7 @@ async def get_system_resources(
             status="running" if scheduler_lock_held else "stopped",
             singleton_lock_held=scheduler_lock_held,
             processing_running_count=int(processing_running or 0),
+            processing_max_workers=config.processing_max_workers,
         ),
         storage=StorageResources(
             level=capacity.level.value,

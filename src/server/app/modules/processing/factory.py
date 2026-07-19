@@ -92,15 +92,24 @@ def get_processors() -> dict[str, DatasetProcessor]:
 @lru_cache
 def get_processing_runtime() -> ProcessingRuntime:
     repository = get_processing_repository()
+    timezone = ZoneInfo(settings.scheduler_timezone)
     executor = ProcessingExecutor(
         repository=repository,
         dataset_specs=get_dataset_specs(),
         processors=get_processors(),
         asset_store=get_raw_asset_store(),
-        timezone=ZoneInfo(settings.scheduler_timezone),
+        timezone=timezone,
     )
     return ProcessingRuntime(
         repository=repository,
         executor=executor,
         advisory_lock_id=settings.processing_advisory_lock_id,
+        max_workers=settings.processing_max_workers,
+        timezone=timezone,
     )
+
+
+def shutdown_processing_runtime() -> None:
+    if get_processing_runtime.cache_info().currsize:
+        get_processing_runtime().shutdown()
+        get_processing_runtime.cache_clear()

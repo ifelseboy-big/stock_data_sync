@@ -189,11 +189,12 @@ class TushareProvider:
             ) from exc
         except Exception as exc:
             status = "error"
-            error_code = _classify_tushare_error(str(exc))
+            detail = _upstream_error_detail(exc)
+            error_code = _classify_tushare_error(detail)
             raise ProviderError(
-                f"Tushare API {api_name} failed",
+                f"Tushare API {api_name} failed: {detail}",
                 error_code=error_code,
-                retryable=False,
+                retryable=error_code == "RATE_LIMITED",
                 request_count=request_count,
             ) from exc
         finally:
@@ -208,6 +209,11 @@ class TushareProvider:
 def _classify_tushare_error(message: str) -> str:
     normalized = message.casefold()
     classifications = (
+        (("每分钟", "访问"), "RATE_LIMITED"),
+        (("访问频次",), "RATE_LIMITED"),
+        (("访问次数", "超过"), "RATE_LIMITED"),
+        (("rate limit",), "RATE_LIMITED"),
+        (("too many requests",), "RATE_LIMITED"),
         (("token", "无效"), "TOKEN_INVALID"),
         (("token", "invalid"), "TOKEN_INVALID"),
         (("权限",), "PERMISSION_DENIED"),
@@ -221,6 +227,11 @@ def _classify_tushare_error(message: str) -> str:
         if all(fragment in normalized for fragment in fragments):
             return code
     return "PROVIDER_ERROR"
+
+
+def _upstream_error_detail(exc: Exception) -> str:
+    detail = " ".join(str(exc).split())
+    return (detail or type(exc).__name__)[:500]
 
 
 def _serialize_tushare_params(params: dict[str, object]) -> dict[str, object]:

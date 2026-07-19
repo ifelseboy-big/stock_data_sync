@@ -1,9 +1,10 @@
 import os
 from datetime import date, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.catalog import (
@@ -16,9 +17,9 @@ from app.catalog import (
 )
 from app.db.sync_session import SyncSessionFactory
 from app.modules.acquisition.domain import TaskBlueprint
-from app.modules.acquisition.models import BatchType
+from app.modules.acquisition.models import BatchStatus, BatchType, CollectionBatch
 from app.modules.acquisition.repository import AcquisitionRepository
-from app.modules.processing.models import DatasetRelease
+from app.modules.processing.models import DatasetRelease, ProcessingTask, ProcessingTaskStatus
 from app.modules.processing.processors.base import PreparedDataset, PublicationResult
 from app.modules.processing.repository import ProcessingRepository
 from app.storage import RawAssetMetadata
@@ -58,6 +59,74 @@ class FailingProcessor(NoopProcessor):
     ) -> PublicationResult:
         del session, prepared, published_at
         raise RuntimeError("publication failed")
+
+
+def test_processing_claim_respects_worker_limit_and_dataset_mutex() -> None:
+    now = datetime(2037, 1, 20, 8, tzinfo=TIMEZONE)
+    shared_first_id = uuid4()
+    shared_second_id = uuid4()
+    independent_id = uuid4()
+    batches = tuple(uuid4() for _ in range(3))
+    with SyncSessionFactory() as session, session.begin():
+        session.add_all(
+            CollectionBatch(
+                batch_id=batch_id,
+                batch_type=BatchType.BACKFILL.value,
+                business_date=date(2037, 1, 20 + index),
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=now + timedelta(seconds=index),
+                closed_at=now,
+            )
+            for index, batch_id in enumerate(batches)
+        )
+        session.add_all(
+            (
+                _queued_process(shared_first_id, batches[0], "shared", now, priority=100),
+                _queued_process(shared_second_id, batches[1], "shared", now, priority=101),
+                _queued_process(independent_id, batches[2], "independent", now, priority=102),
+            )
+        )
+
+    repository = ProcessingRepository(SyncSessionFactory)
+    first = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_903,
+        max_running_tasks=3,
+    )
+    second = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_903,
+        max_running_tasks=3,
+    )
+    third = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_903,
+        max_running_tasks=3,
+    )
+
+    assert first is not None and first.process_id == shared_first_id
+    assert second is not None and second.process_id == independent_id
+    assert third is None
+
+    with SyncSessionFactory() as session, session.begin():
+        session.execute(
+            update(ProcessingTask)
+            .where(ProcessingTask.process_id == shared_first_id)
+            .values(status=ProcessingTaskStatus.SUCCESS.value, finished_at=now)
+        )
+    shared_second = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_903,
+        max_running_tasks=3,
+    )
+    assert shared_second is not None and shared_second.process_id == shared_second_id
+
+    with SyncSessionFactory() as session, session.begin():
+        session.execute(
+            update(ProcessingTask)
+            .where(ProcessingTask.process_id.in_((independent_id, shared_second_id)))
+            .values(status=ProcessingTaskStatus.SUCCESS.value, finished_at=now)
+        )
 
 
 def test_processing_dependencies_and_global_slot_roundtrip() -> None:
@@ -251,4 +320,25 @@ def _dataset(
         write_strategy=WriteStrategy.UPSERT_KEY,
         release_scope=ReleaseScope.DATE,
         quality_rules=(QualityRuleSpec("test"),),
+    )
+
+
+def _queued_process(
+    process_id: UUID,
+    batch_id: UUID,
+    dataset: str,
+    now: datetime,
+    *,
+    priority: int,
+) -> ProcessingTask:
+    return ProcessingTask(
+        process_id=process_id,
+        source_batch_id=batch_id,
+        process_type="noop@1",
+        business_date=now.date(),
+        output_dataset=dataset,
+        output_version=uuid4(),
+        status=ProcessingTaskStatus.QUEUED.value,
+        priority=priority,
+        queued_at=now,
     )

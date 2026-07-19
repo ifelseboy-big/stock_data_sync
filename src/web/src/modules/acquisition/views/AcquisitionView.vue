@@ -435,7 +435,7 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
         :title="
           manualMode === 'backfill'
             ? `只为交易日生成批次，单次最多 ${commandOptions?.maxBackfillDays ?? '--'} 天。`
-            : '修复批次只重新采集所选原始接口，后续加工仍由全局串行调度。'
+            : '修复批次只重新采集所选原始接口，后续加工进入受控并发队列。'
         "
         type="warning"
         :closable="false"

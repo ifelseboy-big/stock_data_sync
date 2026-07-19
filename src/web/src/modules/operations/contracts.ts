@@ -144,7 +144,7 @@ export interface OperationsOverview {
   generatedAt: string
   metrics: OverviewMetrics
   quota: QuotaSnapshot | null
-  currentProcessing: ProcessingQueueItem | null
+  currentProcessingTasks: ProcessingQueueItem[]
   recentBatches: AcquisitionBatchItem[]
   recentAlerts: AlertItem[]
 }

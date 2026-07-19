@@ -56,11 +56,12 @@ class Settings(BaseSettings):
     scheduler_advisory_lock_id: int = 731_500_001
     processing_advisory_lock_id: int = 731_500_002
     scheduler_max_workers: int = Field(default=4, ge=1, le=32)
-    scheduler_poll_seconds: int = Field(default=30, ge=5, le=300)
+    scheduler_poll_seconds: int = Field(default=10, ge=5, le=300)
     scheduler_execution_retention_days: int = Field(default=30, ge=7, le=365)
     partition_months_ahead: int = Field(default=3, ge=0, le=24)
     collection_max_workers: int = Field(default=4, ge=1, le=16)
     collection_running_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
+    processing_max_workers: int = Field(default=3, ge=1, le=8)
     processing_running_timeout_seconds: int = Field(default=21600, ge=300, le=172800)
 
     @model_validator(mode="after")

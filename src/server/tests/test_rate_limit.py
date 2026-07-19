@@ -1,3 +1,5 @@
+import pytest
+
 from app.integrations.rate_limit import RateLimitPolicy, SmoothRateLimiter
 
 
@@ -26,3 +28,20 @@ def test_smooth_rate_limiter_spaces_requests_evenly() -> None:
 
     assert waits == [0.0, 0.5, 0.5]
     assert fake_time.sleeps == [0.5, 0.5]
+
+
+def test_480_request_budget_never_places_more_than_480_requests_in_one_minute() -> None:
+    fake_time = FakeTime()
+    limiter = SmoothRateLimiter(
+        RateLimitPolicy(requests=480, window_seconds=60),
+        clock=fake_time.monotonic,
+        sleeper=fake_time.sleep,
+    )
+
+    request_times: list[float] = []
+    for _ in range(481):
+        limiter.acquire()
+        request_times.append(fake_time.now)
+
+    assert request_times[479] == pytest.approx(59.875)
+    assert request_times[480] == pytest.approx(60.0)

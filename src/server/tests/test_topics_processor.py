@@ -7,12 +7,13 @@ import pyarrow as pa
 import pytest
 
 from app.catalog import ApiSpec
-from app.catalog.tushare import THS_INDEX_SPEC, TOP_LIST_SPEC
+from app.catalog.tushare import DC_CONCEPT_CONS_SPEC, THS_INDEX_SPEC, TOP_LIST_SPEC
 from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.processors.topics import (
     ConceptBoardProcessor,
     DatedRows,
+    MarketThemeMemberDailyProcessor,
     StockTopListDailyProcessor,
     ThemeIndexProcessor,
 )
@@ -139,6 +140,42 @@ def test_top_list_processor_still_rejects_true_duplicate_conflicts(tmp_path: Pat
         )
 
 
+def test_theme_member_processor_deduplicates_identical_paged_rows(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    row = _theme_member_row()
+    dependency = _asset(store, batch_id, DC_CONCEPT_CONS_SPEC, [row, row])
+
+    prepared = MarketThemeMemberDailyProcessor().prepare(
+        _task(batch_id),
+        (dependency,),
+        store,
+    )
+
+    payload = cast(DatedRows, prepared.payload)
+    assert len(payload.rows) == 1
+    assert prepared.rows_read == 2
+    assert prepared.rows_rejected == 1
+    assert prepared.warning_messages == (
+        "dc_concept_cons 返回 1 条完全重复记录，加工时已确定性去重",
+    )
+
+
+def test_theme_member_processor_rejects_conflicting_paged_rows(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    first = _theme_member_row()
+    second = first | {"reason": "不同的入选原因"}
+    dependency = _asset(store, batch_id, DC_CONCEPT_CONS_SPEC, [first, second])
+
+    with pytest.raises(ProcessingError, match="conflicting duplicate key"):
+        MarketThemeMemberDailyProcessor().prepare(
+            _task(batch_id),
+            (dependency,),
+            store,
+        )
+
+
 def _top_list_row() -> dict[str, object]:
     return {
         "trade_date": "20260713",
@@ -156,6 +193,19 @@ def _top_list_row() -> dict[str, object]:
         "amount_rate": None,
         "float_values": 1039680000.0,
         "reason": "北交所股票连续3个交易日内日收盘价涨跌幅偏离值累计达到+40%(-40%)",
+    }
+
+
+def _theme_member_row() -> dict[str, object]:
+    return {
+        "ts_code": "000066.SZ",
+        "trade_date": "20260713",
+        "name": "中国长城",
+        "theme_code": "000677.DC",
+        "industry_code": "BK0735",
+        "industry": "计算机设备",
+        "reason": "车联网云",
+        "hot_num": 228,
     }
 
 

@@ -34,7 +34,6 @@ def test_deferred_collection_stages_plan_both_dynamic_member_batches(monkeypatch
     stage_result.all.return_value = (theme_stage, ths_stage)
     session.scalars.side_effect = [
         stage_result,
-        ("DC001", "DC002"),
         ("concept_board", "theme_index"),
         ("885001.TI",),
         ("700001.TI",),
@@ -67,10 +66,7 @@ def test_deferred_collection_stages_plan_both_dynamic_member_batches(monkeypatch
     assert theme_plan.batch_type == BatchType.BACKFILL
     assert [
         scope.scope_key for scope in theme_plan.api_specs[0].scope_builder(date(2026, 7, 17))
-    ] == [
-        "trade_date=20260717;theme_code=DC001",
-        "trade_date=20260717;theme_code=DC002",
-    ]
+    ] == ["trade_date=20260717"]
     assert ths_plan.batch_type == BatchType.REPAIR
     assert [scope.scope_key for scope in ths_plan.api_specs[0].scope_builder(None)] == [
         "ts_code=700001.TI",

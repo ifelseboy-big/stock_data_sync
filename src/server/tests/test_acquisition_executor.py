@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -82,6 +82,7 @@ def _spec(
     *,
     split_policy: SplitPolicy = SplitPolicy.OFFSET,
     empty_policy: EmptyPolicy = EmptyPolicy.RETRY_UNTIL_CUTOFF,
+    cutoff_time: time | None = None,
 ) -> ApiSpec:
     return ApiSpec(
         api_name="daily",
@@ -96,16 +97,20 @@ def _spec(
         split_policy=split_policy,
         row_limit=2,
         empty_policy=empty_policy,
-        retry_policy=RetryPolicy(initial_wait_seconds=1, max_wait_seconds=10),
+        retry_policy=RetryPolicy(
+            initial_wait_seconds=1,
+            max_wait_seconds=10,
+            cutoff_time=cutoff_time,
+        ),
         date_extractor=lambda record: datetime.strptime(str(record["trade_date"]), "%Y%m%d").date(),
     )
 
 
-def _task() -> ClaimedCollectionTask:
+def _task(*, batch_type: BatchType = BatchType.DAILY) -> ClaimedCollectionTask:
     return ClaimedCollectionTask(
         task_id=uuid4(),
         batch_id=uuid4(),
-        batch_type=BatchType.DAILY,
+        batch_type=batch_type,
         business_date=date(2026, 7, 17),
         provider="TUSHARE",
         api_name="daily",
@@ -177,6 +182,21 @@ def test_required_empty_result_enters_persistent_retry_wait(tmp_path: Path) -> N
     assert transition.status == CollectionTaskStatus.RETRY_WAIT
     assert transition.next_retry_at is not None
     assert tuple(tmp_path.rglob("asset.parquet")) == ()
+
+
+def test_historical_backfill_retry_ignores_daily_cutoff(tmp_path: Path) -> None:
+    provider = FakeProvider([_table([])])
+    repository = FakeRepository()
+
+    transition = _executor(
+        tmp_path,
+        provider,
+        repository,
+        _spec(cutoff_time=time(hour=0)),
+    ).execute(_task(batch_type=BatchType.BACKFILL))
+
+    assert transition.status == CollectionTaskStatus.RETRY_WAIT
+    assert transition.next_retry_at is not None
 
 
 def test_allowed_empty_result_seals_zero_row_asset(tmp_path: Path) -> None:

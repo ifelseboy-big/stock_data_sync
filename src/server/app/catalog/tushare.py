@@ -123,19 +123,6 @@ def ths_member_scopes(codes: tuple[str, ...]) -> tuple[RequestScope, ...]:
     return tuple(RequestScope(f"ts_code={code}", {"ts_code": code}) for code in sorted(set(codes)))
 
 
-def theme_member_scopes(
-    business_date: date,
-    theme_codes: tuple[str, ...],
-) -> tuple[RequestScope, ...]:
-    return tuple(
-        RequestScope(
-            f"trade_date={business_date:%Y%m%d};theme_code={theme_code}",
-            {"trade_date": business_date, "theme_code": theme_code},
-        )
-        for theme_code in sorted(set(theme_codes))
-    )
-
-
 def _dynamic_scopes_required(business_date: date | None) -> tuple[RequestScope, ...]:
     del business_date
     raise ValueError("this API requires entity scopes resolved from published master data")
@@ -826,10 +813,13 @@ DC_CONCEPT_CONS_SPEC = ApiSpec(
         string_fields=frozenset(DC_CONCEPT_CONS_FIELDS) - {"hot_num"},
         integer_fields=frozenset({"hot_num"}),
     ),
-    natural_key=("theme_code", "trade_date", "ts_code"),
+    # The API occasionally returns byte-for-byte duplicate rows across OFFSET
+    # pages. Preserve the raw response and deduplicate only during processing;
+    # conflicting rows with the same business key still fail publication.
+    natural_key=(),
     schedule_group=ScheduleGroup.DELAYED,
-    scope_builder=_dynamic_scopes_required,
-    split_policy=SplitPolicy.THEME,
+    scope_builder=_trade_date_scope,
+    split_policy=SplitPolicy.OFFSET,
     row_limit=3_000,
     empty_policy=EmptyPolicy.ALLOWED,
     retry_policy=RetryPolicy(max_attempts=3, initial_wait_seconds=120, max_wait_seconds=900),

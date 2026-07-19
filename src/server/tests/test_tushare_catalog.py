@@ -9,6 +9,7 @@ from app.catalog.presentation import (
 from app.catalog.tushare import (
     DAILY_FINAL_SPECS,
     DAILY_LATE_SPECS,
+    DC_CONCEPT_CONS_SPEC,
     DELAYED_ETF_SPECS,
     DELAYED_THEME_SPECS,
     ETF_BASIC_SPEC,
@@ -27,7 +28,6 @@ from app.catalog.tushare import (
     TRADE_CAL_SPEC,
     build_tushare_api_registry,
     next_year_trade_calendar_scopes,
-    theme_member_scopes,
     ths_member_scopes,
 )
 from app.modules.operations.schemas import CreateBackfillCommand
@@ -144,7 +144,7 @@ def test_etf_catalog_uses_status_and_exchange_scopes() -> None:
     ]
 
 
-def test_special_catalog_uses_explicit_entity_splitting() -> None:
+def test_special_catalog_uses_entity_splitting_and_date_pagination() -> None:
     assert {spec.api_name for spec in MASTER_SPECIAL_SPECS} == {
         "ths_index",
         "index_basic",
@@ -160,12 +160,10 @@ def test_special_catalog_uses_explicit_entity_splitting() -> None:
         "ts_code=885001.TI",
         "ts_code=885002.TI",
     ]
+    assert DC_CONCEPT_CONS_SPEC.split_policy == SplitPolicy.OFFSET
     assert [
-        scope.scope_key for scope in theme_member_scopes(date(2026, 7, 17), ("1001", "1002"))
-    ] == [
-        "trade_date=20260717;theme_code=1001",
-        "trade_date=20260717;theme_code=1002",
-    ]
+        scope.scope_key for scope in DC_CONCEPT_CONS_SPEC.scope_builder(date(2026, 7, 17))
+    ] == ["trade_date=20260717"]
 
 
 def test_index_catalog_uses_configured_index_and_month_scopes() -> None:

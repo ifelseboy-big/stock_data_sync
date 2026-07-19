@@ -5,7 +5,7 @@ import pyarrow as pa
 import pytest
 from pydantic import SecretStr
 
-from app.common.errors import ConfigurationError
+from app.common.errors import ConfigurationError, ProviderError
 from app.core.config import Settings
 from app.integrations.market_data.tushare_provider import TushareProvider
 from app.observability.provider_calls import ProviderCallObservation
@@ -72,3 +72,31 @@ def test_tushare_provider_returns_declared_arrow_schema_without_pandas_metadata(
     assert recorder.items[0].endpoint == "trade_cal"
     assert recorder.items[0].status == "SUCCESS"
     assert recorder.items[0].row_count == 1
+
+
+def test_tushare_provider_marks_upstream_rate_limit_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RateLimitedClient:
+        def query(self, api_name: str, **params: object) -> pd.DataFrame:
+            del api_name, params
+            raise RuntimeError("抱歉，您每分钟最多访问该接口450次")
+
+    monkeypatch.setattr(
+        "app.integrations.market_data.tushare_provider.ts.pro_api",
+        lambda token, timeout: RateLimitedClient(),
+    )
+    config = Settings(tushare_token=SecretStr("test-token"), tushare_max_attempts=1)
+    schema = pa.schema((pa.field("trade_date", pa.string()),))
+
+    with pytest.raises(ProviderError) as caught:
+        TushareProvider(config, NoWaitRateLimiter()).query(
+            "dc_concept_cons",
+            fields=tuple(schema.names),
+            schema=schema,
+            trade_date=date(2026, 7, 17),
+        )
+
+    assert caught.value.error_code == "RATE_LIMITED"
+    assert caught.value.retryable is True
+    assert "每分钟最多访问" in str(caught.value)

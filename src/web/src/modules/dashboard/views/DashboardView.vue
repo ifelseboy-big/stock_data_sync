@@ -23,7 +23,7 @@ const quotaPercent = computed(() => {
 
 <template>
   <section aria-labelledby="overview-heading">
-    <PageHeader title="运行概览" description="聚合采集批次、全局串行加工、接口额度和异常信息。">
+    <PageHeader title="运行概览" description="聚合采集批次、受控并发加工、接口预算和异常信息。">
       <template #actions>
         <span class="last-updated">数据时间：{{ formatDateTime(data?.generatedAt) }}</span>
         <el-button :loading="loading" @click="load">刷新</el-button>
@@ -41,7 +41,7 @@ const quotaPercent = computed(() => {
         <MetricCard
           label="加工中任务"
           :value="data?.metrics.processingTaskCount"
-          note="全局执行槽位最多 1 个"
+          note="按配置受控并发，同一数据集串行"
           :icon="SetUp"
           tone="success"
         />
@@ -73,42 +73,52 @@ const quotaPercent = computed(() => {
           <template #header>
             <div class="panel-card__header">
               <div>
-                <h3>当前加工槽位</h3>
-                <p>加工任务全局串行，同一时间仅运行一个。</p>
+                <h3>当前加工任务</h3>
+                <p>互不冲突的数据集按配置并发执行。</p>
               </div>
-              <StatusTag v-if="data?.currentProcessing" :status="data.currentProcessing.status" />
+              <el-tag type="success">
+                {{ data?.currentProcessingTasks.length ?? 0 }} 个运行中
+              </el-tag>
             </div>
           </template>
-          <div v-if="data?.currentProcessing" class="current-task">
-            <strong>{{ data.currentProcessing.taskName }}</strong>
+          <div
+            v-for="task in data?.currentProcessingTasks ?? []"
+            :key="task.id"
+            class="current-task"
+          >
+            <strong>{{ task.taskName }}</strong>
             <dl class="definition-grid">
               <div>
                 <dt>批次</dt>
-                <dd>{{ data.currentProcessing.batchCode }}</dd>
+                <dd>{{ task.batchCode }}</dd>
               </div>
               <div>
                 <dt>数据周期</dt>
-                <dd>{{ data.currentProcessing.dataCycle }}</dd>
+                <dd>{{ task.dataCycle }}</dd>
               </div>
               <div>
                 <dt>依赖数</dt>
-                <dd>{{ data.currentProcessing.dependencyCount }}</dd>
+                <dd>{{ task.dependencyCount }}</dd>
               </div>
               <div>
                 <dt>开始时间</dt>
-                <dd>{{ formatDateTime(data.currentProcessing.startedAt) }}</dd>
+                <dd>{{ formatDateTime(task.startedAt) }}</dd>
               </div>
             </dl>
           </div>
-          <el-empty v-else description="当前没有加工任务占用执行槽位" :image-size="72" />
+          <el-empty
+            v-if="!data?.currentProcessingTasks.length"
+            description="当前没有正在执行的加工任务"
+            :image-size="72"
+          />
         </el-card>
 
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="panel-card__header">
               <div>
-                <h3>Tushare 请求额度</h3>
-                <p>最近 60 秒窗口，额度由服务端配置提供。</p>
+                <h3>Tushare 本地安全预算</h3>
+                <p>最近 60 秒实际请求数；平滑排队是主动保护，不是供应方限流。</p>
               </div>
             </div>
           </template>
@@ -119,11 +129,11 @@ const quotaPercent = computed(() => {
             </div>
             <el-progress :percentage="quotaPercent" :stroke-width="10" :show-text="false" />
             <div class="quota-panel__meta">
-              <span>剩余 {{ data.quota.remainingInCurrentWindow }}</span>
-              <span>发生限流等待的请求 {{ data.quota.delayedRequestCount }}</span>
+              <span>预算余量 {{ data.quota.remainingInCurrentWindow }}</span>
+              <span>平滑排队请求 {{ data.quota.delayedRequestCount }}</span>
             </div>
           </div>
-          <el-empty v-else description="尚未上报接口额度" :image-size="72" />
+          <el-empty v-else description="尚未上报本地请求预算" :image-size="72" />
         </el-card>
       </div>
 
