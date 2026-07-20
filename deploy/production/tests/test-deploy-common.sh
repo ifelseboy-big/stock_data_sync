@@ -110,7 +110,9 @@ grep -Fq 'wait_for_api 30 && return 0' \
 grep -Fq 'if wait_for_api 5; then' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 [[ "$(grep -Ec '^[[:space:]]+wait_for_server$' "$PROJECT_ROOT/deploy/production/bin/stock-data-sync")" == "3" ]]
-grep -Fq 'if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then' \
+grep -Fq 'if ! ensure_postgres_release_config "$target" || \' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq '! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 if grep -Eq 'local release=.*bootstrap=.*\$release' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"; then
