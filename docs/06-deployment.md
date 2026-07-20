@@ -282,10 +282,16 @@ cd /用户指定的主程序目录/current/server
 .venv/bin/python -m alembic -c alembic.ini current
 ```
 
-预期输出包含：
+v0.1.18 预期输出包含：
 
 ```text
 20260720_0009 (head)
+```
+
+当前源码在此基础上新增 `20260720_0010`，为运行记录的恢复状态查询增加成功任务部分索引，不修改已有数据。使用当前源码迁移后的预期输出为：
+
+```text
+20260720_0010 (head)
 ```
 
 详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。

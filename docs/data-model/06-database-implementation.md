@@ -60,6 +60,10 @@ CREATE INDEX idx_processing_retry_due
 ON processing_task (next_retry_at, priority, process_id)
 WHERE status = 'RETRY_WAIT';
 
+CREATE INDEX idx_collection_task_recovery
+ON collection_task (api_name, scope_key, finished_at)
+WHERE status IN ('SUCCESS', 'EMPTY_VALID');
+
 CREATE INDEX idx_dependency_waiting
 ON processing_dependency (process_id, dependency_type, status);
 
@@ -68,14 +72,15 @@ ON processing_dependency (resolved_release_process_id)
 WHERE resolved_release_process_id IS NOT NULL;
 ```
 
-**v0.1.18 数据库结构变更。**该版本包含两个连续的 Alembic revision，均为增量变更，不删除或改写已有业务数据：
+**增量数据库结构变更。**以下 Alembic revision 均为增量变更，不删除或改写已有业务数据：
 
-| Revision | 结构变更 | 运行目的 |
-|-|-|-|
-| `20260720_0008` | 新建 `deferred_collection_stage` 表、唯一约束和 `PENDING` 部分索引 | 持久化 BACKFILL/REPAIR 尚未展开的动态采集阶段，使升级、进程重启或主机恢复后能够继续计划 |
-| `20260720_0009` | 为 `processing_task` 新增可空 `warning_message text` 字段 | 单独记录不阻断成功和发布的数据质量警告，避免与失败原因混用 |
+| Revision | 所属版本 | 结构变更 | 运行目的 |
+|-|-|-|-|
+| `20260720_0008` | v0.1.18 | 新建 `deferred_collection_stage` 表、唯一约束和 `PENDING` 部分索引 | 持久化 BACKFILL/REPAIR 尚未展开的动态采集阶段，使升级、进程重启或主机恢复后能够继续计划 |
+| `20260720_0009` | v0.1.18 | 为 `processing_task` 新增可空 `warning_message text` 字段 | 单独记录不阻断成功和发布的数据质量警告，避免与失败原因混用 |
+| `20260720_0010` | 当前源码，待发布 | 为 `collection_task` 新建 `(api_name, scope_key, finished_at)` 成功状态部分索引 | 加速运行记录、告警和未恢复任务查询，避免按 `batch_id` 前导索引执行大量跳跃扫描 |
 
-升级顺序固定为 `20260719_0007 -> 20260720_0008 -> 20260720_0009`，升级后数据库必须报告 `20260720_0009 (head)`。回退 `0009` 会删除 `warning_message`，回退 `0008` 会删除延迟阶段表；生产环境不得把程序回滚与数据库降级混为同一操作。
+当前源码的升级顺序固定为 `20260719_0007 -> 20260720_0008 -> 20260720_0009 -> 20260720_0010`，完成后数据库必须报告 `20260720_0010 (head)`。v0.1.18 的目标仍是 `20260720_0009`。回退 `0010` 只删除恢复查询索引；回退 `0009` 会删除 `warning_message`，回退 `0008` 会删除延迟阶段表。生产环境不得把程序回滚与数据库降级混为同一操作。
 
 批次创建使用固定计划时间，不使用实际执行时间。例如16:10阶段即使服务17:00恢复，scheduled_at仍沿用当日DAILY批次的08:45计划时隙，从而命中原批次而不是生成重复批次。output_version由source_batch_id、output_dataset、process_type中的处理器版本和business_date计算确定性UUID；同一批次计划不会重复生成加工任务，规则升级或新的REPAIR批次会得到新版本。
 

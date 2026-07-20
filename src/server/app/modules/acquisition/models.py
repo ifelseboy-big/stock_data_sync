@@ -120,6 +120,13 @@ class CollectionTask(Base):
             "task_id",
             postgresql_where=text("status = 'RETRY_WAIT'"),
         ),
+        Index(
+            "idx_collection_task_recovery",
+            "api_name",
+            "scope_key",
+            "finished_at",
+            postgresql_where=text("status IN ('SUCCESS', 'EMPTY_VALID')"),
+        ),
     )
 
     task_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

@@ -42,7 +42,7 @@ error_message text null -- 最近一次错误说明
 unique (batch_id, api_name, scope_key) -- 同一批次内接口和调用范围唯一
 ```
 
-一个任务只对应一个接口和一个确定范围。scope_key用于表达交易日、股票批次、指数代码或概念代码，避免重复调度。
+一个任务只对应一个接口和一个确定范围。scope_key用于表达交易日、股票批次、指数代码或概念代码，避免重复调度。普通运行记录分页不计算恢复状态，只执行基础合并、计数、排序和分页；只有“未恢复失败任务”筛选需要判断失败任务是否已被同接口、同范围的后续成功任务恢复。`idx_collection_task_recovery (api_name, scope_key, finished_at) WHERE status IN ('SUCCESS','EMPTY_VALID')` 为该筛选提供直接访问路径，避免对以 `batch_id` 开头的批次唯一索引执行大量跳跃扫描。
 
 ## raw_data_asset
 

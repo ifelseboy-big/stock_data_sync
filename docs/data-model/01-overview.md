@@ -191,6 +191,10 @@ CREATE INDEX idx_task_retry_due
     ON collection_task (next_retry_at, task_id)
     WHERE status = 'RETRY_WAIT';
 
+CREATE INDEX idx_collection_task_recovery
+    ON collection_task (api_name, scope_key, finished_at)
+    WHERE status IN ('SUCCESS', 'EMPTY_VALID');
+
 CREATE INDEX idx_raw_asset_api_date
     ON raw_data_asset (api_name, business_date, fetched_at);
 

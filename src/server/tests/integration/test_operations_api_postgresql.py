@@ -187,16 +187,28 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                 blocked_reason="required asset is missing",
             )
         )
-        session.add(
-            DatasetRelease(
-                dataset_name="test_daily",
-                scope_type="DATE",
-                scope_key=now.date().isoformat(),
-                business_date=now.date(),
-                version_id=uuid4(),
-                process_id=published_process_id,
-                row_count=10,
-                published_at=now - timedelta(minutes=6),
+        session.add_all(
+            (
+                DatasetRelease(
+                    dataset_name="test_daily",
+                    scope_type="DATE",
+                    scope_key=now.date().isoformat(),
+                    business_date=now.date(),
+                    version_id=uuid4(),
+                    process_id=published_process_id,
+                    row_count=10,
+                    published_at=now - timedelta(minutes=6),
+                ),
+                DatasetRelease(
+                    dataset_name="recovered_daily",
+                    scope_type="DATE",
+                    scope_key=now.date().isoformat(),
+                    business_date=now.date(),
+                    version_id=uuid4(),
+                    process_id=recovered_success_id,
+                    row_count=10,
+                    published_at=now - timedelta(minutes=2),
+                ),
             )
         )
         session.add_all(
@@ -232,6 +244,10 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         releases = await client.get("/api/v1/operations/releases")
         provider = await client.get("/api/v1/operations/providers/tushare")
         runs = await client.get("/api/v1/operations/runs")
+        unresolved_runs = await client.get(
+            "/api/v1/operations/runs"
+            "?runType=processing&status=failed&unresolvedOnly=true&pageSize=200"
+        )
         alerts = await client.get("/api/v1/operations/alerts")
         command_options = await client.get("/api/v1/operations/command-options")
         resources = await client.get("/api/v1/system/resources")
@@ -244,6 +260,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         releases,
         provider,
         runs,
+        unresolved_runs,
         alerts,
         command_options,
         resources,
@@ -262,6 +279,9 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert any(item["datasetName"] == "test_daily" for item in releases.json()["items"])
     assert any(item["endpoint"] == "daily" for item in provider.json()["endpoints"])
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
+    assert all(
+        item["id"] != str(recovered_failure_id) for item in unresolved_runs.json()["items"]
+    )
     assert resources.json()["database"]["sharedBuffersBytes"] > 0
     assert any(item["id"] == f"processing:{blocked_process_id}" for item in alerts.json()["items"])
     warning_alert = next(

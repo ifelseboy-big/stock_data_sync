@@ -51,6 +51,7 @@ def test_runtime_indexes_match_queue_access_paths() -> None:
         "idx_batch_active_schedule",
         "idx_task_batch_status",
         "idx_task_retry_due",
+        "idx_collection_task_recovery",
         "idx_raw_asset_api_date",
         "uq_processing_output_version",
         "idx_process_batch_status",
@@ -99,7 +100,7 @@ def test_alembic_has_one_head() -> None:
     config = Config(server_dir / "alembic.ini")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260720_0009"]
+    assert script.get_heads() == ["20260720_0010"]
 
 
 def test_runtime_schema_compiles_for_postgresql() -> None:

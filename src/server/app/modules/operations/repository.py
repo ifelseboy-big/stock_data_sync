@@ -523,8 +523,6 @@ class OperationsRepository:
         offset: int,
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
-        recovered_collection = aliased(CollectionTask)
-        recovered_release = aliased(DatasetRelease)
         collection = select(
             CollectionTask.task_id.label("id"),
             literal("acquisition").label("run_type"),
@@ -538,15 +536,6 @@ class OperationsRepository:
             CollectionTask.finished_at.label("finished_at"),
             CollectionTask.error_message.label("error_message"),
             CollectionBatch.scheduled_at.label("sort_time"),
-            select(literal(1))
-            .where(
-                recovered_collection.api_name == CollectionTask.api_name,
-                recovered_collection.scope_key == CollectionTask.scope_key,
-                recovered_collection.status.in_(COLLECTION_SUCCESS),
-                recovered_collection.finished_at > CollectionTask.finished_at,
-            )
-            .exists()
-            .label("recovered"),
         ).join(CollectionBatch, CollectionBatch.batch_id == CollectionTask.batch_id)
         processing = select(
             ProcessingTask.process_id.label("id"),
@@ -561,43 +550,46 @@ class OperationsRepository:
             ProcessingTask.finished_at.label("finished_at"),
             ProcessingTask.error_message.label("error_message"),
             CollectionBatch.scheduled_at.label("sort_time"),
-            select(literal(1))
-            .where(
-                recovered_release.dataset_name == ProcessingTask.output_dataset,
-                or_(
-                    ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
-                    recovered_release.business_date.is_not_distinct_from(
-                        ProcessingTask.business_date
-                    ),
-                ),
-                recovered_release.published_at > CollectionBatch.scheduled_at,
-            )
-            .exists()
-            .label("recovered"),
         ).join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
         statements = []
         if run_type in (None, "acquisition"):
             statements.append(collection.where(CollectionBatch.scheduled_at >= since))
         if run_type in (None, "processing"):
             statements.append(processing.where(CollectionBatch.scheduled_at >= since))
-        combined = union_all(*statements).subquery()
+        combined = union_all(*statements).subquery("combined_runs")
         filtered = select(combined)
         if batch_id is not None:
             filtered = filtered.where(combined.c.batch_id == batch_id)
-        if unresolved_only:
-            filtered = filtered.where(
-                combined.c.recovered.is_(False),
-                or_(combined.c.run_type == "acquisition", combined.c.attempt > 0),
-            )
         status_condition = _run_status_condition(combined, status)
         if status_condition is not None:
             filtered = filtered.where(status_condition)
-        total = await self._session.scalar(select(func.count()).select_from(filtered.subquery()))
+
+        if unresolved_only:
+            candidates = filtered.subquery("candidate_runs")
+            enriched = select(
+                candidates,
+                _run_recovered_expression(candidates),
+            ).subquery("enriched_runs")
+            filtered = select(enriched).where(
+                enriched.c.recovered.is_(False),
+                or_(enriched.c.run_type == "acquisition", enriched.c.attempt > 0),
+            )
+
+        filtered_rows = filtered.subquery("filtered_runs")
+        total = await self._session.scalar(select(func.count()).select_from(filtered_rows))
+        page_rows = (
+            select(filtered_rows)
+            .order_by(filtered_rows.c.sort_time.desc(), filtered_rows.c.id)
+            .offset(offset)
+            .limit(limit)
+            .subquery("page_runs")
+        )
         rows = (
             await self._session.execute(
-                filtered.order_by(combined.c.sort_time.desc(), combined.c.id)
-                .offset(offset)
-                .limit(limit)
+                select(page_rows).order_by(
+                    page_rows.c.sort_time.desc(),
+                    page_rows.c.id,
+                )
             )
         ).mappings()
         return [dict(row) for row in rows], int(total or 0)
@@ -843,6 +835,37 @@ def _run_status_condition(rows: Any, status: str | None) -> Any:
         "blocked": (ProcessingTaskStatus.BLOCKED.value,),
     }.get(status)
     return rows.c.raw_status.in_(values) if values else literal(False)
+
+
+def _run_recovered_expression(rows: Any) -> Any:
+    recovered_collection = aliased(CollectionTask)
+    recovered_release = aliased(DatasetRelease)
+    collection_recovered = (
+        select(literal(1))
+        .where(
+            recovered_collection.api_name == rows.c.task_name,
+            recovered_collection.scope_key == rows.c.scope_key,
+            recovered_collection.status.in_(COLLECTION_SUCCESS),
+            recovered_collection.finished_at > rows.c.finished_at,
+        )
+        .exists()
+    )
+    processing_recovered = (
+        select(literal(1))
+        .where(
+            recovered_release.dataset_name == rows.c.task_name,
+            or_(
+                rows.c.task_name.not_in(DATE_SCOPED_DATASETS),
+                recovered_release.business_date.is_not_distinct_from(rows.c.business_date),
+            ),
+            recovered_release.published_at > rows.c.sort_time,
+        )
+        .exists()
+    )
+    return case(
+        (rows.c.run_type == "acquisition", collection_recovered),
+        else_=processing_recovered,
+    ).label("recovered")
 
 
 def _processing_status_values(status: str | None) -> tuple[str, ...] | None:
