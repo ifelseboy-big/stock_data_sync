@@ -1,17 +1,19 @@
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.catalog import ApiSpec, ScheduleGroup, SpecRegistry
-from app.catalog.specs import ParameterValue, RequestScope
+from app.catalog.datasets import ALL_DATASET_SPECS
+from app.catalog.specs import ParameterValue, ReleaseScope, RequestScope
 from app.catalog.tushare import ths_member_scopes
 from app.modules.acquisition.models import (
     BatchStatus,
@@ -29,6 +31,7 @@ from app.modules.operations.models import (
 from app.modules.operations.schemas import OperationCommandResult
 from app.modules.partitions.service import ensure_partitions_for_range
 from app.modules.processing.models import (
+    DatasetRelease,
     DependencyStatus,
     ProcessingDependency,
     ProcessingTask,
@@ -66,6 +69,11 @@ PROCESSING_MUTABLE = frozenset(
     }
 )
 MAX_BACKFILL_DAYS = 3660
+DATE_SCOPED_DATASETS = tuple(
+    spec.dataset_name
+    for spec in ALL_DATASET_SPECS
+    if spec.release_scope == ReleaseScope.DATE
+)
 
 
 class OperationCommandError(Exception):
@@ -317,6 +325,84 @@ class OperationCommandService:
             apply=apply,
         )
 
+    async def retry_failed_collection_tasks(
+        self,
+        batch_id: UUID,
+        *,
+        reason: str,
+        context: "CommandContext",
+    ) -> OperationCommandResult:
+        async def apply(now: datetime) -> dict[str, object]:
+            source_batch = await self._session.scalar(
+                select(CollectionBatch)
+                .where(CollectionBatch.batch_id == batch_id)
+                .with_for_update()
+            )
+            if source_batch is None:
+                raise OperationCommandError("采集批次不存在", status_code=404)
+
+            recovered_task = aliased(CollectionTask)
+            recovered_batch = aliased(CollectionBatch)
+            recovered = (
+                select(literal(1))
+                .select_from(recovered_task)
+                .join(
+                    recovered_batch,
+                    recovered_batch.batch_id == recovered_task.batch_id,
+                )
+                .where(
+                    recovered_task.api_name == CollectionTask.api_name,
+                    or_(
+                        recovered_task.scope_key == CollectionTask.scope_key,
+                        (CollectionTask.api_name == "dc_concept_cons")
+                        & recovered_batch.business_date.is_not_distinct_from(
+                            source_batch.business_date
+                        ),
+                    ),
+                    recovered_task.status.in_(
+                        (
+                            CollectionTaskStatus.SUCCESS.value,
+                            CollectionTaskStatus.EMPTY_VALID.value,
+                        )
+                    ),
+                    recovered_task.finished_at > CollectionTask.finished_at,
+                )
+                .exists()
+            )
+            tasks = tuple(
+                await self._session.scalars(
+                    select(CollectionTask)
+                    .where(
+                        CollectionTask.batch_id == batch_id,
+                        CollectionTask.status == CollectionTaskStatus.FAILED.value,
+                        ~recovered,
+                    )
+                    .order_by(CollectionTask.api_name, CollectionTask.scope_key)
+                    .with_for_update(of=CollectionTask)
+                )
+            )
+            if not tasks:
+                raise OperationCommandError("该批次没有尚未恢复的失败采集任务")
+            repair_batch_id = await self._create_batch_from_tasks(
+                tasks,
+                source_batch,
+                now=now,
+            )
+            return {
+                "batchId": str(repair_batch_id),
+                "sourceBatchId": str(batch_id),
+                "taskCount": len(tasks),
+            }
+
+        return await self._execute_task_command(
+            action="RETRY_FAILED_COLLECTION_TASKS",
+            target_type="collection_batch",
+            target_id=batch_id,
+            reason=reason,
+            context=context,
+            apply=apply,
+        )
+
     async def transition_collection_task(
         self,
         task_id: UUID,
@@ -381,13 +467,7 @@ class OperationCommandService:
             )
             if unavailable:
                 raise OperationCommandError("加工任务仍有未就绪依赖，不能进入执行队列")
-            task.status = ProcessingTaskStatus.QUEUED.value
-            task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
-            task.next_retry_at = None
-            task.queued_at = now
-            task.started_at = None
-            task.finished_at = None
-            task.error_message = None
+            self._queue_processing_task(task, now)
             return {"processId": str(process_id), "status": task.status}
 
         return await self._execute_task_command(
@@ -395,6 +475,81 @@ class OperationCommandService:
             target_type="processing_task",
             target_id=process_id,
             reason=reason,
+            context=context,
+            apply=apply,
+        )
+
+    async def retry_all_failed_processing_tasks(
+        self,
+        *,
+        reason: str,
+        context: "CommandContext",
+    ) -> OperationCommandResult:
+        async def apply(now: datetime) -> dict[str, object]:
+            recovered_release = aliased(DatasetRelease)
+            recovered = (
+                select(literal(1))
+                .where(
+                    recovered_release.dataset_name == ProcessingTask.output_dataset,
+                    or_(
+                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                        recovered_release.business_date.is_not_distinct_from(
+                            ProcessingTask.business_date
+                        ),
+                    ),
+                    recovered_release.published_at > CollectionBatch.scheduled_at,
+                )
+                .exists()
+            )
+            tasks = tuple(
+                await self._session.scalars(
+                    select(ProcessingTask)
+                    .join(
+                        CollectionBatch,
+                        CollectionBatch.batch_id == ProcessingTask.source_batch_id,
+                    )
+                    .where(
+                        ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
+                        CollectionBatch.scheduled_at >= now - timedelta(days=30),
+                        ~recovered,
+                    )
+                    .order_by(CollectionBatch.scheduled_at, ProcessingTask.process_id)
+                    .with_for_update(of=ProcessingTask)
+                )
+            )
+            if not tasks:
+                raise OperationCommandError("当前没有尚未恢复的失败加工任务")
+
+            unavailable_ids = set(
+                await self._session.scalars(
+                    select(ProcessingDependency.process_id)
+                    .where(
+                        ProcessingDependency.process_id.in_(
+                            tuple(task.process_id for task in tasks)
+                        ),
+                        ProcessingDependency.status != DependencyStatus.READY.value,
+                    )
+                    .distinct()
+                )
+            )
+            retried = tuple(
+                task for task in tasks if task.process_id not in unavailable_ids
+            )
+            if not retried:
+                raise OperationCommandError("全部失败加工任务仍有未就绪依赖，暂不能重试")
+            for task in retried:
+                self._queue_processing_task(task, now)
+            return {
+                "retryCount": len(retried),
+                "skippedDependencyCount": len(tasks) - len(retried),
+            }
+
+        return await self._execute(
+            action="RETRY_ALL_FAILED_PROCESSING_TASKS",
+            target_type="processing_task_set",
+            target_id=None,
+            reason=reason,
+            payload={"reason": reason, "window_days": 30},
             context=context,
             apply=apply,
         )
@@ -808,6 +963,15 @@ class OperationCommandService:
         *,
         now: datetime,
     ) -> UUID:
+        return await self._create_batch_from_tasks((task,), source_batch, now=now)
+
+    async def _create_batch_from_tasks(
+        self,
+        tasks: Sequence[CollectionTask],
+        source_batch: CollectionBatch,
+        *,
+        now: datetime,
+    ) -> UUID:
         task_values = [
             {
                 "task_id": uuid4(),
@@ -817,7 +981,9 @@ class OperationCommandService:
                 "request_params": dict(task.request_params),
                 "max_attempts": task.max_attempts,
             }
+            for task in tasks
         ]
+        task_values.sort(key=lambda item: (str(item["api_name"]), str(item["scope_key"])))
         batch_id = uuid4()
         self._session.add(
             CollectionBatch(
@@ -827,19 +993,30 @@ class OperationCommandService:
                 status=BatchStatus.PENDING.value,
                 scheduled_at=now,
                 plan_version=_plan_version(task_values),
-                expected_task_count=1,
+                expected_task_count=len(task_values),
                 planning_completed_at=now,
             )
         )
-        self._session.add(
+        self._session.add_all(
             CollectionTask(
                 batch_id=batch_id,
                 status=CollectionTaskStatus.PENDING.value,
-                **task_values[0],
+                **task,
             )
+            for task in task_values
         )
         await self._session.flush()
         return batch_id
+
+    @staticmethod
+    def _queue_processing_task(task: ProcessingTask, now: datetime) -> None:
+        task.status = ProcessingTaskStatus.QUEUED.value
+        task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
+        task.next_retry_at = None
+        task.queued_at = now
+        task.started_at = None
+        task.finished_at = None
+        task.error_message = None
 
     async def _block_processing_downstream(self, process_id: UUID, reason: str) -> None:
         dependencies = tuple(

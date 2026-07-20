@@ -371,6 +371,33 @@ async def transition_collection_task(
 
 
 @router.post(
+    "/commands/acquisition-batches/{batch_id}/retry-failed-tasks",
+    response_model=OperationCommandResult,
+    status_code=202,
+)
+async def retry_failed_collection_tasks(
+    batch_id: UUID,
+    payload: TaskCommand,
+    request: Request,
+    db: DbSession,
+    admin: Admin,
+    idempotency_key: IdempotencyKey,
+) -> OperationCommandResult:
+    return await _run_command(
+        OperationCommandService(
+            db, build_tushare_api_registry()
+        ).retry_failed_collection_tasks(
+            batch_id,
+            reason=payload.reason,
+            context=_context(request, admin, idempotency_key),
+        ),
+        db=db,
+        request=request,
+        action="RETRY_FAILED_COLLECTION_TASKS",
+    )
+
+
+@router.post(
     "/commands/processing-tasks/{process_id}/retry",
     response_model=OperationCommandResult,
     status_code=202,
@@ -392,6 +419,31 @@ async def retry_processing_task(
         db=db,
         request=request,
         action="RETRY_PROCESSING_TASK",
+    )
+
+
+@router.post(
+    "/commands/processing-tasks/retry-all-failed",
+    response_model=OperationCommandResult,
+    status_code=202,
+)
+async def retry_all_failed_processing_tasks(
+    payload: TaskCommand,
+    request: Request,
+    db: DbSession,
+    admin: Admin,
+    idempotency_key: IdempotencyKey,
+) -> OperationCommandResult:
+    return await _run_command(
+        OperationCommandService(
+            db, build_tushare_api_registry()
+        ).retry_all_failed_processing_tasks(
+            reason=payload.reason,
+            context=_context(request, admin, idempotency_key),
+        ),
+        db=db,
+        request=request,
+        action="RETRY_ALL_FAILED_PROCESSING_TASKS",
     )
 
 

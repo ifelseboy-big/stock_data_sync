@@ -375,3 +375,151 @@ async def test_manual_commands_are_authenticated_idempotent_and_queue_only() -> 
     assert {stage.status for stage in planned_stages} == {"PLANNED"}
     assert len(planned_batch_ids) == 2
     assert {task.api_name for task in deferred_tasks} == {"dc_concept_cons", "ths_member"}
+
+
+@pytest.mark.asyncio
+async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() -> None:
+    now = datetime.now(UTC)
+    business_date = date(2026, 7, 18)
+    source_batch_id = uuid4()
+    ready_process_id = uuid4()
+    blocked_process_id = uuid4()
+
+    with SyncSessionFactory() as session, session.begin():
+        session.add(
+            CollectionBatch(
+                batch_id=source_batch_id,
+                batch_type=BatchType.DAILY.value,
+                business_date=business_date,
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=now - timedelta(hours=2),
+                plan_version="c" * 64,
+                expected_task_count=2,
+                planning_completed_at=now - timedelta(hours=2),
+                closed_at=now - timedelta(hours=1),
+            )
+        )
+        session.add_all(
+            (
+                CollectionTask(
+                    batch_id=source_batch_id,
+                    provider="TUSHARE",
+                    api_name="daily",
+                    scope_key="trade_date=20260718",
+                    request_params={"trade_date": "20260718"},
+                    status=CollectionTaskStatus.FAILED.value,
+                    attempt_count=3,
+                    max_attempts=3,
+                    finished_at=now - timedelta(hours=1),
+                    error_message="test failure",
+                ),
+                CollectionTask(
+                    batch_id=source_batch_id,
+                    provider="TUSHARE",
+                    api_name="daily_basic",
+                    scope_key="trade_date=20260718",
+                    request_params={"trade_date": "20260718"},
+                    status=CollectionTaskStatus.FAILED.value,
+                    attempt_count=3,
+                    max_attempts=3,
+                    finished_at=now - timedelta(hours=1),
+                    error_message="test failure",
+                ),
+                ProcessingTask(
+                    process_id=ready_process_id,
+                    source_batch_id=source_batch_id,
+                    process_type="bulk_ready@1",
+                    business_date=business_date,
+                    output_dataset="bulk_ready_dataset",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=3,
+                    max_attempts=3,
+                    finished_at=now - timedelta(minutes=30),
+                    error_message="test failure",
+                ),
+                ProcessingTask(
+                    process_id=blocked_process_id,
+                    source_batch_id=source_batch_id,
+                    process_type="bulk_blocked@1",
+                    business_date=business_date,
+                    output_dataset="bulk_blocked_dataset",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=3,
+                    max_attempts=3,
+                    finished_at=now - timedelta(minutes=30),
+                    error_message="test failure",
+                ),
+            )
+        )
+        session.flush()
+        session.add_all(
+            (
+                ProcessingDependency(
+                    process_id=ready_process_id,
+                    dependency_type=DependencyType.RAW_ASSET.value,
+                    dependency_name="daily",
+                    dependency_scope_key="trade_date=20260718",
+                    dependency_scope={"trade_date": "20260718"},
+                    status=DependencyStatus.READY.value,
+                ),
+                ProcessingDependency(
+                    process_id=blocked_process_id,
+                    dependency_type=DependencyType.RAW_ASSET.value,
+                    dependency_name="daily_basic",
+                    dependency_scope_key="trade_date=20260718",
+                    dependency_scope={"trade_date": "20260718"},
+                    status=DependencyStatus.MISSING.value,
+                ),
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        collection_retry = await client.post(
+            f"/api/v1/operations/commands/acquisition-batches/{source_batch_id}/retry-failed-tasks",
+            headers={
+                "Authorization": f"Bearer {ADMIN_TOKEN}",
+                "Idempotency-Key": "bulk-retry-collection-command",
+            },
+            json={"reason": "批量重试失败采集任务"},
+        )
+        processing_retry = await client.post(
+            "/api/v1/operations/commands/processing-tasks/retry-all-failed",
+            headers={
+                "Authorization": f"Bearer {ADMIN_TOKEN}",
+                "Idempotency-Key": "bulk-retry-processing-command",
+            },
+            json={"reason": "批量重试失败加工任务"},
+        )
+
+    assert collection_retry.status_code == 202, collection_retry.text
+    assert collection_retry.json()["result"]["taskCount"] == 2
+    assert processing_retry.status_code == 202, processing_retry.text
+    assert processing_retry.json()["result"] == {
+        "retryCount": 1,
+        "skippedDependencyCount": 1,
+    }
+
+    repair_batch_id = UUID(collection_retry.json()["result"]["batchId"])
+    with SyncSessionFactory() as session:
+        repair_batch = session.get(CollectionBatch, repair_batch_id)
+        repair_tasks = tuple(
+            session.scalars(
+                select(CollectionTask).where(CollectionTask.batch_id == repair_batch_id)
+            )
+        )
+        ready_process = session.get(ProcessingTask, ready_process_id)
+        blocked_process = session.get(ProcessingTask, blocked_process_id)
+
+    assert repair_batch is not None
+    assert repair_batch.expected_task_count == 2
+    assert {task.api_name for task in repair_tasks} == {"daily", "daily_basic"}
+    assert ready_process is not None
+    assert ready_process.status == ProcessingTaskStatus.QUEUED.value
+    assert ready_process.max_attempts == 4
+    assert blocked_process is not None
+    assert blocked_process.status == ProcessingTaskStatus.FAILED.value

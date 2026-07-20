@@ -77,13 +77,13 @@ grep -Fq '<key>ProgramArguments</key><array><string>/bin/bash</string><string>$x
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'stdout_log="$PROGRAM_DIR/logs/launchd/$service.out.log"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
-grep -Fq -- '-c "shared_buffers=2GB"' \
+grep -Fq -- '-c "shared_buffers=1GB"' \
   "$PROJECT_ROOT/deploy/production/bin/run-service"
 grep -Fq 'PostgreSQL 实际配置：shared_buffers=%s' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'PostgreSQL shared_buffers 已生效：$shared_buffers_actual' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
-grep -Fq 'EXPECTED_SHARED_BUFFERS_BYTES="2147483648"' \
+grep -Fq 'EXPECTED_SHARED_BUFFERS_BYTES="1073741824"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'deploy_write_env_value PROCESSING_MAX_WORKERS 3' \
   "$PROJECT_ROOT/deploy/production/install-local.sh"

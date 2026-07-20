@@ -165,6 +165,31 @@ export async function runTaskCommand(
   return response.data
 }
 
+export async function retryFailedCollectionTasks(
+  batchId: string,
+  payload: TaskCommand,
+  options: AdminCommandOptions,
+): Promise<OperationCommandResult> {
+  const response = await http.post<OperationCommandResult>(
+    `/operations/commands/acquisition-batches/${batchId}/retry-failed-tasks`,
+    payload,
+    { headers: await commandHeaders(options) },
+  )
+  return response.data
+}
+
+export async function retryAllFailedProcessingTasks(
+  payload: TaskCommand,
+  options: AdminCommandOptions,
+): Promise<OperationCommandResult> {
+  const response = await http.post<OperationCommandResult>(
+    '/operations/commands/processing-tasks/retry-all-failed',
+    payload,
+    { headers: await commandHeaders(options) },
+  )
+  return response.data
+}
+
 export async function cancelAcquisitionBatch(
   batchId: string,
   payload: TaskCommand,

@@ -8,7 +8,12 @@ import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
-import { getProcessingQueue, getRunRecords, runTaskCommand } from '@/modules/operations/api'
+import {
+  getProcessingQueue,
+  getRunRecords,
+  retryAllFailedProcessingTasks,
+  runTaskCommand,
+} from '@/modules/operations/api'
 import type { ExecutionStatus, RunRecordItem } from '@/modules/operations/contracts'
 import { formatDateTime, formatDuration, formatPriority } from '@/modules/operations/presentation'
 
@@ -20,6 +25,8 @@ const datasetName = ref(typeof route.query.datasetName === 'string' ? route.quer
 const failedPage = ref(1)
 const retryTarget = ref<RunRecordItem | null>(null)
 const retryLoading = ref(false)
+const retryAllOpen = ref(false)
+const retryAllLoading = ref(false)
 const { data, loading, error, load } = useApiResource(() =>
   getProcessingQueue({
     status: status.value || undefined,
@@ -82,6 +89,26 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
     retryLoading.value = false
   }
 }
+
+async function submitRetryAll(value: { reason: string; idempotencyKey: string }) {
+  retryAllLoading.value = true
+  try {
+    const command = await retryAllFailedProcessingTasks({ reason: value.reason }, value)
+    const retried = Number(command.result.retryCount ?? 0)
+    const skipped = Number(command.result.skippedDependencyCount ?? 0)
+    ElMessage.success(
+      skipped
+        ? `已将 ${retried} 个任务加入队列，${skipped} 个因依赖未就绪跳过`
+        : `已将 ${retried} 个失败任务重新加入加工队列`,
+    )
+    retryAllOpen.value = false
+    await Promise.all([load(), loadFailed()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '全部失败任务重试失败')
+  } finally {
+    retryAllLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -115,9 +142,20 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
             <h3>需要人工处理的失败任务</h3>
             <p>自动重试次数已经用完；重试只读取现有原始数据，不会再次请求 Tushare。</p>
           </div>
-          <el-tag :type="failedData?.total ? 'danger' : 'success'">
-            {{ failedData?.total ?? 0 }} 个失败任务
-          </el-tag>
+          <div class="failed-panel__actions">
+            <el-button
+              type="warning"
+              plain
+              :disabled="!failedData?.total"
+              :loading="retryAllLoading"
+              @click="retryAllOpen = true"
+            >
+              全部重试
+            </el-button>
+            <el-tag :type="failedData?.total ? 'danger' : 'success'">
+              {{ failedData?.total ?? 0 }} 个失败任务
+            </el-tag>
+          </div>
         </div>
       </template>
       <DataState
@@ -276,12 +314,26 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
       @update:model-value="!$event && (retryTarget = null)"
       @submit="submitRetry"
     />
+    <AdminCommandDialog
+      v-model="retryAllOpen"
+      title="重试全部失败加工任务"
+      :description="`将重试近 30 天仍未恢复的 ${failedData?.total ?? 0} 个失败任务。依赖未就绪的任务会跳过并在结果中提示。`"
+      confirm-text="确认全部重试"
+      :loading="retryAllLoading"
+      @submit="submitRetryAll"
+    />
   </section>
 </template>
 
 <style scoped>
 .failed-panel {
   margin-bottom: 16px;
+}
+
+.failed-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .processing-task-name {

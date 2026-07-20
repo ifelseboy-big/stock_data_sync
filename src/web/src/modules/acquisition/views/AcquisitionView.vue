@@ -14,6 +14,7 @@ import {
   getAcquisitionBatches,
   getManualCommandOptions,
   getRunRecords,
+  retryFailedCollectionTasks,
   runTaskCommand,
 } from '@/modules/operations/api'
 import type {
@@ -44,6 +45,8 @@ const taskLoading = ref(false)
 const taskError = ref('')
 const retryTarget = ref<RunRecordItem | null>(null)
 const retryLoading = ref(false)
+const retryAllOpen = ref(false)
+const retryAllLoading = ref(false)
 const commandForm = reactive({
   startDate: '',
   endDate: '',
@@ -239,6 +242,26 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
     retryLoading.value = false
   }
 }
+
+async function submitRetryAll(value: { reason: string; idempotencyKey: string }) {
+  if (!taskBatch.value) return
+  retryAllLoading.value = true
+  try {
+    const command = await retryFailedCollectionTasks(
+      taskBatch.value.id,
+      { reason: value.reason },
+      value,
+    )
+    const taskCount = Number(command.result.taskCount ?? 0)
+    ElMessage.success(`已为 ${taskCount} 个失败任务创建一个修复批次`)
+    retryAllOpen.value = false
+    await Promise.all([loadBatchTasks(), load()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '全部失败采集任务重试失败')
+  } finally {
+    retryAllLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -362,6 +385,17 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
           </el-select>
         </el-form-item>
         <el-form-item><el-button type="primary" native-type="submit">查询</el-button></el-form-item>
+        <el-form-item>
+          <el-button
+            type="warning"
+            plain
+            :disabled="!taskBatch?.failedTaskCount"
+            :loading="retryAllLoading"
+            @click="retryAllOpen = true"
+          >
+            全部失败任务重试
+          </el-button>
+        </el-form-item>
       </el-form>
       <DataState
         :loading="taskLoading"
@@ -571,6 +605,14 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
       :loading="retryLoading"
       @update:model-value="!$event && (retryTarget = null)"
       @submit="submitTaskRetry"
+    />
+    <AdminCommandDialog
+      v-model="retryAllOpen"
+      title="重试全部失败采集任务"
+      :description="`系统会将批次中的全部尚未恢复失败任务合并到一个新修复批次；原批次不会被修改。当前批次记录 ${taskBatch?.failedTaskCount ?? 0} 个失败任务。`"
+      confirm-text="确认全部重试"
+      :loading="retryAllLoading"
+      @submit="submitRetryAll"
     />
   </section>
 </template>

@@ -42,7 +42,7 @@ case "$service_name" in
       -D "$DATA_DIR/data/postgres" \
       -p "$POSTGRES_PORT" \
       -c "listen_addresses=127.0.0.1" \
-      -c "shared_buffers=2GB" \
+      -c "shared_buffers=1GB" \
       -c "logging_collector=on" \
       -c "log_directory=$DATA_DIR/logs/postgres" \
       -c "log_filename=postgresql-%Y-%m-%d.log" \

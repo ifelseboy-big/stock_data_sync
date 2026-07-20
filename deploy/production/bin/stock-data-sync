@@ -12,8 +12,8 @@ DATA_DIR="${STOCK_DATA_SYNC_DATA_DIR:-}"
 ENV_FILE="$PROGRAM_DIR/config/app.env"
 PLIST_DIR="/Library/LaunchDaemons"
 SYSTEM_RUN_SERVICE="/usr/local/libexec/stock-data-sync/run-service"
-EXPECTED_SHARED_BUFFERS="2GB"
-EXPECTED_SHARED_BUFFERS_BYTES="2147483648"
+EXPECTED_SHARED_BUFFERS="1GB"
+EXPECTED_SHARED_BUFFERS_BYTES="1073741824"
 # shellcheck source=../lib/deploy-common.sh
 source "$SCRIPT_DIR/../lib/deploy-common.sh"
 

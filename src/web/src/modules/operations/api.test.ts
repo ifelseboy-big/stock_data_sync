@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { http } from '@/api/http'
 
-import { createRepair, getDatasetReleaseCoverage } from './api'
+import {
+  createRepair,
+  getDatasetReleaseCoverage,
+  retryAllFailedProcessingTasks,
+  retryFailedCollectionTasks,
+} from './api'
 
 vi.mock('@/api/http', () => ({
   http: {
@@ -56,5 +61,38 @@ describe('release coverage query', () => {
         endDate: '2026-07-19',
       },
     })
+  })
+})
+
+describe('bulk retry commands', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('uses dedicated collection and processing bulk endpoints', async () => {
+    vi.mocked(http.post).mockResolvedValue({ data: { commandId: 'bulk-command' } })
+
+    await retryFailedCollectionTasks(
+      'batch-1',
+      { reason: '批量重试采集' },
+      { idempotencyKey: 'bulk-collection-request' },
+    )
+    await retryAllFailedProcessingTasks(
+      { reason: '批量重试加工' },
+      { idempotencyKey: 'bulk-processing-request' },
+    )
+
+    expect(http.post).toHaveBeenNthCalledWith(
+      1,
+      '/operations/commands/acquisition-batches/batch-1/retry-failed-tasks',
+      { reason: '批量重试采集' },
+      expect.objectContaining({ headers: expect.any(Object) }),
+    )
+    expect(http.post).toHaveBeenNthCalledWith(
+      2,
+      '/operations/commands/processing-tasks/retry-all-failed',
+      { reason: '批量重试加工' },
+      expect.objectContaining({ headers: expect.any(Object) }),
+    )
   })
 })
