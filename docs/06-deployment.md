@@ -217,7 +217,7 @@ sudo stock-data-sync upgrade --version 1.2.3
 9. 执行 `post-upgrade doctor`。
 10. 检查失败时自动切回旧程序并重新检查。
 
-普通升级不会调用 `backup`、`restore` 或 `migrate`，PostgreSQL 和 Parquet 不会被修改。
+普通升级不会调用 `backup`、`restore` 或 `migrate`，PostgreSQL 和 Parquet 不会被修改。只有管理员显式提交 `upgrade --migrate --database-backup ...` 时，升级流程才会先备份数据库并执行目标版本迁移。
 
 ## 8. 回滚
 
@@ -270,7 +270,7 @@ sudo stock-data-sync logs scheduler
 sudo stock-data-sync migrate
 ```
 
-该命令不会被 `start`、`restart` 或 `upgrade` 自动调用。涉及数据库结构或 PostgreSQL 大版本的正式升级，应单独设计确认、验证和恢复方案后再执行。
+该命令不会被 `start`、`restart` 或普通 `upgrade` 自动调用。涉及数据库结构时使用经过确认的 `upgrade --migrate --database-backup ...`；PostgreSQL 大版本升级仍需单独设计验证和恢复方案。
 
 `v0.1.18` 的数据库变更必须依次执行 `20260720_0008` 和 `20260720_0009`：前者新增可恢复的延迟采集阶段表，后者为加工任务增加数据质量警告字段。该升级不删除、不覆盖已有业务数据。完成后使用目标版本环境确认 revision：
 
@@ -288,11 +288,28 @@ v0.1.18 预期输出包含：
 20260720_0009 (head)
 ```
 
-当前源码在此基础上新增 `20260720_0010`，为运行记录的恢复状态查询增加成功任务部分索引，不修改已有数据。使用当前源码迁移后的预期输出为：
+v0.1.20 在此基础上新增 `20260720_0010`，为运行记录的恢复状态查询增加成功任务部分索引，不修改已有数据。迁移后的预期输出为：
 
 ```text
 20260720_0010 (head)
 ```
+
+v0.1.21 新增保留数据的 `20260720_0011`。正式升级使用一个命令完成数据库备份、停止 Server 和 Scheduler、执行目标版本迁移、切换程序、重启和健康检查：
+
+```bash
+sudo stock-data-sync upgrade \
+  --version 0.1.21 \
+  --migrate \
+  --database-backup /用户指定的绝对目录/stock-data-sync-before-0.1.21.dump
+```
+
+备份文件不得已存在，也不得放进 PostgreSQL 数据目录；命令同时生成 `.sha256` 校验文件。迁移前会检查 `ths_board_moneyflow_daily` 的新主键冲突，发现冲突时事务回滚、原程序不切换、原数据不删除。迁移后预期输出为：
+
+```text
+20260720_0011 (head)
+```
+
+带 `--migrate` 的升级如果在迁移后健康检查失败，不会自动降级数据库，也不会把旧程序强行运行在新 revision 上；新程序目录和数据库备份会保留，Server 与 Scheduler 停止，等待人工诊断。
 
 详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。
 

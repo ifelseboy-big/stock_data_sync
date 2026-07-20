@@ -33,7 +33,8 @@ usage() {
   status                   查看服务状态和当前程序版本
   version                  显示版本、commit、主程序目录和数据目录
   upgrade [--version V] [--ignore-doctor]
-                           从 Git 正式标签本地构建并原子更换程序
+          [--migrate --database-backup ABSOLUTE_PATH]
+                           从 Git 正式标签本地构建并原子更换程序；可显式迁移数据库
   rollback [--version V]   切换到已构建且数据库兼容的旧程序
   doctor [选项]            执行安装、升级和运行状态检查
   config [show|path|validate|edit]
@@ -371,7 +372,7 @@ run_doctor() {
       *) fail "doctor 未知参数：$1" ;;
     esac
   done
-  [[ "$phase" == "build" || "$phase" == "pre-upgrade" || "$phase" == "pre-rollback" || "$phase" == "installed-no-start" || "$phase" == "config" ]] && require_running=0
+  [[ "$phase" == "build" || "$phase" == "migration-build" || "$phase" == "pre-upgrade" || "$phase" == "pre-rollback" || "$phase" == "installed-no-start" || "$phase" == "config" ]] && require_running=0
   doctor_failures=0
   doctor_warnings=0
   printf 'Doctor 检查阶段：%s\n' "$phase"
@@ -463,8 +464,10 @@ run_doctor() {
     else
       doctor_warn "PostgreSQL shared_buffers 当前为 ${shared_buffers_actual:-无法读取}（目标 $EXPECTED_SHARED_BUFFERS）"
     fi
-    if (( target_trusted == 1 )); then
+    if (( target_trusted == 1 )) && [[ "$phase" != "migration-build" ]]; then
       deploy_database_is_compatible "$target" && doctor_pass "数据库 revision 与目标程序兼容" || doctor_fail_check "数据库 revision 与目标程序不兼容"
+    elif (( target_trusted == 1 )); then
+      doctor_pass "目标迁移版本已构建；数据库兼容性将在迁移后检查"
     fi
   elif [[ "$phase" == "build" || "$phase" == "installed-no-start" || "$phase" == "config" ]]; then
     doctor_warn "PostgreSQL 当前未运行，跳过数据库兼容性检查"
@@ -543,6 +546,40 @@ resolve_upgrade_target() {
   TARGET_TAG="$(deploy_resolve_tag "$mirror" "$requested")"
 }
 
+backup_database_before_migration() {
+  local backup_path="$1" backup_parent temporary checksum_path
+  [[ "$backup_path" == /* ]] || fail "--database-backup 必须是绝对路径"
+  backup_parent="$(dirname "$backup_path")"
+  [[ -d "$backup_parent" ]] || fail "数据库备份父目录不存在：$backup_parent"
+  [[ ! -e "$backup_path" ]] || fail "数据库备份文件已存在：$backup_path"
+  checksum_path="$backup_path.sha256"
+  [[ ! -e "$checksum_path" ]] || fail "数据库备份校验文件已存在：$checksum_path"
+  case "$backup_path" in
+    "$DATA_DIR/data/postgres"|"$DATA_DIR/data/postgres/"*)
+      fail "数据库备份不能写入 PostgreSQL 数据目录"
+      ;;
+  esac
+  temporary="$backup_path.incomplete.$$"
+  umask 077
+  if ! "$POSTGRES_BIN_DIR/pg_dump" \
+    -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" \
+    --format=custom --compress=6 --file="$temporary" "$POSTGRES_DB"; then
+    rm -f -- "$temporary"
+    fail "迁移前数据库备份失败"
+  fi
+  mv "$temporary" "$backup_path"
+  /usr/bin/shasum -a 256 "$backup_path" > "$checksum_path"
+  printf '迁移前数据库备份完成：%s\n' "$backup_path"
+}
+
+run_target_migration() {
+  local target="$1"
+  /usr/bin/sudo -u "$SERVICE_USER" -H env \
+    STOCK_DATA_SYNC_PROGRAM_DIR="$PROGRAM_DIR" \
+    STOCK_DATA_SYNC_DATA_DIR="$DATA_DIR" \
+    /bin/bash "$target/deploy/production/bin/run-service" migrate
+}
+
 refresh_stable_entries() {
   local release="$1"
   local bootstrap="$release/deploy/production/bootstrap"
@@ -554,14 +591,26 @@ refresh_stable_entries() {
 }
 
 run_upgrade() {
-  local requested="" previous target service_home service_group ignore_doctor=0 rollback_ok
+  local requested="" previous target service_home service_group backup_path=""
+  local ignore_doctor=0 migrate_database=0 rollback_ok
   while (( $# > 0 )); do
     case "$1" in
       --version) (( $# >= 2 )) || fail "--version 缺少版本"; requested="$2"; shift 2 ;;
       --ignore-doctor) ignore_doctor=1; shift ;;
+      --migrate) migrate_database=1; shift ;;
+      --database-backup)
+        (( $# >= 2 )) || fail "--database-backup 缺少路径"
+        backup_path="$2"
+        shift 2
+        ;;
       *) fail "upgrade 未知参数：$1" ;;
     esac
   done
+  if (( migrate_database == 1 )); then
+    [[ -n "$backup_path" ]] || fail "--migrate 必须同时指定 --database-backup 绝对路径"
+  else
+    [[ -z "$backup_path" ]] || fail "--database-backup 只能与 --migrate 同时使用"
+  fi
   acquire_upgrade_lock
   start_postgres
   if ! run_doctor --phase pre-upgrade; then
@@ -578,13 +627,31 @@ run_upgrade() {
     printf '已经是最新版本：%s\n' "$BUILT_RELEASE_VERSION"
     return 0
   fi
-  run_doctor --phase build --release-dir "$target"
-  require_database_compatibility "$target"
+  if (( migrate_database == 1 )); then
+    run_doctor --phase migration-build --release-dir "$target"
+    stop_service scheduler
+    stop_service server
+    backup_database_before_migration "$backup_path"
+    if ! run_target_migration "$target" || ! deploy_database_is_compatible "$target"; then
+      printf '数据库迁移失败，正在恢复原版本服务。\n' >&2
+      restart_selected server || true
+      restart_selected scheduler || true
+      fail "数据库迁移失败；原程序未切换，备份位于 $backup_path"
+    fi
+  else
+    run_doctor --phase build --release-dir "$target"
+    require_database_compatibility "$target"
+  fi
   refresh_stable_entries "$target"
   previous="$(cd "$PROGRAM_DIR/current" && pwd -P)"
   ln -sfn "releases/$(basename "$previous")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
   if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then
+    if (( migrate_database == 1 )); then
+      stop_service scheduler
+      stop_service server
+      fail "升级后检查失败；数据库已迁移且未自动降级，新程序保留，备份位于 $backup_path"
+    fi
     printf '升级后检查失败，正在切回旧程序。\n' >&2
     deploy_switch_current "$PROGRAM_DIR" "$previous"
     rollback_ok=1
