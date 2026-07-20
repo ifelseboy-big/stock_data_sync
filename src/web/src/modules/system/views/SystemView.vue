@@ -84,7 +84,14 @@ function formatBytes(value: number | undefined): string {
           </el-tag>
         </div>
         <h3>PostgreSQL</h3>
-        <p>{{ readinessError || `${resources?.database.activeConnectionCount ?? '--'} 个连接` }}</p>
+        <p>
+          {{
+            readinessError ||
+            (resources
+              ? `${resources.database.clientConnectionCount} 个客户端连接，${resources.database.activeConnectionCount} 个活跃`
+              : '--')
+          }}
+        </p>
       </el-card>
 
       <el-card shadow="never" class="health-card">
@@ -154,8 +161,28 @@ function formatBytes(value: number | undefined): string {
         <el-descriptions-item label="PostgreSQL 共享缓冲区（运行值）">
           {{ formatBytes(resources?.database.sharedBuffersBytes) }}
         </el-descriptions-item>
-        <el-descriptions-item label="活动连接">
+        <el-descriptions-item label="客户端连接">
+          {{ resources?.database.clientConnectionCount ?? '--' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="活跃连接">
           {{ resources?.database.activeConnectionCount ?? '--' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="空闲连接">
+          {{ resources?.database.idleConnectionCount ?? '--' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="空闲事务连接">
+          <el-tag
+            v-if="resources"
+            :type="
+              resources.database.idleInTransactionConnectionCount === 0 ? 'success' : 'warning'
+            "
+          >
+            {{ resources.database.idleInTransactionConnectionCount }}
+          </el-tag>
+          <span v-else>--</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="PostgreSQL 后台进程">
+          {{ resources?.database.backgroundProcessCount ?? '--' }}
         </el-descriptions-item>
         <el-descriptions-item label="长事务">
           {{ resources?.database.longTransactionCount ?? '--' }}
@@ -184,7 +211,8 @@ function formatBytes(value: number | undefined): string {
       </el-descriptions>
       <p class="resource-explanation">
         PostgreSQL 共享缓冲区从当前数据库实例实时读取；API
-        进程峰值内存是服务启动以来的最大常驻内存，不代表当前占用。
+        进程峰值内存是服务启动以来的最大常驻内存，不代表当前占用。连接指标只把 client backend
+        计为客户端连接，PostgreSQL 自身后台进程单独展示；活跃连接不包含本次监控查询。
       </p>
     </el-card>
 

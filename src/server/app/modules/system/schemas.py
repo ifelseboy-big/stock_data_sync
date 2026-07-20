@@ -26,7 +26,11 @@ class DatabaseResources(ResourceModel):
     version: str
     size_bytes: int
     shared_buffers_bytes: int
+    client_connection_count: int
     active_connection_count: int
+    idle_connection_count: int
+    idle_in_transaction_connection_count: int
+    background_process_count: int
     long_transaction_count: int
 
 

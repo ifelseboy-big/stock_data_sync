@@ -18,6 +18,9 @@ def scheduler_singleton_lock() -> Iterator[None]:
         )
         if not acquired:
             raise RuntimeError("Another scheduler instance already holds the PostgreSQL lock")
+        # pg_advisory_lock is session-scoped, so committing ends the implicit
+        # SELECT transaction without releasing the singleton lock.
+        connection.commit()
 
         try:
             yield
@@ -26,3 +29,4 @@ def scheduler_singleton_lock() -> Iterator[None]:
                 text("SELECT pg_advisory_unlock(:lock_id)"),
                 {"lock_id": settings.scheduler_advisory_lock_id},
             )
+            connection.commit()

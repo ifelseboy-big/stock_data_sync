@@ -12,7 +12,11 @@ export interface SystemResources {
     version: string
     sizeBytes: number
     sharedBuffersBytes: number
+    clientConnectionCount: number
     activeConnectionCount: number
+    idleConnectionCount: number
+    idleInTransactionConnectionCount: number
+    backgroundProcessCount: number
     longTransactionCount: number
   }
   scheduler: {

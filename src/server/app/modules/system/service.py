@@ -37,11 +37,43 @@ async def get_system_resources(
     shared_buffers = await db.scalar(
         text("SELECT pg_size_bytes(current_setting('shared_buffers'))")
     )
-    active_connections = await db.scalar(select(func.count()).select_from(text("pg_stat_activity")))
+    connection_result = await db.execute(
+        text(
+            """
+                SELECT
+                    count(*) FILTER (
+                        WHERE backend_type = 'client backend'
+                    ) AS client_connection_count,
+                    count(*) FILTER (
+                        WHERE backend_type = 'client backend'
+                          AND state = 'active'
+                          AND pid <> pg_backend_pid()
+                    ) AS active_connection_count,
+                    count(*) FILTER (
+                        WHERE backend_type = 'client backend'
+                          AND state = 'idle'
+                    ) AS idle_connection_count,
+                    count(*) FILTER (
+                        WHERE backend_type = 'client backend'
+                          AND state IN ('idle in transaction', 'idle in transaction (aborted)')
+                    ) AS idle_in_transaction_connection_count,
+                    count(*) FILTER (
+                        WHERE backend_type <> 'client backend'
+                    ) AS background_process_count
+                FROM pg_stat_activity
+            """
+        )
+    )
+    connection_counts = connection_result.mappings().one()
     long_transactions = await db.scalar(
         select(func.count())
         .select_from(text("pg_stat_activity"))
-        .where(text("xact_start IS NOT NULL AND xact_start < :cutoff"))
+        .where(
+            text(
+                "backend_type = 'client backend' AND pid <> pg_backend_pid() "
+                "AND xact_start IS NOT NULL AND xact_start < :cutoff"
+            )
+        )
         .params(cutoff=now - timedelta(minutes=5))
     )
     scheduler_lock_held = bool(
@@ -69,7 +101,13 @@ async def get_system_resources(
             version=str(version or "unknown"),
             size_bytes=int(database_size or 0),
             shared_buffers_bytes=int(shared_buffers or 0),
-            active_connection_count=int(active_connections or 0),
+            client_connection_count=int(connection_counts["client_connection_count"] or 0),
+            active_connection_count=int(connection_counts["active_connection_count"] or 0),
+            idle_connection_count=int(connection_counts["idle_connection_count"] or 0),
+            idle_in_transaction_connection_count=int(
+                connection_counts["idle_in_transaction_connection_count"] or 0
+            ),
+            background_process_count=int(connection_counts["background_process_count"] or 0),
             long_transaction_count=int(long_transactions or 0),
         ),
         scheduler=SchedulerResources(
