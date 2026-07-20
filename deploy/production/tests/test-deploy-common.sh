@@ -83,7 +83,9 @@ grep -Fq 'PostgreSQL 实际配置：shared_buffers=%s' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'PostgreSQL shared_buffers 已生效：$shared_buffers_actual' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
-grep -Fq 'EXPECTED_SHARED_BUFFERS_BYTES="1073741824"' \
+grep -Fq 'release_shared_buffers_config()' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'ensure_postgres_release_config "$target"' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'deploy_write_env_value PROCESSING_MAX_WORKERS 3' \
   "$PROJECT_ROOT/deploy/production/install-local.sh"

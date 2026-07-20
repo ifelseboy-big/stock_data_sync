@@ -213,7 +213,7 @@ sudo stock-data-sync upgrade --version 1.2.3
 5. 执行 `build doctor`，验证 Python、Web、配置和 Alembic head。
 6. 比较生产数据库 revision 与目标程序要求；不一致立即终止。
 7. 停止 Server 和 Scheduler。
-8. 原子切换 `current`，启动新程序。
+8. 原子切换 `current`；仅当目标版本的 PostgreSQL 运行参数发生变化时重启数据库，再启动新程序。
 9. 执行 `post-upgrade doctor`。
 10. 检查失败时自动切回旧程序并重新检查。
 

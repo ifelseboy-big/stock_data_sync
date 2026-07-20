@@ -12,8 +12,6 @@ DATA_DIR="${STOCK_DATA_SYNC_DATA_DIR:-}"
 ENV_FILE="$PROGRAM_DIR/config/app.env"
 PLIST_DIR="/Library/LaunchDaemons"
 SYSTEM_RUN_SERVICE="/usr/local/libexec/stock-data-sync/run-service"
-EXPECTED_SHARED_BUFFERS="1GB"
-EXPECTED_SHARED_BUFFERS_BYTES="1073741824"
 # shellcheck source=../lib/deploy-common.sh
 source "$SCRIPT_DIR/../lib/deploy-common.sh"
 
@@ -172,6 +170,37 @@ postgres_shared_buffers_status() {
   "$POSTGRES_BIN_DIR/psql" -X -h 127.0.0.1 -p "$POSTGRES_PORT" \
     -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
     "SELECT current_setting('shared_buffers') || '|' || pg_size_bytes(current_setting('shared_buffers'))"
+}
+
+release_shared_buffers_config() {
+  local release="$1" value amount unit multiplier
+  value="$(sed -nE 's/^[[:space:]]*-c "shared_buffers=([^"]+)".*/\1/p' \
+    "$release/deploy/production/bin/run-service" | head -n 1)"
+  [[ "$value" =~ ^([0-9]+)(MB|GB)$ ]] || return 1
+  amount="$((10#${BASH_REMATCH[1]}))"
+  unit="${BASH_REMATCH[2]}"
+  case "$unit" in
+    MB) multiplier=1048576 ;;
+    GB) multiplier=1073741824 ;;
+    *) return 1 ;;
+  esac
+  printf '%s|%s\n' "$value" "$((amount * multiplier))"
+}
+
+ensure_postgres_release_config() {
+  local release="$1" expected status actual actual_bytes expected_value expected_bytes
+  expected="$(release_shared_buffers_config "$release")" || return 1
+  expected_value="${expected%%|*}"
+  expected_bytes="${expected##*|}"
+  status="$(postgres_shared_buffers_status)" || return 1
+  actual="${status%%|*}"
+  actual_bytes="${status##*|}"
+  [[ "$actual_bytes" == "$expected_bytes" ]] && return 0
+  printf 'PostgreSQL shared_buffers 需要从 %s 调整为 %s，正在重启数据库服务。\n' \
+    "$actual" "$expected_value"
+  restart_selected postgres || return 1
+  status="$(postgres_shared_buffers_status)" || return 1
+  [[ "${status##*|}" == "$expected_bytes" ]]
 }
 
 print_postgres_runtime_config() {
@@ -364,7 +393,8 @@ doctor_check_release() {
 run_doctor() {
   local phase="runtime" target="$PROGRAM_DIR/current" require_running=1
   local available_kb node_bin node_major service_home dependency target_real releases_real target_trusted=0 disabled_services
-  local shared_buffers_status shared_buffers_actual shared_buffers_bytes
+  local shared_buffers_status shared_buffers_actual shared_buffers_bytes shared_buffers_expected
+  local shared_buffers_expected_value="" shared_buffers_expected_bytes=""
   while (( $# > 0 )); do
     case "$1" in
       --phase) (( $# >= 2 )) || fail "--phase 缺少参数"; phase="$2"; shift 2 ;;
@@ -415,6 +445,14 @@ run_doctor() {
   if (( target_trusted == 1 )); then
     target="$target_real"
     doctor_check_release "$target"
+    shared_buffers_expected="$(release_shared_buffers_config "$target" 2>/dev/null || true)"
+    if [[ -n "$shared_buffers_expected" ]]; then
+      shared_buffers_expected_value="${shared_buffers_expected%%|*}"
+      shared_buffers_expected_bytes="${shared_buffers_expected##*|}"
+      doctor_pass "目标 PostgreSQL shared_buffers 配置有效：$shared_buffers_expected_value"
+    else
+      doctor_fail_check "目标 PostgreSQL shared_buffers 配置无效"
+    fi
     /usr/bin/sudo -u "$SERVICE_USER" test -x "$target/deploy/production/bin/run-service" && \
       doctor_pass "服务用户可执行目标程序入口" || doctor_fail_check "服务用户无法执行目标程序入口"
   else
@@ -457,12 +495,12 @@ run_doctor() {
     shared_buffers_status="$(postgres_shared_buffers_status 2>/dev/null || true)"
     shared_buffers_actual="${shared_buffers_status%%|*}"
     shared_buffers_bytes="${shared_buffers_status##*|}"
-    if [[ "$shared_buffers_bytes" == "$EXPECTED_SHARED_BUFFERS_BYTES" ]]; then
+    if [[ -n "$shared_buffers_expected_bytes" && "$shared_buffers_bytes" == "$shared_buffers_expected_bytes" ]]; then
       doctor_pass "PostgreSQL shared_buffers 已生效：$shared_buffers_actual"
     elif (( require_running == 1 )); then
-      doctor_fail_check "PostgreSQL shared_buffers 未按生产配置生效：${shared_buffers_actual:-无法读取}（期望 $EXPECTED_SHARED_BUFFERS）"
+      doctor_fail_check "PostgreSQL shared_buffers 未按生产配置生效：${shared_buffers_actual:-无法读取}（期望 ${shared_buffers_expected_value:-无法解析}）"
     else
-      doctor_warn "PostgreSQL shared_buffers 当前为 ${shared_buffers_actual:-无法读取}（目标 $EXPECTED_SHARED_BUFFERS）"
+      doctor_warn "PostgreSQL shared_buffers 当前为 ${shared_buffers_actual:-无法读取}（目标 ${shared_buffers_expected_value:-无法解析}）"
     fi
     if (( target_trusted == 1 )) && [[ "$phase" != "migration-build" ]]; then
       deploy_database_is_compatible "$target" && doctor_pass "数据库 revision 与目标程序兼容" || doctor_fail_check "数据库 revision 与目标程序不兼容"
@@ -646,7 +684,8 @@ run_upgrade() {
   previous="$(cd "$PROGRAM_DIR/current" && pwd -P)"
   ln -sfn "releases/$(basename "$previous")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
-  if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then
+  if ! ensure_postgres_release_config "$target" || \
+    ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase post-upgrade; then
     if (( migrate_database == 1 )); then
       stop_service scheduler
       stop_service server
@@ -655,6 +694,7 @@ run_upgrade() {
     printf '升级后检查失败，正在切回旧程序。\n' >&2
     deploy_switch_current "$PROGRAM_DIR" "$previous"
     rollback_ok=1
+    ensure_postgres_release_config "$previous" || rollback_ok=0
     restart_selected server || rollback_ok=0
     restart_selected scheduler || rollback_ok=0
     run_doctor --phase rollback || rollback_ok=0
@@ -689,9 +729,11 @@ run_rollback() {
   require_database_compatibility "$target"
   ln -sfn "releases/$(basename "$current")" "$PROGRAM_DIR/previous"
   deploy_switch_current "$PROGRAM_DIR" "$target"
-  if ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase rollback; then
+  if ! ensure_postgres_release_config "$target" || \
+    ! restart_selected server || ! restart_selected scheduler || ! run_doctor --phase rollback; then
     deploy_switch_current "$PROGRAM_DIR" "$current"
     restore_ok=1
+    ensure_postgres_release_config "$current" || restore_ok=0
     restart_selected server || restore_ok=0
     restart_selected scheduler || restore_ok=0
     (( restore_ok == 1 )) || fail "回滚失败；已恢复原程序，但服务启动未通过"
