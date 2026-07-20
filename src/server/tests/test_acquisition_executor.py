@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -83,6 +83,7 @@ def _spec(
     split_policy: SplitPolicy = SplitPolicy.OFFSET,
     empty_policy: EmptyPolicy = EmptyPolicy.RETRY_UNTIL_CUTOFF,
     cutoff_time: time | None = None,
+    historical_retention_months: int | None = None,
 ) -> ApiSpec:
     return ApiSpec(
         api_name="daily",
@@ -103,21 +104,28 @@ def _spec(
             cutoff_time=cutoff_time,
         ),
         date_extractor=lambda record: datetime.strptime(str(record["trade_date"]), "%Y%m%d").date(),
+        historical_retention_months=historical_retention_months,
     )
 
 
-def _task(*, batch_type: BatchType = BatchType.DAILY) -> ClaimedCollectionTask:
+def _task(
+    *,
+    batch_type: BatchType = BatchType.DAILY,
+    business_date: date = date(2026, 7, 17),
+    attempt_count: int = 1,
+    max_attempts: int = 3,
+) -> ClaimedCollectionTask:
     return ClaimedCollectionTask(
         task_id=uuid4(),
         batch_id=uuid4(),
         batch_type=batch_type,
-        business_date=date(2026, 7, 17),
+        business_date=business_date,
         provider="TUSHARE",
         api_name="daily",
         scope_key="trade_date=20260717",
         request_params={"trade_date": "20260717"},
-        attempt_count=1,
-        max_attempts=3,
+        attempt_count=attempt_count,
+        max_attempts=max_attempts,
     )
 
 
@@ -212,6 +220,46 @@ def test_allowed_empty_result_seals_zero_row_asset(tmp_path: Path) -> None:
 
     assert transition.status == CollectionTaskStatus.EMPTY_VALID
     assert repository.completed_metadata.row_count == 0
+
+
+def test_backfill_empty_outside_provider_retention_is_valid(tmp_path: Path) -> None:
+    provider = FakeProvider([_table([])])
+    repository = FakeRepository()
+    old_date = datetime.now(TIMEZONE).date() - timedelta(days=120)
+
+    transition = _executor(
+        tmp_path,
+        provider,
+        repository,
+        _spec(historical_retention_months=3),
+    ).execute(_task(batch_type=BatchType.BACKFILL, business_date=old_date))
+
+    assert transition.status == CollectionTaskStatus.EMPTY_VALID
+    assert repository.completed_metadata.row_count == 0
+
+
+def test_current_day_empty_waits_until_cutoff_after_attempt_budget(tmp_path: Path) -> None:
+    provider = FakeProvider([_table([])])
+    repository = FakeRepository()
+    today = datetime.now(TIMEZONE).date()
+
+    transition = _executor(
+        tmp_path,
+        provider,
+        repository,
+        _spec(cutoff_time=time.max),
+    ).execute(
+        _task(
+            batch_type=BatchType.BACKFILL,
+            business_date=today,
+            attempt_count=3,
+            max_attempts=3,
+        )
+    )
+
+    assert transition.status == CollectionTaskStatus.RETRY_WAIT
+    assert transition.next_retry_at is not None
+    assert transition.next_retry_at.date() == today
 
 
 def test_existing_orphan_asset_is_registered_without_provider_call(tmp_path: Path) -> None:

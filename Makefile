@@ -1,4 +1,4 @@
-.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check performance live-validation live-etf-validation live-full-validation live-ths-theme-validation live-backfill-concurrency-validation release
+.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check performance live-validation live-etf-validation live-full-validation live-ths-theme-validation live-backfill-concurrency-validation live-provider-compatibility-validation release
 
 server-install:
 	cd src/server && uv sync --all-groups
@@ -40,6 +40,9 @@ live-ths-theme-validation:
 
 live-backfill-concurrency-validation:
 	./scripts/run-backfill-concurrency-validation.sh
+
+live-provider-compatibility-validation:
+	./scripts/run-provider-compatibility-validation.sh
 
 release:
 	@test -n "$(VERSION)" || (echo "用法: make release VERSION=0.1.0" && exit 1)

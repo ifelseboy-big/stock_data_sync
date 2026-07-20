@@ -293,9 +293,35 @@ def _plan_and_drain_processing(batch_ids: Sequence[UUID], label: str) -> int:
         f"queued={result.queued_task_count}, blocked={result.blocked_task_count}"
     )
     runtime = get_processing_runtime()
+    deadline = time.monotonic() + 600
     try:
-        runtime.wake(now=datetime.now(TIMEZONE))
-        while runtime.inflight_count():
+        while True:
+            runtime.wake(now=datetime.now(TIMEZONE))
+            while runtime.inflight_count():
+                time.sleep(0.05)
+            with SyncSessionFactory() as session:
+                pending_count = int(
+                    session.scalar(
+                        select(func.count())
+                        .select_from(ProcessingTask)
+                        .where(
+                            ProcessingTask.source_batch_id.in_(batch_ids),
+                            ProcessingTask.status.in_(
+                                {
+                                    ProcessingTaskStatus.QUEUED.value,
+                                    ProcessingTaskStatus.RUNNING.value,
+                                }
+                            ),
+                        )
+                    )
+                    or 0
+                )
+            if pending_count == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise LiveWorkflowError(
+                    f"{label} processing did not drain within 600 seconds"
+                )
             time.sleep(0.05)
     finally:
         shutdown_processing_runtime()

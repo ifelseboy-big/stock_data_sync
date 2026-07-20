@@ -2,7 +2,19 @@ from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import MetaData, String, Table, case, func, inspect, literal, or_, select, union_all
+from sqlalchemy import (
+    MetaData,
+    String,
+    Table,
+    and_,
+    case,
+    func,
+    inspect,
+    literal,
+    or_,
+    select,
+    union_all,
+)
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -683,6 +695,8 @@ class OperationsRepository:
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
         recovered_collection = aliased(CollectionTask)
+        failed_collection_batch = aliased(CollectionBatch)
+        recovered_collection_batch = aliased(CollectionBatch)
         recovered_processing = aliased(ProcessingTask)
         recovered_scheduler = aliased(ScheduledJobExecution)
         processing_occurred_at = func.coalesce(
@@ -694,6 +708,9 @@ class OperationsRepository:
         processing_warning = (
             (ProcessingTask.status == ProcessingTaskStatus.SUCCESS.value)
             & ProcessingTask.warning_message.is_not(None)
+            & ~ProcessingTask.warning_message.like(
+                "dc_concept_cons 返回%完全重复记录，加工时已确定性去重"
+            )
         )
         scheduler_occurred_at = func.coalesce(
             ScheduledJobExecution.finished_at,
@@ -708,13 +725,29 @@ class OperationsRepository:
             CollectionTask.error_code.label("error_code"),
             CollectionTask.error_message.label("error_message"),
             CollectionTask.finished_at.label("occurred_at"),
+        ).join(
+            failed_collection_batch,
+            failed_collection_batch.batch_id == CollectionTask.batch_id,
         ).where(
             CollectionTask.status == CollectionTaskStatus.FAILED.value,
             CollectionTask.finished_at >= since,
             ~select(literal(1))
+            .select_from(recovered_collection)
+            .join(
+                recovered_collection_batch,
+                recovered_collection_batch.batch_id == recovered_collection.batch_id,
+            )
             .where(
                 recovered_collection.api_name == CollectionTask.api_name,
-                recovered_collection.scope_key == CollectionTask.scope_key,
+                or_(
+                    recovered_collection.scope_key == CollectionTask.scope_key,
+                    and_(
+                        CollectionTask.api_name == "dc_concept_cons",
+                        recovered_collection_batch.business_date.is_not_distinct_from(
+                            failed_collection_batch.business_date
+                        ),
+                    ),
+                ),
                 recovered_collection.status.in_(COLLECTION_SUCCESS),
                 recovered_collection.finished_at > CollectionTask.finished_at,
             )
@@ -740,9 +773,7 @@ class OperationsRepository:
             .where(
                 or_(
                     processing_warning,
-                    ProcessingTask.status.in_(
-                        (ProcessingTaskStatus.FAILED.value, ProcessingTaskStatus.BLOCKED.value)
-                    )
+                    (ProcessingTask.status == ProcessingTaskStatus.FAILED.value)
                     & ~select(literal(1))
                     .where(
                         recovered_processing.output_dataset == ProcessingTask.output_dataset,
@@ -839,12 +870,26 @@ def _run_status_condition(rows: Any, status: str | None) -> Any:
 
 def _run_recovered_expression(rows: Any) -> Any:
     recovered_collection = aliased(CollectionTask)
+    recovered_collection_batch = aliased(CollectionBatch)
     recovered_release = aliased(DatasetRelease)
     collection_recovered = (
         select(literal(1))
+        .select_from(recovered_collection)
+        .join(
+            recovered_collection_batch,
+            recovered_collection_batch.batch_id == recovered_collection.batch_id,
+        )
         .where(
             recovered_collection.api_name == rows.c.task_name,
-            recovered_collection.scope_key == rows.c.scope_key,
+            or_(
+                recovered_collection.scope_key == rows.c.scope_key,
+                and_(
+                    rows.c.task_name == "dc_concept_cons",
+                    recovered_collection_batch.business_date.is_not_distinct_from(
+                        rows.c.business_date
+                    ),
+                ),
+            ),
             recovered_collection.status.in_(COLLECTION_SUCCESS),
             recovered_collection.finished_at > rows.c.finished_at,
         )

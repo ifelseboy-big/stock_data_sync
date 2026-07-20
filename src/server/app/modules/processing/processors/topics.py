@@ -385,6 +385,7 @@ class StockHotRankDailyProcessor:
         business_date = _business_date(task, self.name)
         rows: list[PreparedRow] = []
         rows_read = 0
+        rows_rejected = 0
         for dependency in dependencies:
             if dependency.dependency_name == "ths_hot":
                 raw = read_raw_assets((dependency,), asset_store, (THS_HOT_SPEC,))
@@ -398,14 +399,22 @@ class StockHotRankDailyProcessor:
                 raw = read_raw_assets((dependency,), asset_store, (DC_HOT_SPEC,))
                 source_rows = raw.rows_by_api["dc_hot"]
                 rank_type = _scope_value(dependency.scope_key, "hot_type")
-                rows.extend(
+                latest_snapshot = _latest_dc_hot_snapshot(source_rows, business_date)
+                snapshot_rows = tuple(
                     _hot_rank_row(row, business_date, source="DC", rank_type=rank_type)
-                    for row in source_rows
+                    for row in latest_snapshot
                 )
+                _validate_hot_snapshot(snapshot_rows)
+                rows.extend(snapshot_rows)
                 rows_read += raw.row_count
+                rows_rejected += len(source_rows) - len(latest_snapshot)
         if rows_read == 0:
             raise ProcessingError("stock_hot_rank_daily cannot be empty")
-        return PreparedDataset(DatedRows(business_date, tuple(rows)), rows_read)
+        return PreparedDataset(
+            DatedRows(business_date, tuple(rows)),
+            rows_read,
+            rows_rejected,
+        )
 
     def write(
         self, session: Session, prepared: PreparedDataset, *, published_at: datetime
@@ -518,23 +527,8 @@ class MarketThemeMemberDailyProcessor:
                 MarketThemeDaily.source == "DC",
             )
         )
-        if latest_parent_sync is None:
-            raise ProcessingError("market_theme_daily has no current parent rows")
-        theme_codes = set(
-            session.scalars(
-                select(MarketThemeDaily.theme_code).where(
-                    MarketThemeDaily.trade_date == payload.business_date,
-                    MarketThemeDaily.source == "DC",
-                    MarketThemeDaily.synced_at == latest_parent_sync,
-                )
-            )
-        )
         stocks = _stock_codes(session, {cast(str, row["ts_code"]) for row in payload.rows})
-        matched = tuple(
-            row
-            for row in payload.rows
-            if row["theme_code"] in theme_codes and row["ts_code"] in stocks
-        )
+        matched = tuple(row for row in payload.rows if row["ts_code"] in stocks)
         rows = _with_synced_at(matched, published_at)
         written = self._publisher.publish(
             session,
@@ -545,13 +539,14 @@ class MarketThemeMemberDailyProcessor:
             update_columns=("name", "industry_code", "industry", "reason", "hot_num", "synced_at"),
             replace_filters={"trade_date": payload.business_date},
         )
-        session.execute(
-            delete(MarketThemeDaily).where(
-                MarketThemeDaily.trade_date == payload.business_date,
-                MarketThemeDaily.source == "DC",
-                MarketThemeDaily.synced_at < latest_parent_sync,
+        if latest_parent_sync is not None:
+            session.execute(
+                delete(MarketThemeDaily).where(
+                    MarketThemeDaily.trade_date == payload.business_date,
+                    MarketThemeDaily.source == "DC",
+                    MarketThemeDaily.synced_at < latest_parent_sync,
+                )
             )
-        )
         return PublicationResult(written, len(payload.rows) - len(matched))
 
 
@@ -854,6 +849,49 @@ def _hot_rank_row(
         "hot": decimal_value(source_row.get("hot"), "hot"),
         "rank_time": _rank_time(source_row.get("rank_time"), trade_date),
     }
+
+
+def _latest_dc_hot_snapshot(
+    source_rows: tuple[RawRow, ...],
+    business_date: date,
+) -> tuple[RawRow, ...]:
+    if not source_rows:
+        return ()
+    snapshots: dict[datetime, list[RawRow]] = {}
+    for row in source_rows:
+        rank_time = _rank_time(row.get("rank_time"), business_date)
+        snapshots.setdefault(rank_time, []).append(row)
+    complete_size = max(len(rows) for rows in snapshots.values())
+    latest_complete_time = max(
+        rank_time for rank_time, rows in snapshots.items() if len(rows) == complete_size
+    )
+    return tuple(snapshots[latest_complete_time])
+
+
+def _validate_hot_snapshot(rows: tuple[PreparedRow, ...]) -> None:
+    stock_keys: set[tuple[object, ...]] = set()
+    rank_keys: set[tuple[object, ...]] = set()
+    for row in rows:
+        stock_key = (
+            row["source"],
+            row["trade_date"],
+            row["market_type"],
+            row["rank_type"],
+            row["ts_code"],
+        )
+        rank_key = (
+            row["source"],
+            row["trade_date"],
+            row["market_type"],
+            row["rank_type"],
+            row["rank"],
+        )
+        if stock_key in stock_keys:
+            raise ProcessingError(f"dc_hot latest snapshot contains duplicate stock: {stock_key}")
+        if rank_key in rank_keys:
+            raise ProcessingError(f"dc_hot latest snapshot contains duplicate rank: {rank_key}")
+        stock_keys.add(stock_key)
+        rank_keys.add(rank_key)
 
 
 def _theme_daily_row(source: RawRow, business_date: date) -> PreparedRow:

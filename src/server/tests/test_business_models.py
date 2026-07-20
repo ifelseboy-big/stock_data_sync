@@ -78,6 +78,26 @@ def test_business_schema_compiles_for_postgresql() -> None:
             assert str(CreateIndex(index).compile(dialect=dialect))
 
 
+def test_provider_optional_board_code_is_not_part_of_moneyflow_identity() -> None:
+    import_all_models()
+    table = Base.metadata.tables["ths_board_moneyflow_daily"]
+
+    assert {column.name for column in table.primary_key.columns} == {
+        "board_type",
+        "board_name",
+        "trade_date",
+    }
+    assert table.c.ts_code.nullable is True
+
+
+def test_theme_members_do_not_require_same_day_theme_ranking_parent() -> None:
+    import_all_models()
+    table = Base.metadata.tables["market_theme_member_daily"]
+
+    foreign_targets = {foreign_key.target_fullname for foreign_key in table.foreign_keys}
+    assert foreign_targets == {"stock.ts_code"}
+
+
 def test_postgresql_identifiers_fit_length_limit() -> None:
     import_all_models()
 

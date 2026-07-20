@@ -12,6 +12,8 @@
 | 完整性 | 文件关闭后计算SHA-256写入content_hash，字段名、顺序和Arrow类型生成schema_fingerprint |
 | 可变性 | sealed_at写入后文件不可覆盖；补采或修订必须产生新任务和新资产 |
 
+供应方兼容仍遵守原始层不清洗原则：`dc_hot` 即使在 `is_new=Y` 下返回多个 `rank_time`，所有快照都写入同一任务资产，由加工层选择最新完整快照；`moneyflow_cnt_ths.ts_code` 为空时按原值保存 `NULL`，不在 Parquet 中补码。只有正式加工层可以基于接口业务规则选择快照或业务键。
+
 ```text
 data/raw/
 └── tushare/

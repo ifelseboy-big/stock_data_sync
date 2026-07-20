@@ -155,9 +155,9 @@ def upgrade() -> None:
     op.create_table(
         "ths_board_moneyflow_daily",
         sa.Column("board_type", sa.String(length=16), nullable=False),
-        sa.Column("ts_code", sa.String(length=20), nullable=False),
-        sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("board_name", sa.String(length=128), nullable=False),
+        sa.Column("trade_date", sa.Date(), nullable=False),
+        sa.Column("ts_code", sa.String(length=20), nullable=True),
         sa.Column("lead_stock", sa.String(length=64), nullable=True),
         sa.Column("lead_stock_price", sa.Numeric(precision=20, scale=6), nullable=True),
         sa.Column("pct_change", sa.Numeric(precision=14, scale=6), nullable=True),
@@ -173,8 +173,14 @@ def upgrade() -> None:
             name=op.f("ck_ths_board_moneyflow_daily_board_type"),
         ),
         sa.PrimaryKeyConstraint(
-            "board_type", "ts_code", "trade_date", name=op.f("pk_ths_board_moneyflow_daily")
+            "board_type", "board_name", "trade_date", name=op.f("pk_ths_board_moneyflow_daily")
         ),
+    )
+    op.create_index(
+        "idx_ths_board_flow_code",
+        "ths_board_moneyflow_daily",
+        ["ts_code", "trade_date"],
+        unique=False,
     )
     op.create_index(
         "idx_ths_board_flow_day_amount",
@@ -384,15 +390,6 @@ def upgrade() -> None:
         sa.Column("reason", sa.Text(), nullable=True),
         sa.Column("hot_num", sa.Integer(), nullable=True),
         sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["source", "theme_code", "trade_date"],
-            [
-                "market_theme_daily.source",
-                "market_theme_daily.theme_code",
-                "market_theme_daily.trade_date",
-            ],
-            name="fk_theme_member_theme",
-        ),
         sa.ForeignKeyConstraint(
             ["ts_code"], ["stock.ts_code"], name=op.f("fk_market_theme_member_daily_ts_code_stock")
         ),
@@ -806,6 +803,7 @@ def downgrade() -> None:
     op.drop_table("concept_board_daily")
     op.drop_table("trade_calendar")
     op.drop_index("idx_ths_board_flow_day_amount", table_name="ths_board_moneyflow_daily")
+    op.drop_index("idx_ths_board_flow_code", table_name="ths_board_moneyflow_daily")
     op.drop_table("ths_board_moneyflow_daily")
     op.drop_index("uq_stock_exchange_symbol", table_name="stock")
     op.drop_table("stock")

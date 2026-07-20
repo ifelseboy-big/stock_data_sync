@@ -1,5 +1,6 @@
 from calendar import isleap
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date, datetime, time
 
 import pyarrow as pa
@@ -755,7 +756,10 @@ DC_HOT_SPEC = ApiSpec(
         ),
         integer_fields=frozenset({"rank"}),
     ),
-    natural_key=("trade_date", "data_type", "ts_code"),
+    # Historical queries can return several legitimate rank_time snapshots even
+    # with is_new=Y. Keep every provider row and select the latest coherent
+    # snapshot in the processing layer.
+    natural_key=(),
     schedule_group=ScheduleGroup.HOT,
     scope_builder=_dc_hot_scopes,
     split_policy=SplitPolicy.TRADE_DATE,
@@ -793,6 +797,7 @@ DC_CONCEPT_SPEC = _daily_spec(
     row_limit=5_000,
     cutoff_time=time(hour=22, minute=30),
 )
+DC_CONCEPT_SPEC = replace(DC_CONCEPT_SPEC, historical_retention_months=3)
 
 DC_CONCEPT_CONS_FIELDS = (
     "ts_code",
@@ -942,7 +947,9 @@ MONEYFLOW_CNT_THS_SPEC = _daily_spec(
     fields=MONEYFLOW_CNT_THS_FIELDS,
     string_fields=frozenset({"trade_date", "ts_code", "name", "lead_stock"}),
     integer_fields=frozenset({"company_num"}),
-    natural_key=("trade_date", "ts_code"),
+    # The provider currently returns a stable concept name but no ts_code for
+    # some boards (for example AI视频). The daily name remains unique.
+    natural_key=("trade_date", "name"),
     row_limit=5_000,
     cutoff_time=time(hour=22, minute=30),
 )

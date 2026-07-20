@@ -1,6 +1,7 @@
+from calendar import monthrange
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from math import isfinite
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -258,7 +259,11 @@ class CollectionExecutor:
         stats: QueryStats,
         now: datetime,
     ) -> TaskTransition:
-        if spec.empty_policy == EmptyPolicy.ALLOWED:
+        if spec.empty_policy == EmptyPolicy.ALLOWED or _outside_historical_retention(
+            task,
+            spec,
+            today=now.date(),
+        ):
             metadata = self._asset_store.seal(
                 RawAssetContext(
                     provider=task.provider,
@@ -309,17 +314,33 @@ class CollectionExecutor:
     ) -> TaskTransition:
         now = datetime.now(self._timezone)
         retry_at = None
-        if retryable and task.attempt_count < task.max_attempts:
+        if retryable:
             wait_seconds = min(
                 spec.retry_policy.initial_wait_seconds * (2 ** (task.attempt_count - 1)),
                 spec.retry_policy.max_wait_seconds,
             )
             candidate = now + timedelta(seconds=wait_seconds)
-            if task.batch_type in {BatchType.BACKFILL, BatchType.REPAIR} or not _past_cutoff(
-                candidate,
+            cutoff = _cutoff_at(
                 business_date=task.business_date,
                 cutoff_time=spec.retry_policy.cutoff_time,
                 timezone=self._timezone,
+            )
+            current_day_waits_for_cutoff = (
+                cutoff is not None
+                and task.business_date == now.date()
+                and now < cutoff
+                and task.attempt_count >= task.max_attempts
+            )
+            if current_day_waits_for_cutoff:
+                retry_at = cutoff
+            elif task.attempt_count < task.max_attempts and (
+                task.batch_type in {BatchType.BACKFILL, BatchType.REPAIR}
+                or not _past_cutoff(
+                    candidate,
+                    business_date=task.business_date,
+                    cutoff_time=spec.retry_policy.cutoff_time,
+                    timezone=self._timezone,
+                )
             ):
                 retry_at = candidate
         return self._repository.fail_task(
@@ -339,7 +360,44 @@ def _past_cutoff(
     cutoff_time: time | None,
     timezone: ZoneInfo,
 ) -> bool:
-    if cutoff_time is None or business_date is None:
+    cutoff = _cutoff_at(
+        business_date=business_date,
+        cutoff_time=cutoff_time,
+        timezone=timezone,
+    )
+    if cutoff is None:
         return False
-    cutoff = datetime.combine(business_date, cutoff_time, timezone)
     return candidate > cutoff
+
+
+def _cutoff_at(
+    *,
+    business_date: Any,
+    cutoff_time: time | None,
+    timezone: ZoneInfo,
+) -> datetime | None:
+    if cutoff_time is None or not isinstance(business_date, date):
+        return None
+    return datetime.combine(business_date, cutoff_time, timezone)
+
+
+def _outside_historical_retention(
+    task: ClaimedCollectionTask,
+    spec: ApiSpec,
+    *,
+    today: date,
+) -> bool:
+    months = spec.historical_retention_months
+    return (
+        months is not None
+        and task.batch_type in {BatchType.BACKFILL, BatchType.REPAIR}
+        and task.business_date is not None
+        and task.business_date < _months_before(today, months)
+    )
+
+
+def _months_before(value: date, months: int) -> date:
+    month_index = value.year * 12 + value.month - 1 - months
+    year, zero_based_month = divmod(month_index, 12)
+    month = zero_based_month + 1
+    return date(year, month, min(value.day, monthrange(year, month)[1]))

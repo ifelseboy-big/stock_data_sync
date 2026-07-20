@@ -10,6 +10,8 @@ from app.catalog.tushare import (
     DAILY_FINAL_SPECS,
     DAILY_LATE_SPECS,
     DC_CONCEPT_CONS_SPEC,
+    DC_CONCEPT_SPEC,
+    DC_HOT_SPEC,
     DELAYED_ETF_SPECS,
     DELAYED_THEME_SPECS,
     ETF_BASIC_SPEC,
@@ -22,6 +24,7 @@ from app.catalog.tushare import (
     MASTER_ETF_SPECS,
     MASTER_SPECIAL_SPECS,
     MASTER_STOCK_SPECS,
+    MONEYFLOW_CNT_THS_SPEC,
     STK_FACTOR_SPEC,
     STK_LIMIT_SPEC,
     THS_INDEX_SPEC,
@@ -161,6 +164,9 @@ def test_special_catalog_uses_entity_splitting_and_date_pagination() -> None:
         "ts_code=885002.TI",
     ]
     assert DC_CONCEPT_CONS_SPEC.split_policy == SplitPolicy.OFFSET
+    assert DC_HOT_SPEC.natural_key == ()
+    assert MONEYFLOW_CNT_THS_SPEC.natural_key == ("trade_date", "name")
+    assert DC_CONCEPT_SPEC.historical_retention_months == 3
     assert [
         scope.scope_key for scope in DC_CONCEPT_CONS_SPEC.scope_builder(date(2026, 7, 17))
     ] == ["trade_date=20260717"]

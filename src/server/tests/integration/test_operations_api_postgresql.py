@@ -38,8 +38,11 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     now = datetime.now(TIMEZONE)
     batch_id = uuid4()
     collection_task_id = uuid4()
+    legacy_collection_failure_id = uuid4()
+    legacy_collection_success_id = uuid4()
     published_process_id = uuid4()
     warning_process_id = uuid4()
+    ignored_warning_process_id = uuid4()
     blocked_process_id = uuid4()
     recovered_failure_id = uuid4()
     recovered_success_id = uuid4()
@@ -58,6 +61,41 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                 planning_completed_at=now - timedelta(minutes=10),
                 started_at=now - timedelta(minutes=9),
                 closed_at=now - timedelta(minutes=8),
+            )
+        )
+        session.add_all(
+            (
+                CollectionTask(
+                    task_id=legacy_collection_failure_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name="dc_concept_cons",
+                    scope_key=f"trade_date={now:%Y%m%d};theme_code=legacy",
+                    request_params={"trade_date": f"{now:%Y%m%d}", "theme_code": "legacy"},
+                    status=CollectionTaskStatus.FAILED.value,
+                    attempt_count=1,
+                    max_attempts=3,
+                    request_count=1,
+                    started_at=now - timedelta(minutes=9),
+                    finished_at=now - timedelta(minutes=8),
+                    error_code="PROVIDER_ERROR",
+                    error_message="legacy scope failed",
+                ),
+                CollectionTask(
+                    task_id=legacy_collection_success_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name="dc_concept_cons",
+                    scope_key=f"trade_date={now:%Y%m%d}",
+                    request_params={"trade_date": f"{now:%Y%m%d}"},
+                    status=CollectionTaskStatus.SUCCESS.value,
+                    attempt_count=1,
+                    max_attempts=3,
+                    request_count=1,
+                    row_count=10,
+                    started_at=now - timedelta(minutes=7),
+                    finished_at=now - timedelta(minutes=6),
+                ),
             )
         )
         session.flush()
@@ -143,6 +181,26 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     rows_rejected=1,
                     rows_written=1,
                     warning_message="已保留字段更完整的重复记录",
+                ),
+                ProcessingTask(
+                    process_id=ignored_warning_process_id,
+                    source_batch_id=batch_id,
+                    process_type="market_theme_member_daily@1",
+                    business_date=now.date(),
+                    output_dataset="market_theme_member_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    rows_read=2,
+                    rows_rejected=1,
+                    rows_written=1,
+                    warning_message=(
+                        "dc_concept_cons 返回 1 条完全重复记录，加工时已确定性去重"
+                    ),
                 ),
                 ProcessingTask(
                     process_id=recovered_failure_id,
@@ -283,7 +341,9 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         item["id"] != str(recovered_failure_id) for item in unresolved_runs.json()["items"]
     )
     assert resources.json()["database"]["sharedBuffersBytes"] > 0
-    assert any(item["id"] == f"processing:{blocked_process_id}" for item in alerts.json()["items"])
+    assert all(
+        item["id"] != f"processing:{blocked_process_id}" for item in alerts.json()["items"]
+    )
     warning_alert = next(
         item
         for item in alerts.json()["items"]
@@ -293,6 +353,14 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert warning_alert["title"] == "stock_top_list_daily 数据质量提醒"
     assert all(
         item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]
+    )
+    assert all(
+        item["id"] != f"processing:{ignored_warning_process_id}"
+        for item in alerts.json()["items"]
+    )
+    assert all(
+        item["id"] != f"acquisition:{legacy_collection_failure_id}"
+        for item in alerts.json()["items"]
     )
     assert all(item["id"] != f"scheduler:{scheduler_failure_id}" for item in alerts.json()["items"])
     assert any(item["apiName"] == "daily" for item in command_options.json()["acquisitionApis"])

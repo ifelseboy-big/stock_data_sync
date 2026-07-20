@@ -238,15 +238,6 @@ class MarketThemeDaily(Base):
 class MarketThemeMemberDaily(Base):
     __tablename__ = "market_theme_member_daily"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["source", "theme_code", "trade_date"],
-            [
-                "market_theme_daily.source",
-                "market_theme_daily.theme_code",
-                "market_theme_daily.trade_date",
-            ],
-            name="fk_theme_member_theme",
-        ),
         Index("idx_theme_member_stock", "trade_date", "ts_code", "theme_code"),
         {"postgresql_partition_by": "RANGE (trade_date)"},
     )

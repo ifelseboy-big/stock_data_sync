@@ -65,3 +65,19 @@ make live-backfill-concurrency-validation
 ```
 
 机器报告保存到 `dist/live-validation/backfill-2026-06-10-2026-06-20-concurrency.json`。
+
+## 2026-07-20 供应商兼容复验
+
+使用 PostgreSQL 18.4 最新结构重建本地 `stock_data_sync` 后，分别执行 2026-05-04 至 2026-05-10、2026-05-14 至 2026-05-20 两组最近一周全流程。两组均通过真实 Tushare 采集、历史回填、当日分阶段任务、三并发加工、加工重试、采集自动重试至终态、人工重试、业务表完整性和 9 条运维接口验证。
+
+全流程验收驱动同步修正两项假设：加工队列会持续唤醒，直到目标批次不再存在 `QUEUED/RUNNING` 任务；休市日从交易日历选择，不再假定最后交易日的次日一定休市。为避免验收等待完整退避时长，脚本仅把已真实进入 `RETRY_WAIT` 的 `next_retry_at` 推进到当前时间之前，后续重试仍由正式采集执行器完成。
+
+新增供应商兼容专项入口：
+
+```bash
+CONFIRM_TEST_DATABASE=stock_data_sync make live-provider-compatibility-validation
+```
+
+专项结果：2026-05-08 的 `dc_hot` 原始 1,200 行包含多个时点，最终选择各市场最新完整快照并发布 200 行，股票键和排名键均无重复；2026-05-20 的同花顺板块资金流发布 477 行，`AI视频` 的空 `ts_code` 被合法保留；2026-02-03 已超出 `dc_concept` 三个月历史保留期，主接口以 0 行 `EMPTY_VALID` 完成，成员接口仍成功发布 19,517 行，没有要求同日题材排名必须存在。
+
+机器报告保存到 `dist/live-validation/provider-compatibility.json`，不包含 Token、数据库密码或原始响应正文。

@@ -89,3 +89,28 @@ async def test_unresolved_run_records_apply_recovery_lookup_before_pagination() 
     page_from = session.page_statement.get_final_froms()[0]
     assert page_from.name == "page_runs"
     assert page_from.element._limit_clause.value == 20
+
+
+@pytest.mark.asyncio
+async def test_alerts_hide_dependency_blocks_and_expected_duplicate_warnings() -> None:
+    session = _StatementCapture()
+    repository = OperationsRepository(session)  # type: ignore[arg-type]
+
+    await repository.alert_rows(
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        source=None,
+        offset=0,
+        limit=20,
+    )
+
+    sql = str(
+        session.page_statement.compile(
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "processing_task.status = 'FAILED'" in sql
+    assert "processing_task.status = 'BLOCKED'" not in sql
+    assert "dc_concept_cons" in sql
+    assert "business_date IS NOT DISTINCT FROM" in sql
+    assert "完全重复记录" in sql

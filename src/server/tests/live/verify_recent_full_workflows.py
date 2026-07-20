@@ -75,6 +75,7 @@ from tests.live.verify_recent_workflows import (
     _drain_collection,
     _file_uri_path,
     _first_task,
+    _historical_closed_date,
     _plan_and_drain_processing,
     _plan_stage,
     _trading_dates,
@@ -382,8 +383,7 @@ def _run_collection_retry(api: OperationsApi, closed_date: date) -> dict[str, ob
         f"live-full-collection-failure-{closed_date:%Y%m%d}-v1",
     )
     source_batch = _batch_ids_from_command(failed)[0]
-    _drain_collection()
-    source_task = _first_task(source_batch)
+    source_task = _drain_collection_to_terminal(source_batch)
     if source_task.status != "FAILED":
         raise LiveWorkflowError(f"closed-day collection did not fail: {source_task.status}")
     _close_batches()
@@ -393,8 +393,7 @@ def _run_collection_retry(api: OperationsApi, closed_date: date) -> dict[str, ob
         f"live-full-collection-retry-{source_task.task_id}-v1",
     )
     retry_batch = _batch_ids_from_command(retried)[0]
-    _drain_collection()
-    retry_task = _first_task(retry_batch)
+    retry_task = _drain_collection_to_terminal(retry_batch)
     if retry_task.status != "FAILED" or retry_task.task_id == source_task.task_id:
         raise LiveWorkflowError("manual collection retry did not create a new failed attempt")
     _close_batches()
@@ -442,6 +441,20 @@ def _run_collection_retry(api: OperationsApi, closed_date: date) -> dict[str, ob
             str(process_id) for process_id, _status in synthetic_processes
         ],
     }
+
+
+def _drain_collection_to_terminal(batch_id: UUID) -> CollectionTask:
+    for _attempt in range(10):
+        _drain_collection()
+        task = _first_task(batch_id)
+        if task.status != "RETRY_WAIT":
+            return task
+        with SyncSessionFactory.begin() as session:
+            persisted = session.get(CollectionTask, task.task_id)
+            if persisted is None or persisted.next_retry_at is None:
+                raise LiveWorkflowError("retry-wait task has no retry deadline")
+            persisted.next_retry_at = datetime.now(TIMEZONE) - timedelta(seconds=1)
+    raise LiveWorkflowError(f"collection task did not reach a terminal state: {batch_id}")
 
 
 def _verify_business_data(trading_dates: tuple[date, ...]) -> dict[str, object]:
@@ -578,7 +591,9 @@ def run(start_date: date, end_date: date, report_path: Path) -> dict[str, object
 
         business = _verify_business_data(trading_dates)
         processing_retry = _run_processing_retry(api, daily_date)
-        collection_retry = _run_collection_retry(api, daily_date + timedelta(days=1))
+        collection_retry = _run_collection_retry(
+            api, _historical_closed_date(start_date, end_date)
+        )
         primary_batches = (
             *master_batches,
             *entity_batches,

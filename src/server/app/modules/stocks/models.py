@@ -201,12 +201,13 @@ class ThsBoardMoneyflowDaily(Base):
             "board_type",
             desc("net_amount"),
         ),
+        Index("idx_ths_board_flow_code", "ts_code", "trade_date"),
     )
 
     board_type: Mapped[str] = mapped_column(String(16), primary_key=True)
-    ts_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    board_name: Mapped[str] = mapped_column(String(128), primary_key=True)
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
-    board_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    ts_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     lead_stock: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lead_stock_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     pct_change: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)

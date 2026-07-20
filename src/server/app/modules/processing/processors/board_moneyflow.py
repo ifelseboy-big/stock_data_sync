@@ -73,9 +73,9 @@ class ThsBoardMoneyflowDailyProcessor:
             target=cast(Table, ThsBoardMoneyflowDaily.__table__),
             rows=rows,
             strategy=WriteStrategy.REPLACE_DATE,
-            key_columns=("board_type", "ts_code", "trade_date"),
+            key_columns=("board_type", "board_name", "trade_date"),
             update_columns=(
-                "board_name",
+                "ts_code",
                 "lead_stock",
                 "lead_stock_price",
                 "pct_change",
@@ -127,7 +127,7 @@ def _base_flow_row(
     require_business_date(trade_date, business_date, "ths_board_moneyflow_daily")
     return {
         "board_type": board_type,
-        "ts_code": required_text(source.get("ts_code"), "ts_code"),
+        "ts_code": optional_text(source.get("ts_code")),
         "trade_date": trade_date,
         "board_name": board_name,
         "lead_stock": optional_text(source.get("lead_stock")),

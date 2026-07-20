@@ -537,7 +537,7 @@ THS_BOARD_MONEYFLOW_DAILY_DATASET = DatasetSpec(
     quality_rules=(
         QualityRuleSpec(
             "natural_key_unique",
-            {"columns": ("board_type", "ts_code", "trade_date")},
+            {"columns": ("board_type", "board_name", "trade_date")},
         ),
     ),
 )

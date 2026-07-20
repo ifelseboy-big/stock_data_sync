@@ -103,6 +103,7 @@ class ApiSpec:
     endpoint_budget_per_minute: int | None = None
     daily_quota: int | None = None
     expected_row_count: ExpectedRowCount | None = None
+    historical_retention_months: int | None = None
 
     def __post_init__(self) -> None:
         if not self.api_name or not self.provider:
@@ -117,6 +118,7 @@ class ApiSpec:
             (self.row_limit, "row_limit"),
             (self.endpoint_budget_per_minute, "endpoint_budget_per_minute"),
             (self.daily_quota, "daily_quota"),
+            (self.historical_retention_months, "historical_retention_months"),
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive when configured")
