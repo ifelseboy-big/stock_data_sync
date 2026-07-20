@@ -1,11 +1,11 @@
 # 数据库落地设计
 
-数据库采用本目录定义的 36 张应用表；28 张业务表保持已定义的字段，6 张控制面运行表负责闭合状态机，`provider_request_log` 和 `operation_command` 分别负责物理请求观测与人工命令幂等审计。所有表使用默认 schema，避免 ORM、Alembic 和跨 schema 外键复杂化。
+数据库采用本目录定义的 39 张应用表；28 张业务表保持已定义的字段，9 张控制面运行表负责闭合状态机、延迟阶段和调度执行，`provider_request_log` 和 `operation_command` 分别负责物理请求观测与人工命令幂等审计。所有表使用默认 schema，避免 ORM、Alembic 和跨 schema 外键复杂化。
 
 | 数据库对象 | 落地规则 |
 |-|-|
 | 28张业务表 | 字段、类型、主外键、单位和 NULL 口径以本目录表定义为准 |
-| 6张系统运行表 | 作为批次、任务、资产、依赖和发布的唯一事实来源 |
+| 9张系统运行表 | 作为批次、任务、资产、依赖、发布、延迟阶段和调度执行的唯一事实来源 |
 | 2张运维支撑表 | 保存实际接口请求指标，以及人工命令的幂等键、操作者、原因、请求 ID 和结果 |
 | 6张分区事实表 | stock_daily、stock_technical_daily、stock_moneyflow_daily、market_theme_member_daily、etf_daily、etf_share_size_daily按trade_date月分区 |
 | 其余表 | 普通表；仅建立[全局约定](01-overview.md)定义的访问路径索引 |
@@ -67,6 +67,15 @@ CREATE INDEX idx_dependency_release_process
 ON processing_dependency (resolved_release_process_id)
 WHERE resolved_release_process_id IS NOT NULL;
 ```
+
+**v0.1.18 数据库结构变更。**该版本包含两个连续的 Alembic revision，均为增量变更，不删除或改写已有业务数据：
+
+| Revision | 结构变更 | 运行目的 |
+|-|-|-|
+| `20260720_0008` | 新建 `deferred_collection_stage` 表、唯一约束和 `PENDING` 部分索引 | 持久化 BACKFILL/REPAIR 尚未展开的动态采集阶段，使升级、进程重启或主机恢复后能够继续计划 |
+| `20260720_0009` | 为 `processing_task` 新增可空 `warning_message text` 字段 | 单独记录不阻断成功和发布的数据质量警告，避免与失败原因混用 |
+
+升级顺序固定为 `20260719_0007 -> 20260720_0008 -> 20260720_0009`，升级后数据库必须报告 `20260720_0009 (head)`。回退 `0009` 会删除 `warning_message`，回退 `0008` 会删除延迟阶段表；生产环境不得把程序回滚与数据库降级混为同一操作。
 
 批次创建使用固定计划时间，不使用实际执行时间。例如16:10阶段即使服务17:00恢复，scheduled_at仍沿用当日DAILY批次的08:45计划时隙，从而命中原批次而不是生成重复批次。output_version由source_batch_id、output_dataset、process_type中的处理器版本和business_date计算确定性UUID；同一批次计划不会重复生成加工任务，规则升级或新的REPAIR批次会得到新版本。
 

@@ -85,9 +85,10 @@ rows_read integer null -- 从原始资产读取的行数
 rows_rejected integer null -- 因校验失败被拒绝的行数
 rows_written integer null -- 写入目标版本的行数
 error_message text null -- 加工失败或阻塞的错误说明
+warning_message text null -- 加工成功但存在可接受数据质量问题时的警告说明
 ```
 
-消费一个或多个原始资产并生成正式数据。全局加工入口并发数固定为1，但采集任务可以在Tushare额度内并行。
+消费一个或多个原始资产并生成正式数据。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。全局加工入口并发数固定为1，但采集任务可以在Tushare额度内并行。
 
 ## processing_dependency
 
@@ -122,6 +123,23 @@ primary key (dataset_name, scope_type, scope_key) -- 每个数据集和发布范
 ```
 
 保存每个数据集范围的完成性、血缘和当前加工结果。主数据使用GLOBAL/GLOBAL，日事实使用DATE/YYYY-MM-DD，指数权重使用MONTH/指数代码:YYYY-MM；按实体发布时使用ENTITY/实体代码。business_date只在存在明确业务日期时填写。正式表写入与release更新在同一事务提交。业务表不保存历史version_id，因此旧版本只用于追溯，不能通过切换指针即时回滚；恢复历史结果必须重新加工并发布新的版本。
+
+## deferred_collection_stage
+
+```sql
+stage_id uuid primary key -- 延迟采集阶段唯一标识
+command_id uuid not null references operation_command(command_id) on delete cascade -- 来源人工命令
+api_name varchar(64) not null -- 等待动态范围就绪后需要创建任务的接口
+business_date date not null -- 阶段对应的业务日期
+batch_type varchar(20) not null check (batch_type in ('BACKFILL','REPAIR')) -- 历史回填或修复
+status varchar(16) not null default 'PENDING' check (status in ('PENDING','PLANNED')) -- 等待计划或已完成计划
+batch_id uuid null references collection_batch(batch_id) on delete set null -- 动态阶段最终生成的批次
+planned_at timestamptz null -- 阶段完成计划的时间
+created_at timestamptz not null default current_timestamp -- 阶段创建时间
+unique (command_id, api_name, business_date) -- 同一命令、接口和日期只保存一个阶段
+```
+
+历史回填或修复中的动态接口不能在命令创建时一次性展开。例如 `ths_member` 需要先发布同花顺概念和主题主数据，再按最新板块代码生成采集范围。命令创建时先持久化 `PENDING` 阶段；Scheduler 周期扫描依赖，满足后创建后续批次并原子更新为 `PLANNED`。因此程序升级、进程重启或主机恢复不会丢失尚未展开的阶段。`idx_deferred_collection_stage_pending (created_at, stage_id) WHERE status = 'PENDING'` 用于稳定领取待计划记录。
 
 ## scheduled_job_control
 

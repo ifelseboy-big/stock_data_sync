@@ -272,6 +272,24 @@ sudo stock-data-sync migrate
 
 该命令不会被 `start`、`restart` 或 `upgrade` 自动调用。涉及数据库结构或 PostgreSQL 大版本的正式升级，应单独设计确认、验证和恢复方案后再执行。
 
+`v0.1.18` 的数据库变更必须依次执行 `20260720_0008` 和 `20260720_0009`：前者新增可恢复的延迟采集阶段表，后者为加工任务增加数据质量警告字段。该升级不删除、不覆盖已有业务数据。完成后使用目标版本环境确认 revision：
+
+```bash
+set -a
+source /用户指定的主程序目录/config/app.env
+set +a
+cd /用户指定的主程序目录/current/server
+.venv/bin/python -m alembic -c alembic.ini current
+```
+
+预期输出包含：
+
+```text
+20260720_0009 (head)
+```
+
+详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。
+
 ## 12. 手工备份与恢复
 
 备份能力保留给管理员使用，但普通程序升级不会自动调用：
