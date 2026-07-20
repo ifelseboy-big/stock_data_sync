@@ -20,6 +20,7 @@ from app.catalog.tushare import (
     HOT_SPECS,
     INDEX_DAILY_SPEC,
     INDEX_WEIGHT_SPEC,
+    LIMIT_LIST_SPEC,
     MASTER_ENTITY_SPECS,
     MASTER_ETF_SPECS,
     MASTER_SPECIAL_SPECS,
@@ -131,6 +132,7 @@ def test_runtime_schedule_groups_remain_explicit() -> None:
     assert {spec.api_name for spec in DAILY_FINAL_SPECS} == {"stk_factor"}
     assert STK_LIMIT_SPEC.split_policy == SplitPolicy.OFFSET
     assert FUND_ADJ_SPEC.split_policy == SplitPolicy.OFFSET
+    assert LIMIT_LIST_SPEC.split_policy == SplitPolicy.OFFSET
     assert "turnover_rate" not in STK_FACTOR_SPEC.fields
 
 
@@ -167,6 +169,7 @@ def test_special_catalog_uses_entity_splitting_and_date_pagination() -> None:
     assert DC_CONCEPT_CONS_SPEC.split_policy == SplitPolicy.OFFSET
     assert DC_HOT_SPEC.natural_key == ()
     assert THS_HOT_SPEC.natural_key == ("trade_date", "data_type", "ts_code", "rank_time")
+    assert THS_HOT_SPEC.split_policy == SplitPolicy.OFFSET
     assert [scope.params["is_new"] for scope in THS_HOT_SPEC.scopes(date(2026, 1, 9))] == ["Y"]
     assert [
         scope.params["is_new"] for scope in THS_HOT_SPEC.scopes(date(2026, 1, 9), historical=True)

@@ -73,6 +73,27 @@ def test_processing_data_quality_warning_is_presented_as_warning() -> None:
     assert alert.detail == "已保留字段更完整的重复记录"
 
 
+def test_collection_data_gap_is_presented_as_warning() -> None:
+    now = datetime.now(UTC)
+
+    alert = OperationsService._alert_item(
+        {
+            "id": "task-id",
+            "source": "acquisition",
+            "task_name": "ths_hot",
+            "status": "EMPTY_VALID",
+            "error_code": "DATA_GAP_WARNING",
+            "error_message": "历史接口未返回数据，已记录数据缺口并停止重试",
+            "occurred_at": now,
+        },
+        now,
+    )
+
+    assert alert.level == "warning"
+    assert alert.title == "ths_hot 数据缺口提醒"
+    assert alert.detail == "历史接口未返回数据，已记录数据缺口并停止重试"
+
+
 @pytest.mark.asyncio
 async def test_release_coverage_distinguishes_missing_and_in_progress_dates() -> None:
     expected = {

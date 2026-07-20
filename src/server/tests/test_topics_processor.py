@@ -258,6 +258,60 @@ def test_ths_hot_processor_selects_latest_complete_minute_snapshot(tmp_path: Pat
     assert prepared.rows_rejected == 3
 
 
+def test_ths_hot_processor_splits_two_snapshots_from_the_same_minute(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        THS_HOT_SPEC,
+        [
+            _ths_hot_row("000001.SZ", 1, "2026-07-13 14:00:01"),
+            _ths_hot_row("000002.SZ", 2, "2026-07-13 14:00:02"),
+            _ths_hot_row("000002.SZ", 1, "2026-07-13 14:00:08"),
+            _ths_hot_row("000001.SZ", 2, "2026-07-13 14:00:09"),
+        ],
+        scope_key="trade_date=20260713;market=热股;is_new=N",
+    )
+
+    prepared = StockHotRankDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    payload = cast(DatedRows, prepared.payload)
+    assert [(row["ts_code"], row["rank"]) for row in payload.rows] == [
+        ("000002.SZ", 1),
+        ("000001.SZ", 2),
+    ]
+    assert prepared.rows_read == 4
+    assert prepared.rows_rejected == 2
+
+
+def test_ths_hot_processor_keeps_complete_snapshot_before_partial_tail(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        THS_HOT_SPEC,
+        [
+            _ths_hot_row("000001.SZ", 1, "2026-07-13 14:00:01"),
+            _ths_hot_row("000002.SZ", 2, "2026-07-13 14:00:02"),
+            _ths_hot_row("000003.SZ", 1, "2026-07-13 14:00:08"),
+        ],
+        scope_key="trade_date=20260713;market=热股;is_new=N",
+    )
+
+    prepared = StockHotRankDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    payload = cast(DatedRows, prepared.payload)
+    assert [(row["ts_code"], row["rank"]) for row in payload.rows] == [
+        ("000001.SZ", 1),
+        ("000002.SZ", 2),
+    ]
+    assert prepared.rows_rejected == 1
+
+
 def _top_list_row() -> dict[str, object]:
     return {
         "trade_date": "20260713",

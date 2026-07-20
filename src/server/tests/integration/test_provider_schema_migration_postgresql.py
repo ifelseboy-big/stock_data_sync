@@ -125,7 +125,7 @@ def test_old_schema_upgrades_without_losing_rows(
 
     with engine.begin() as connection:
         assert connection.scalar(text("SELECT COUNT(*) FROM ths_board_moneyflow_daily")) == 1
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260720_0011"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260721_0012"
         connection.execute(
             text(
                 """
@@ -223,5 +223,5 @@ def test_already_compatible_v020_schema_is_only_stamped(
     _alembic(database_url, "upgrade", "head")
 
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260720_0011"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260721_0012"
         assert connection.scalar(text("SELECT COUNT(*) FROM ths_board_moneyflow_daily")) == 1

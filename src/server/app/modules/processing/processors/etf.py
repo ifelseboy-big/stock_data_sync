@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import cast
 
@@ -69,6 +70,12 @@ ETF_SHARE_SIZE_UPDATE_COLUMNS = (
     "exchange",
     "synced_at",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class EtfShareSizeRows:
+    business_date: date
+    rows: tuple[PreparedRow, ...]
 
 
 class EtfProcessor:
@@ -189,16 +196,16 @@ class EtfShareSizeDailyProcessor:
         dependencies: tuple[RawDependencyAsset, ...],
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
+        if task.business_date is None:
+            raise ProcessingError("etf_share_size_daily requires a business date")
         raw = read_raw_assets(dependencies, asset_store, (ETF_SHARE_SIZE_SPEC,))
         rows = tuple(
             row
             for source in raw.rows_by_api["etf_share_size"]
             if (row := _etf_share_size_row(source, task.business_date)) is not None
         )
-        if not rows:
-            raise ProcessingError("etf_share_size_daily cannot publish an empty trading day")
         return PreparedDataset(
-            payload=rows,
+            payload=EtfShareSizeRows(task.business_date, rows),
             rows_read=raw.row_count,
             rows_rejected=raw.row_count - len(rows),
         )
@@ -210,10 +217,9 @@ class EtfShareSizeDailyProcessor:
         *,
         published_at: datetime,
     ) -> PublicationResult:
-        rows = cast(tuple[PreparedRow, ...], prepared.payload)
-        business_date = _single_business_date(rows, self.name)
-        matched, rejected = _filter_to_etf_master(session, rows)
-        if not matched:
+        payload = cast(EtfShareSizeRows, prepared.payload)
+        matched, rejected = _filter_to_etf_master(session, payload.rows)
+        if payload.rows and not matched:
             raise ProcessingError("etf_share_size_daily has no rows matching the ETF master")
         values = tuple({**row, "synced_at": published_at} for row in matched)
         return PublicationResult(
@@ -224,7 +230,7 @@ class EtfShareSizeDailyProcessor:
                 strategy=WriteStrategy.REPLACE_DATE,
                 key_columns=ETF_DAILY_KEY,
                 update_columns=ETF_SHARE_SIZE_UPDATE_COLUMNS,
-                replace_filters={"trade_date": business_date},
+                replace_filters={"trade_date": payload.business_date},
             ),
             rows_rejected=rejected,
         )

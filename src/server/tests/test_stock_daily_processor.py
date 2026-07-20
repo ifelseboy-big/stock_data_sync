@@ -8,11 +8,16 @@ import pyarrow as pa
 import pytest
 
 from app.catalog import ApiSpec
-from app.catalog.bse_codes import BSE_CODE_ALIASES, canonical_stock_code
+from app.catalog.bse_codes import (
+    BSE_CODE_ALIASES,
+    CORPORATE_ACTION_CODE_ALIASES,
+    canonical_stock_code,
+)
 from app.catalog.tushare import (
     ADJ_FACTOR_SPEC,
     DAILY_BASIC_SPEC,
     DAILY_SPEC,
+    MONEYFLOW_SPEC,
     STK_FACTOR_SPEC,
     SUSPEND_SPEC,
 )
@@ -20,6 +25,7 @@ from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.processors.stock_daily import (
     StockDailyCoreProcessor,
+    StockMoneyflowDailyProcessor,
     StockSuspendDailyProcessor,
     StockTechnicalDailyProcessor,
 )
@@ -104,6 +110,77 @@ def test_bse_code_mapping_uses_complete_official_table() -> None:
     assert canonical_stock_code("000001.SZ") == "000001.SZ"
 
 
+def test_corporate_action_code_mapping_uses_current_security_code() -> None:
+    assert CORPORATE_ACTION_CODE_ALIASES == {"300114.SZ": "302132.SZ"}
+    assert canonical_stock_code("300114.SZ") == "302132.SZ"
+
+
+def test_stock_daily_core_maps_historical_corporate_action_code(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependencies = (
+        _asset(
+            store,
+            batch_id,
+            DAILY_SPEC,
+            [_daily_source("300114.SZ")],
+        ),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [
+                {
+                    "ts_code": "300114.SZ",
+                    "trade_date": "20260717",
+                    "close": 10.5,
+                }
+            ],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [
+                {
+                    "ts_code": "300114.SZ",
+                    "trade_date": "20260717",
+                    "adj_factor": 1.25,
+                }
+            ],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert rows[0]["ts_code"] == "302132.SZ"
+    assert len(prepared.warning_messages) == 3
+    assert all("300114.SZ->302132.SZ" in warning for warning in prepared.warning_messages)
+
+
+def test_stock_moneyflow_maps_historical_corporate_action_code(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        MONEYFLOW_SPEC,
+        [{"ts_code": "300114.SZ", "trade_date": "20260717"}],
+    )
+
+    prepared = StockMoneyflowDailyProcessor().prepare(
+        _task(batch_id),
+        (dependency,),
+        store,
+    )
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert rows[0]["ts_code"] == "302132.SZ"
+    assert prepared.rows_rejected == 0
+    assert "300114.SZ->302132.SZ" in prepared.warning_messages[0]
+
+
 def test_stock_technical_maps_bse_alias_and_prefers_current_code(tmp_path: Path) -> None:
     store = LocalRawAssetStore(tmp_path)
     batch_id = uuid4()
@@ -146,7 +223,7 @@ def test_stock_technical_rejects_conflicting_bse_alias_rows(tmp_path: Path) -> N
         ),
     )
 
-    with pytest.raises(ProcessingError, match="BSE code alias conflict"):
+    with pytest.raises(ProcessingError, match="stock code alias conflict"):
         StockTechnicalDailyProcessor().prepare(_task(batch_id), dependencies, store)
 
 
@@ -223,6 +300,22 @@ def _technical_source(ts_code: str, *, close: float, macd: float) -> dict[str, o
         "vol": 10.0,
         "amount": 20.0,
         "macd": macd,
+    }
+
+
+def _daily_source(ts_code: str) -> dict[str, object]:
+    return {
+        "ts_code": ts_code,
+        "trade_date": "20260717",
+        "open": 10.0,
+        "high": 11.0,
+        "low": 9.5,
+        "close": 10.5,
+        "pre_close": 10.0,
+        "change": 0.5,
+        "pct_chg": 5.0,
+        "vol": 10.0,
+        "amount": 20.0,
     }
 
 

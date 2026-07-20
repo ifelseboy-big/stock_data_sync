@@ -259,11 +259,15 @@ class CollectionExecutor:
         stats: QueryStats,
         now: datetime,
     ) -> TaskTransition:
-        if spec.empty_policy == EmptyPolicy.ALLOWED or _outside_historical_retention(
-            task,
-            spec,
-            today=now.date(),
-        ):
+        historical_gap = spec.empty_policy != EmptyPolicy.UNSUPPORTED and (
+            _outside_historical_retention(
+                task,
+                spec,
+                today=now.date(),
+            )
+            or _exhausted_historical_backfill(task, today=now.date())
+        )
+        if spec.empty_policy == EmptyPolicy.ALLOWED or historical_gap:
             metadata = self._asset_store.seal(
                 RawAssetContext(
                     provider=task.provider,
@@ -281,6 +285,9 @@ class CollectionExecutor:
                 request_count=stats.request_count,
                 empty=True,
                 completed_at=now,
+                warning_message=(
+                    _historical_gap_warning(task) if historical_gap else None
+                ),
             )
         if spec.empty_policy == EmptyPolicy.UNSUPPORTED:
             return self._repository.fail_task(
@@ -393,6 +400,26 @@ def _outside_historical_retention(
         and task.batch_type in {BatchType.BACKFILL, BatchType.REPAIR}
         and task.business_date is not None
         and task.business_date < _months_before(today, months)
+    )
+
+
+def _exhausted_historical_backfill(
+    task: ClaimedCollectionTask,
+    *,
+    today: date,
+) -> bool:
+    return (
+        task.batch_type in {BatchType.BACKFILL, BatchType.REPAIR}
+        and task.business_date is not None
+        and task.business_date < today
+        and task.attempt_count >= task.max_attempts
+    )
+
+
+def _historical_gap_warning(task: ClaimedCollectionTask) -> str:
+    return (
+        f"{task.api_name} 在历史数据周期 {task.business_date}、范围 {task.scope_key} "
+        "未返回数据，已记录数据缺口并停止重试"
     )
 
 

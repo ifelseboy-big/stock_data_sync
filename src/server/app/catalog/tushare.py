@@ -733,7 +733,7 @@ THS_HOT_SPEC = ApiSpec(
     schedule_group=ScheduleGroup.HOT,
     scope_builder=_ths_hot_scopes,
     historical_scope_builder=_ths_hot_historical_scopes,
-    split_policy=SplitPolicy.TRADE_DATE,
+    split_policy=SplitPolicy.OFFSET,
     row_limit=2_000,
     empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,
     retry_policy=RetryPolicy(
@@ -926,6 +926,7 @@ LIMIT_LIST_SPEC = _daily_spec(
     natural_key=("trade_date", "ts_code", "limit"),
     row_limit=2_500,
     cutoff_time=time(hour=22, minute=30),
+    split_policy=SplitPolicy.OFFSET,
 )
 
 LIMIT_STEP_FIELDS = ("ts_code", "name", "trade_date", "nums")

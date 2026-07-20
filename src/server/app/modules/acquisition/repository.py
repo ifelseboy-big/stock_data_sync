@@ -295,6 +295,7 @@ class AcquisitionRepository:
             task.finished_at = None
             task.error_code = None
             task.error_message = None
+            task.warning_message = None
             if batch.status == BatchStatus.PENDING.value:
                 batch.status = BatchStatus.RUNNING.value
                 batch.started_at = batch.started_at or now
@@ -320,6 +321,7 @@ class AcquisitionRepository:
         request_count: int,
         empty: bool,
         completed_at: datetime,
+        warning_message: str | None = None,
     ) -> TaskTransition:
         status = CollectionTaskStatus.EMPTY_VALID if empty else CollectionTaskStatus.SUCCESS
         with self._session_factory() as session, session.begin():
@@ -363,6 +365,7 @@ class AcquisitionRepository:
             task_model.finished_at = completed_at
             task_model.error_code = None
             task_model.error_message = None
+            task_model.warning_message = warning_message[:4000] if warning_message else None
             return TaskTransition(task.task_id, status, None)
 
     def fail_task(
@@ -410,6 +413,7 @@ class AcquisitionRepository:
             )
             task.error_code = error_code[:64]
             task.error_message = error_message
+            task.warning_message = None
             return TaskTransition(task_id, status, retry_at)
 
     def recover_interrupted_task(

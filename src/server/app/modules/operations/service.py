@@ -590,7 +590,10 @@ class OperationsService:
         task_name = cast(str, row["task_name"])
         error_code = cast(str | None, row["error_code"])
         critical_codes = {"TOKEN_INVALID", "PERMISSION_DENIED", "SCHEMA_CHANGED"}
-        is_data_quality_warning = error_code == "DATA_QUALITY_WARNING"
+        is_data_quality_warning = error_code in {
+            "DATA_QUALITY_WARNING",
+            "DATA_GAP_WARNING",
+        }
         level = (
             "critical"
             if error_code in critical_codes or cast(str, row["status"]) == "FAILED"
@@ -601,7 +604,9 @@ class OperationsService:
             level=cast(Any, level),
             source=source,
             title=(
-                f"{task_name} 数据质量提醒"
+                f"{task_name} 数据缺口提醒"
+                if error_code == "DATA_GAP_WARNING"
+                else f"{task_name} 数据质量提醒"
                 if is_data_quality_warning
                 else f"{task_name} 执行异常"
             ),

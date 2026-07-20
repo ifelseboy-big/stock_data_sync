@@ -157,7 +157,7 @@ def _validate_environment() -> str:
         alembic_version = session.scalar(text("SELECT version_num FROM alembic_version"))
     if database_name != "stock_data_sync":
         raise LiveWorkflowError(f"unexpected database: {database_name}")
-    if alembic_version != "20260720_0011":
+    if alembic_version != "20260721_0012":
         raise LiveWorkflowError(f"database migration is not current: {alembic_version}")
     _progress(f"database={database_name}, postgresql={version}, migration={alembic_version}")
     return database_name

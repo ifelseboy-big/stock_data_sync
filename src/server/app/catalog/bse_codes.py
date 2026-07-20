@@ -1,4 +1,4 @@
-"""Official Beijing Stock Exchange legacy-to-current security code mapping.
+"""Legacy-to-current stock security code mappings.
 
 Source: https://www.bse.cn/service/code_mapping.html
 """
@@ -254,7 +254,20 @@ BSE_CODE_ALIASES: dict[str, str] = {
     "831010.BJ": "920010.BJ",
 }
 
+# Shenzhen-listed AVIC Electromechanical Systems changed its security code when
+# it became AVIC Chengdu Aircraft.  Current stock_basic snapshots only expose
+# 302132.SZ while historical daily APIs keep returning 300114.SZ through
+# 2025-02-14.
+CORPORATE_ACTION_CODE_ALIASES: dict[str, str] = {
+    "300114.SZ": "302132.SZ",
+}
+
+STOCK_CODE_ALIASES: dict[str, str] = {
+    **BSE_CODE_ALIASES,
+    **CORPORATE_ACTION_CODE_ALIASES,
+}
+
 
 def canonical_stock_code(ts_code: str) -> str:
-    """Return the current BSE code while leaving all other codes unchanged."""
-    return BSE_CODE_ALIASES.get(ts_code, ts_code)
+    """Return the current stock code while leaving unknown codes unchanged."""
+    return STOCK_CODE_ALIASES.get(ts_code, ts_code)

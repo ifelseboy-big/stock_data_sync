@@ -40,6 +40,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     collection_task_id = uuid4()
     legacy_collection_failure_id = uuid4()
     legacy_collection_success_id = uuid4()
+    collection_gap_id = uuid4()
     published_process_id = uuid4()
     warning_process_id = uuid4()
     ignored_warning_process_id = uuid4()
@@ -95,6 +96,22 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     row_count=10,
                     started_at=now - timedelta(minutes=7),
                     finished_at=now - timedelta(minutes=6),
+                ),
+                CollectionTask(
+                    task_id=collection_gap_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name="ths_hot",
+                    scope_key=f"trade_date={now:%Y%m%d};market=热股;is_new=N",
+                    request_params={"trade_date": f"{now:%Y%m%d}", "is_new": "N"},
+                    status=CollectionTaskStatus.EMPTY_VALID.value,
+                    attempt_count=5,
+                    max_attempts=5,
+                    request_count=5,
+                    row_count=0,
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    warning_message="历史接口未返回数据，已记录数据缺口并停止重试",
                 ),
             )
         )
@@ -351,6 +368,13 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     )
     assert warning_alert["level"] == "warning"
     assert warning_alert["title"] == "stock_top_list_daily 数据质量提醒"
+    gap_alert = next(
+        item
+        for item in alerts.json()["items"]
+        if item["id"] == f"acquisition:{collection_gap_id}"
+    )
+    assert gap_alert["level"] == "warning"
+    assert gap_alert["title"] == "ths_hot 数据缺口提醒"
     assert all(
         item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]
     )

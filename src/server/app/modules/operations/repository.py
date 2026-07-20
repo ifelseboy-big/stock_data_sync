@@ -546,7 +546,10 @@ class OperationsRepository:
             CollectionTask.attempt_count.label("attempt"),
             CollectionTask.started_at.label("started_at"),
             CollectionTask.finished_at.label("finished_at"),
-            CollectionTask.error_message.label("error_message"),
+            func.coalesce(
+                CollectionTask.warning_message,
+                CollectionTask.error_message,
+            ).label("error_message"),
             CollectionBatch.scheduled_at.label("sort_time"),
         ).join(CollectionBatch, CollectionBatch.batch_id == CollectionTask.batch_id)
         processing = select(
@@ -712,6 +715,10 @@ class OperationsRepository:
                 "dc_concept_cons 返回%完全重复记录，加工时已确定性去重"
             )
         )
+        collection_warning = (
+            (CollectionTask.status == CollectionTaskStatus.EMPTY_VALID.value)
+            & CollectionTask.warning_message.is_not(None)
+        )
         scheduler_occurred_at = func.coalesce(
             ScheduledJobExecution.finished_at,
             ScheduledJobExecution.started_at,
@@ -722,36 +729,47 @@ class OperationsRepository:
             literal("acquisition").label("source"),
             CollectionTask.api_name.label("task_name"),
             CollectionTask.status.label("status"),
-            CollectionTask.error_code.label("error_code"),
-            CollectionTask.error_message.label("error_message"),
+            case(
+                (collection_warning, "DATA_GAP_WARNING"),
+                else_=CollectionTask.error_code,
+            ).label("error_code"),
+            case(
+                (collection_warning, CollectionTask.warning_message),
+                else_=CollectionTask.error_message,
+            ).label("error_message"),
             CollectionTask.finished_at.label("occurred_at"),
         ).join(
             failed_collection_batch,
             failed_collection_batch.batch_id == CollectionTask.batch_id,
         ).where(
-            CollectionTask.status == CollectionTaskStatus.FAILED.value,
             CollectionTask.finished_at >= since,
-            ~select(literal(1))
-            .select_from(recovered_collection)
-            .join(
-                recovered_collection_batch,
-                recovered_collection_batch.batch_id == recovered_collection.batch_id,
-            )
-            .where(
-                recovered_collection.api_name == CollectionTask.api_name,
-                or_(
-                    recovered_collection.scope_key == CollectionTask.scope_key,
-                    and_(
-                        CollectionTask.api_name == "dc_concept_cons",
-                        recovered_collection_batch.business_date.is_not_distinct_from(
-                            failed_collection_batch.business_date
+            or_(
+                collection_warning,
+                and_(
+                    CollectionTask.status == CollectionTaskStatus.FAILED.value,
+                    ~select(literal(1))
+                    .select_from(recovered_collection)
+                    .join(
+                        recovered_collection_batch,
+                        recovered_collection_batch.batch_id == recovered_collection.batch_id,
+                    )
+                    .where(
+                        recovered_collection.api_name == CollectionTask.api_name,
+                        or_(
+                            recovered_collection.scope_key == CollectionTask.scope_key,
+                            and_(
+                                CollectionTask.api_name == "dc_concept_cons",
+                                recovered_collection_batch.business_date.is_not_distinct_from(
+                                    failed_collection_batch.business_date
+                                ),
+                            ),
                         ),
-                    ),
+                        recovered_collection.status.in_(COLLECTION_SUCCESS),
+                        recovered_collection.finished_at > CollectionTask.finished_at,
+                    )
+                    .exists(),
                 ),
-                recovered_collection.status.in_(COLLECTION_SUCCESS),
-                recovered_collection.finished_at > CollectionTask.finished_at,
-            )
-            .exists(),
+            ),
         )
         processing = (
             select(

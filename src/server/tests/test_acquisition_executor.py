@@ -46,10 +46,12 @@ class FakeProvider:
 class FakeRepository:
     def __init__(self) -> None:
         self.completed_metadata: Any = None
+        self.completed_values: dict[str, Any] = {}
         self.failures: list[dict[str, Any]] = []
 
     def complete_task(self, task: Any, metadata: Any, **values: Any) -> TaskTransition:
         self.completed_metadata = metadata
+        self.completed_values = values
         status = (
             CollectionTaskStatus.EMPTY_VALID if values["empty"] else CollectionTaskStatus.SUCCESS
         )
@@ -207,6 +209,25 @@ def test_historical_backfill_retry_ignores_daily_cutoff(tmp_path: Path) -> None:
     assert transition.next_retry_at is not None
 
 
+def test_exhausted_historical_backfill_records_empty_gap_warning(tmp_path: Path) -> None:
+    provider = FakeProvider([_table([])])
+    repository = FakeRepository()
+
+    transition = _executor(tmp_path, provider, repository, _spec()).execute(
+        _task(
+            batch_type=BatchType.BACKFILL,
+            business_date=date(2025, 1, 20),
+            attempt_count=3,
+            max_attempts=3,
+        )
+    )
+
+    assert transition.status == CollectionTaskStatus.EMPTY_VALID
+    assert repository.completed_metadata.row_count == 0
+    assert "已记录数据缺口并停止重试" in repository.completed_values["warning_message"]
+    assert repository.failures == []
+
+
 def test_allowed_empty_result_seals_zero_row_asset(tmp_path: Path) -> None:
     provider = FakeProvider([_table([])])
     repository = FakeRepository()
@@ -220,6 +241,7 @@ def test_allowed_empty_result_seals_zero_row_asset(tmp_path: Path) -> None:
 
     assert transition.status == CollectionTaskStatus.EMPTY_VALID
     assert repository.completed_metadata.row_count == 0
+    assert repository.completed_values["warning_message"] is None
 
 
 def test_backfill_empty_outside_provider_retention_is_valid(tmp_path: Path) -> None:
@@ -236,6 +258,7 @@ def test_backfill_empty_outside_provider_retention_is_valid(tmp_path: Path) -> N
 
     assert transition.status == CollectionTaskStatus.EMPTY_VALID
     assert repository.completed_metadata.row_count == 0
+    assert "已记录数据缺口并停止重试" in repository.completed_values["warning_message"]
 
 
 def test_current_day_empty_waits_until_cutoff_after_attempt_budget(tmp_path: Path) -> None:

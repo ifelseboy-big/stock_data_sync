@@ -136,13 +136,13 @@ class StockDailyCoreProcessor:
             asset_store,
             (DAILY_SPEC, DAILY_BASIC_SPEC, ADJ_FACTOR_SPEC),
         )
-        daily_rows, daily_rejected, daily_warnings = _normalize_bse_code_rows(
+        daily_rows, daily_rejected, daily_warnings = _normalize_stock_code_rows(
             raw.rows_by_api["daily"],
             api_name="daily",
             key_fields=("trade_date",),
             matching_fields=tuple(field for field in DAILY_SPEC.fields if field != "ts_code"),
         )
-        basic_rows, basic_rejected, basic_warnings = _normalize_bse_code_rows(
+        basic_rows, basic_rejected, basic_warnings = _normalize_stock_code_rows(
             raw.rows_by_api["daily_basic"],
             api_name="daily_basic",
             key_fields=("trade_date",),
@@ -150,7 +150,7 @@ class StockDailyCoreProcessor:
                 field for field in DAILY_BASIC_SPEC.fields if field != "ts_code"
             ),
         )
-        factor_rows, factor_rejected, factor_warnings = _normalize_bse_code_rows(
+        factor_rows, factor_rejected, factor_warnings = _normalize_stock_code_rows(
             raw.rows_by_api["adj_factor"],
             api_name="adj_factor",
             key_fields=("trade_date",),
@@ -226,7 +226,7 @@ class StockDailyLimitProcessor:
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (STK_LIMIT_SPEC,))
-        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+        normalized, rows_rejected, warning_messages = _normalize_stock_code_rows(
             raw.rows_by_api["stk_limit"],
             api_name="stk_limit",
             key_fields=("trade_date",),
@@ -308,7 +308,7 @@ class StockTechnicalDailyProcessor:
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (STK_FACTOR_SPEC,))
-        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+        normalized, rows_rejected, warning_messages = _normalize_stock_code_rows(
             raw.rows_by_api["stk_factor"],
             api_name="stk_factor",
             key_fields=("trade_date",),
@@ -396,7 +396,7 @@ class StockMoneyflowDailyProcessor:
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (MONEYFLOW_SPEC,))
-        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+        normalized, rows_rejected, warning_messages = _normalize_stock_code_rows(
             raw.rows_by_api["moneyflow"],
             api_name="moneyflow",
             key_fields=("trade_date",),
@@ -455,7 +455,7 @@ class StockSuspendDailyProcessor:
         if task.business_date is None:
             raise ProcessingError("stock_suspend_daily requires a task business date")
         raw = read_raw_assets(dependencies, asset_store, (SUSPEND_SPEC,))
-        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+        normalized, rows_rejected, warning_messages = _normalize_stock_code_rows(
             raw.rows_by_api["suspend_d"],
             api_name="suspend_d",
             key_fields=("trade_date", "suspend_type"),
@@ -508,7 +508,7 @@ def _key_by_security_date(
     return result
 
 
-def _normalize_bse_code_rows(
+def _normalize_stock_code_rows(
     rows: tuple[RawRow, ...],
     *,
     api_name: str,
@@ -541,7 +541,7 @@ def _normalize_bse_code_rows(
         )
         if mismatched:
             raise ProcessingError(
-                f"{api_name} BSE code alias conflict for {new_code}; "
+                f"{api_name} stock code alias conflict for {new_code}; "
                 f"fields={mismatched[:5]}"
             )
         duplicate_count += 1
@@ -552,7 +552,7 @@ def _normalize_bse_code_rows(
         return tuple(row for row, _ in normalized.values()), duplicate_count, ()
 
     examples = ", ".join(f"{old}->{new}" for old, new in sorted(mapped.items())[:5])
-    warning = f"{api_name} 已将 {len(mapped)} 个北交所旧代码映射为现行代码"
+    warning = f"{api_name} 已将 {len(mapped)} 个证券历史代码映射为现行代码"
     if duplicate_count:
         warning += f"，并去除 {duplicate_count} 条新旧代码重复记录"
     warning += f"（示例：{examples}）"

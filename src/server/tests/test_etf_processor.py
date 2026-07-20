@@ -18,6 +18,7 @@ from app.modules.processing.processors.etf import (
     EtfDailyProcessor,
     EtfProcessor,
     EtfShareSizeDailyProcessor,
+    EtfShareSizeRows,
 )
 from app.modules.processing.staging import PreparedRow
 from app.storage import LocalRawAssetStore, RawAssetContext
@@ -124,6 +125,23 @@ def test_etf_daily_joins_factor_and_rejects_non_daily_factor_rows(
     assert rows[0]["adj_factor"] == Decimal("1.2")
 
 
+def test_etf_share_size_accepts_recorded_historical_gap(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(store, batch_id, ETF_SHARE_SIZE_SPEC, [])
+
+    prepared = EtfShareSizeDailyProcessor().prepare(
+        _task(batch_id, "etf_share_size_daily"),
+        (dependency,),
+        store,
+    )
+
+    payload = cast(EtfShareSizeRows, prepared.payload)
+    assert payload.business_date == BUSINESS_DATE
+    assert payload.rows == ()
+    assert prepared.rows_read == 0
+
+
 def test_etf_share_size_normalizes_units(tmp_path: Path) -> None:
     store = LocalRawAssetStore(tmp_path)
     batch_id = uuid4()
@@ -163,7 +181,8 @@ def test_etf_share_size_normalizes_units(tmp_path: Path) -> None:
         store,
     )
 
-    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    payload = cast(EtfShareSizeRows, prepared.payload)
+    rows = payload.rows
     assert rows[0]["total_share"] == Decimal("1005000.0")
     assert rows[0]["total_size"] == Decimal("4020000.0")
     assert rows[0]["exchange"] == "SSE"

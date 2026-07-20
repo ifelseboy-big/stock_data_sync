@@ -395,7 +395,7 @@ class StockHotRankDailyProcessor:
                     _hot_rank_row(row, business_date, source="THS", rank_type="FINAL")
                     for row in latest_snapshot
                 )
-                _validate_hot_snapshot(snapshot_rows)
+                _validate_hot_snapshot(snapshot_rows, api_name="ths_hot")
                 rows.extend(snapshot_rows)
                 rows_read += raw.row_count
                 rows_rejected += len(source_rows) - len(latest_snapshot)
@@ -408,12 +408,10 @@ class StockHotRankDailyProcessor:
                     _hot_rank_row(row, business_date, source="DC", rank_type=rank_type)
                     for row in latest_snapshot
                 )
-                _validate_hot_snapshot(snapshot_rows)
+                _validate_hot_snapshot(snapshot_rows, api_name="dc_hot")
                 rows.extend(snapshot_rows)
                 rows_read += raw.row_count
                 rows_rejected += len(source_rows) - len(latest_snapshot)
-        if rows_read == 0:
-            raise ProcessingError("stock_hot_rank_daily cannot be empty")
         return PreparedDataset(
             DatedRows(business_date, tuple(rows)),
             rows_read,
@@ -878,19 +876,37 @@ def _latest_ths_hot_snapshot(
 ) -> tuple[RawRow, ...]:
     if not source_rows:
         return ()
-    snapshots: dict[datetime, list[RawRow]] = {}
+    snapshots: list[list[RawRow]] = []
+    current: list[RawRow] = []
+    seen_stocks: set[str] = set()
+    seen_ranks: set[int | None] = set()
     for row in source_rows:
-        rank_time = _rank_time(row.get("rank_time"), business_date)
-        snapshot_minute = rank_time.replace(second=0, microsecond=0)
-        snapshots.setdefault(snapshot_minute, []).append(row)
-    complete_size = max(len(rows) for rows in snapshots.values())
-    latest_complete_time = max(
-        rank_time for rank_time, rows in snapshots.items() if len(rows) == complete_size
+        ts_code = required_text(row.get("ts_code"), "ts_code")
+        rank = integer_value(row.get("rank"), "rank")
+        if current and (ts_code in seen_stocks or rank in seen_ranks):
+            snapshots.append(current)
+            current = []
+            seen_stocks = set()
+            seen_ranks = set()
+        current.append(row)
+        seen_stocks.add(ts_code)
+        seen_ranks.add(rank)
+    if current:
+        snapshots.append(current)
+
+    complete_size = max(len(rows) for rows in snapshots)
+    latest_complete = max(
+        (rows for rows in snapshots if len(rows) == complete_size),
+        key=lambda rows: max(_rank_time(row.get("rank_time"), business_date) for row in rows),
     )
-    return tuple(snapshots[latest_complete_time])
+    return tuple(latest_complete)
 
 
-def _validate_hot_snapshot(rows: tuple[PreparedRow, ...]) -> None:
+def _validate_hot_snapshot(
+    rows: tuple[PreparedRow, ...],
+    *,
+    api_name: str,
+) -> None:
     stock_keys: set[tuple[object, ...]] = set()
     rank_keys: set[tuple[object, ...]] = set()
     for row in rows:
@@ -909,9 +925,13 @@ def _validate_hot_snapshot(rows: tuple[PreparedRow, ...]) -> None:
             row["rank"],
         )
         if stock_key in stock_keys:
-            raise ProcessingError(f"dc_hot latest snapshot contains duplicate stock: {stock_key}")
+            raise ProcessingError(
+                f"{api_name} latest snapshot contains duplicate stock: {stock_key}"
+            )
         if rank_key in rank_keys:
-            raise ProcessingError(f"dc_hot latest snapshot contains duplicate rank: {rank_key}")
+            raise ProcessingError(
+                f"{api_name} latest snapshot contains duplicate rank: {rank_key}"
+            )
         stock_keys.add(stock_key)
         rank_keys.add(rank_key)
 
