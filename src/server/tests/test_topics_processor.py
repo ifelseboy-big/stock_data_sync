@@ -7,7 +7,13 @@ import pyarrow as pa
 import pytest
 
 from app.catalog import ApiSpec
-from app.catalog.tushare import DC_CONCEPT_CONS_SPEC, DC_HOT_SPEC, THS_INDEX_SPEC, TOP_LIST_SPEC
+from app.catalog.tushare import (
+    DC_CONCEPT_CONS_SPEC,
+    DC_HOT_SPEC,
+    THS_HOT_SPEC,
+    THS_INDEX_SPEC,
+    TOP_LIST_SPEC,
+)
 from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.processors.topics import (
@@ -121,8 +127,9 @@ def test_top_list_processor_keeps_more_complete_duplicate_and_warns(tmp_path: Pa
     assert prepared.rows_rejected == 1
     assert len(prepared.warning_messages) == 1
     assert "920211.BJ" in prepared.warning_messages[0]
-    assert "l_sell, l_buy, l_amount, net_amount, net_rate, amount_rate" in (
-        prepared.warning_messages[0]
+    assert (
+        "l_sell, l_buy, l_amount, net_amount, net_rate, amount_rate"
+        in (prepared.warning_messages[0])
     )
 
 
@@ -223,6 +230,34 @@ def test_dc_hot_processor_rejects_duplicate_rank_in_latest_snapshot(tmp_path: Pa
         StockHotRankDailyProcessor().prepare(_task(batch_id), (dependency,), store)
 
 
+def test_ths_hot_processor_selects_latest_complete_minute_snapshot(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        THS_HOT_SPEC,
+        [
+            _ths_hot_row("000001.SZ", 1, "2026-07-13 21:30:00"),
+            _ths_hot_row("000002.SZ", 2, "2026-07-13 21:30:01"),
+            _ths_hot_row("000002.SZ", 1, "2026-07-13 22:00:00"),
+            _ths_hot_row("000001.SZ", 2, "2026-07-13 22:00:01"),
+            _ths_hot_row("000003.SZ", 1, "2026-07-13 22:01:00"),
+        ],
+        scope_key="trade_date=20260713;market=热股;is_new=N",
+    )
+
+    prepared = StockHotRankDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    payload = cast(DatedRows, prepared.payload)
+    assert [(row["ts_code"], row["rank"]) for row in payload.rows] == [
+        ("000002.SZ", 1),
+        ("000001.SZ", 2),
+    ]
+    assert prepared.rows_read == 5
+    assert prepared.rows_rejected == 3
+
+
 def _top_list_row() -> dict[str, object]:
     return {
         "trade_date": "20260713",
@@ -266,7 +301,23 @@ def _dc_hot_row(ts_code: str, rank: int, rank_time: str) -> dict[str, object]:
         "pct_change": 1.2,
         "current_price": 10.5,
         "hot": 1000.0,
-        "concept": "[\"示例\"]",
+        "concept": '["示例"]',
+        "rank_time": rank_time,
+    }
+
+
+def _ths_hot_row(ts_code: str, rank: int, rank_time: str) -> dict[str, object]:
+    return {
+        "trade_date": "20260713",
+        "data_type": "热股",
+        "ts_code": ts_code,
+        "ts_name": f"股票{rank}",
+        "rank": rank,
+        "pct_change": 1.2,
+        "current_price": 10.5,
+        "concept": '["示例"]',
+        "rank_reason": "热榜",
+        "hot": 1000.0,
         "rank_time": rank_time,
     }
 

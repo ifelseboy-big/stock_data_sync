@@ -181,6 +181,17 @@ def _ths_hot_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
     )
 
 
+def _ths_hot_historical_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
+    if business_date is None:
+        raise ValueError("THS hot API requires a business date")
+    return (
+        RequestScope(
+            f"trade_date={business_date:%Y%m%d};market=热股;is_new=N",
+            {"trade_date": business_date, "market": "热股", "is_new": "N"},
+        ),
+    )
+
+
 def _dc_hot_scopes(business_date: date | None) -> tuple[RequestScope, ...]:
     if business_date is None:
         raise ValueError("DC hot API requires a business date")
@@ -718,9 +729,10 @@ THS_HOT_SPEC = ApiSpec(
         ),
         integer_fields=frozenset({"rank"}),
     ),
-    natural_key=("trade_date", "data_type", "ts_code"),
+    natural_key=("trade_date", "data_type", "ts_code", "rank_time"),
     schedule_group=ScheduleGroup.HOT,
     scope_builder=_ths_hot_scopes,
+    historical_scope_builder=_ths_hot_historical_scopes,
     split_policy=SplitPolicy.TRADE_DATE,
     row_limit=2_000,
     empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,

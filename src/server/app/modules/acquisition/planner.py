@@ -60,7 +60,10 @@ class CollectionPlanner:
                 max_attempts=spec.retry_policy.max_attempts,
             )
             for spec in stage.api_specs
-            for scope in spec.scope_builder(stage.business_date)
+            for scope in spec.scopes(
+                stage.business_date,
+                historical=stage.batch_type in {BatchType.BACKFILL, BatchType.REPAIR},
+            )
         )
         plan = self._repository.append_tasks(
             batch_id,

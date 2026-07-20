@@ -100,6 +100,7 @@ class ApiSpec:
     empty_policy: EmptyPolicy
     retry_policy: RetryPolicy
     date_extractor: DateExtractor
+    historical_scope_builder: ScopeBuilder | None = None
     endpoint_budget_per_minute: int | None = None
     daily_quota: int | None = None
     expected_row_count: ExpectedRowCount | None = None
@@ -122,6 +123,16 @@ class ApiSpec:
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive when configured")
+
+    def scopes(
+        self, business_date: date | None, *, historical: bool = False
+    ) -> Iterable[RequestScope]:
+        builder = (
+            self.historical_scope_builder
+            if historical and self.historical_scope_builder is not None
+            else self.scope_builder
+        )
+        return builder(business_date)
 
 
 @dataclass(frozen=True, slots=True)

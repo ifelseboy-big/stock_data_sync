@@ -90,3 +90,25 @@ async def test_backfill_collects_theme_master_and_paginated_members_together() -
     assert [spec.api_name for spec in planned] == ["dc_concept", "dc_concept_cons"]
     assert deferred_count == 0
     session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_hot_scope_uses_historical_provider_mode() -> None:
+    service, _session = _service()
+    spec = service._api_specs.get("ths_hot")
+
+    historical = await service._resolve_scopes(
+        spec,
+        date(2026, 1, 9),
+        batch_type=BatchType.REPAIR,
+    )
+    current = await service._resolve_scopes(
+        spec,
+        date(2026, 1, 9),
+        batch_type=BatchType.HOT,
+    )
+
+    assert historical[0].scope_key.endswith("is_new=N")
+    assert historical[0].params["is_new"] == "N"
+    assert current[0].scope_key.endswith("is_new=Y")
+    assert current[0].params["is_new"] == "Y"

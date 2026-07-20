@@ -56,6 +56,9 @@ def _spec() -> ApiSpec:
         empty_policy=EmptyPolicy.RETRY_UNTIL_CUTOFF,
         retry_policy=RetryPolicy(),
         date_extractor=lambda record: None,
+        historical_scope_builder=lambda business_date: (
+            RequestScope("history", {"trade_date": business_date, "is_new": "N"}),
+        ),
     )
 
 
@@ -102,3 +105,26 @@ def test_planner_converts_date_params_and_freezes_plan() -> None:
 
     assert result.plan is not None and result.plan.frozen
     assert repository.blueprints[0].request_params == {"trade_date": "20260717"}
+
+
+def test_backfill_planner_uses_historical_scopes() -> None:
+    repository = FakeRepository(True)
+    stage = _stage()
+    historical_stage = StagePlan(
+        batch_type=BatchType.BACKFILL,
+        business_date=stage.business_date,
+        scheduled_at=stage.scheduled_at,
+        api_specs=stage.api_specs,
+        finalize=True,
+    )
+
+    CollectionPlanner(repository).plan(  # type: ignore[arg-type]
+        historical_stage,
+        now=datetime.now(TIMEZONE),
+    )
+
+    assert repository.blueprints[0].scope_key == "history"
+    assert repository.blueprints[0].request_params == {
+        "trade_date": "20260717",
+        "is_new": "N",
+    }

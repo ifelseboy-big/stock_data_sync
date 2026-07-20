@@ -390,11 +390,15 @@ class StockHotRankDailyProcessor:
             if dependency.dependency_name == "ths_hot":
                 raw = read_raw_assets((dependency,), asset_store, (THS_HOT_SPEC,))
                 source_rows = raw.rows_by_api["ths_hot"]
-                rows.extend(
+                latest_snapshot = _latest_ths_hot_snapshot(source_rows, business_date)
+                snapshot_rows = tuple(
                     _hot_rank_row(row, business_date, source="THS", rank_type="FINAL")
-                    for row in source_rows
+                    for row in latest_snapshot
                 )
+                _validate_hot_snapshot(snapshot_rows)
+                rows.extend(snapshot_rows)
                 rows_read += raw.row_count
+                rows_rejected += len(source_rows) - len(latest_snapshot)
             elif dependency.dependency_name == "dc_hot":
                 raw = read_raw_assets((dependency,), asset_store, (DC_HOT_SPEC,))
                 source_rows = raw.rows_by_api["dc_hot"]
@@ -868,6 +872,24 @@ def _latest_dc_hot_snapshot(
     return tuple(snapshots[latest_complete_time])
 
 
+def _latest_ths_hot_snapshot(
+    source_rows: tuple[RawRow, ...],
+    business_date: date,
+) -> tuple[RawRow, ...]:
+    if not source_rows:
+        return ()
+    snapshots: dict[datetime, list[RawRow]] = {}
+    for row in source_rows:
+        rank_time = _rank_time(row.get("rank_time"), business_date)
+        snapshot_minute = rank_time.replace(second=0, microsecond=0)
+        snapshots.setdefault(snapshot_minute, []).append(row)
+    complete_size = max(len(rows) for rows in snapshots.values())
+    latest_complete_time = max(
+        rank_time for rank_time, rows in snapshots.items() if len(rows) == complete_size
+    )
+    return tuple(snapshots[latest_complete_time])
+
+
 def _validate_hot_snapshot(rows: tuple[PreparedRow, ...]) -> None:
     stock_keys: set[tuple[object, ...]] = set()
     rank_keys: set[tuple[object, ...]] = set()
@@ -975,9 +997,7 @@ def _deduplicate_top_list_rows(
         else:
             raise ProcessingError(f"top_list contains conflicting duplicate key: {key}")
         missing_fields = tuple(
-            field
-            for field, value in discarded.items()
-            if value is None and kept[field] is not None
+            field for field, value in discarded.items() if value is None and kept[field] is not None
         )
         warning_messages.append(
             "top_list 重复记录字段不完整，已保留较完整记录："

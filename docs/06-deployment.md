@@ -311,6 +311,12 @@ sudo stock-data-sync upgrade \
 
 带 `--migrate` 的升级如果在迁移后健康检查失败，不会自动降级数据库，也不会把旧程序强行运行在新 revision 上；新程序目录和数据库备份会保留，Server 与 Scheduler 停止，等待人工诊断。
 
+v0.1.22 修复同花顺热榜历史回填：当日任务继续使用 `is_new=Y`，BACKFILL/REPAIR 自动使用 `is_new=N` 并由加工层选择最新完整分钟快照。该版本不新增数据库迁移，目标 revision 仍为 `20260720_0011`，从 v0.1.21 升级不需要 `--migrate`：
+
+```bash
+sudo stock-data-sync upgrade --version 0.1.22
+```
+
 详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。
 
 ## 12. 手工备份与恢复

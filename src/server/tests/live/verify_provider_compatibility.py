@@ -96,6 +96,46 @@ def _verify_hot_rank(api: OperationsApi) -> dict[str, Any]:
     return {"batchIds": [str(value) for value in batch_ids], "rawRows": raw_rows, "rows": len(rows)}
 
 
+def _verify_ths_hot_history(api: OperationsApi) -> dict[str, Any]:
+    business_date = date(2026, 1, 9)
+    batch_ids = _repair(
+        api,
+        business_date=business_date,
+        api_names=["ths_hot", "dc_hot"],
+        label="ths_hot historical snapshots",
+    )
+    with SyncSessionFactory() as session:
+        raw_rows = int(
+            session.scalar(
+                select(func.coalesce(func.sum(CollectionTask.row_count), 0)).where(
+                    CollectionTask.batch_id.in_(batch_ids),
+                    CollectionTask.api_name == "ths_hot",
+                )
+            )
+            or 0
+        )
+        rows = tuple(
+            session.scalars(
+                select(StockHotRankDaily).where(
+                    StockHotRankDaily.trade_date == business_date,
+                    StockHotRankDaily.source == "THS",
+                )
+            )
+        )
+    stock_keys = {row.ts_code for row in rows}
+    rank_keys = {row.rank for row in rows}
+    snapshot_minutes = {row.rank_time.replace(second=0, microsecond=0) for row in rows}
+    if not rows or raw_rows <= len(rows):
+        raise LiveWorkflowError(
+            f"ths_hot did not reduce historical snapshots: raw={raw_rows}, final={len(rows)}"
+        )
+    if len(stock_keys) != len(rows) or len(rank_keys) != len(rows):
+        raise LiveWorkflowError("ths_hot final snapshot contains duplicate stock or rank")
+    if len(snapshot_minutes) != 1:
+        raise LiveWorkflowError("ths_hot final data contains more than one minute snapshot")
+    return {"batchIds": [str(value) for value in batch_ids], "rawRows": raw_rows, "rows": len(rows)}
+
+
 def _verify_board_moneyflow(api: OperationsApi) -> dict[str, Any]:
     business_date = date(2026, 5, 20)
     batch_ids = _repair(
@@ -141,9 +181,7 @@ def _verify_theme_retention(api: OperationsApi) -> dict[str, Any]:
         }
         processing_statuses = tuple(
             session.scalars(
-                select(ProcessingTask.status).where(
-                    ProcessingTask.source_batch_id.in_(batch_ids)
-                )
+                select(ProcessingTask.status).where(ProcessingTask.source_batch_id.in_(batch_ids))
             )
         )
         theme_count = int(
@@ -191,6 +229,7 @@ def run(report_path: Path) -> dict[str, Any]:
             "generatedAt": datetime.now(UTC).isoformat(),
             "database": database,
             "dcHot": _verify_hot_rank(api),
+            "thsHotHistory": _verify_ths_hot_history(api),
             "boardMoneyflow": _verify_board_moneyflow(api),
             "themeRetention": _verify_theme_retention(api),
             "passed": True,

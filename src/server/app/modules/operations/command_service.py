@@ -667,7 +667,7 @@ class OperationCommandService:
         task_values: list[dict[str, object]] = []
         for spec in specs:
             try:
-                scopes = await self._resolve_scopes(spec, business_date)
+                scopes = await self._resolve_scopes(spec, business_date, batch_type=batch_type)
             except ValueError as exc:
                 raise OperationCommandError(str(exc), status_code=422) from exc
             for scope in scopes:
@@ -769,13 +769,20 @@ class OperationCommandService:
         self,
         spec: ApiSpec,
         business_date: date | None,
+        *,
+        batch_type: BatchType,
     ) -> tuple[RequestScope, ...]:
         if spec.api_name == "ths_member":
             codes = await self._ths_board_codes()
             if not codes:
                 raise OperationCommandError("同花顺概念和主题主数据尚未发布，不能采集板块成分")
             return ths_member_scopes(codes)
-        return tuple(spec.scope_builder(business_date))
+        return tuple(
+            spec.scopes(
+                business_date,
+                historical=batch_type in {BatchType.BACKFILL, BatchType.REPAIR},
+            )
+        )
 
     async def _ths_board_codes(self) -> tuple[str, ...]:
         concept_codes = tuple(

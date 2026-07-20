@@ -27,6 +27,7 @@ from app.catalog.tushare import (
     MONEYFLOW_CNT_THS_SPEC,
     STK_FACTOR_SPEC,
     STK_LIMIT_SPEC,
+    THS_HOT_SPEC,
     THS_INDEX_SPEC,
     TRADE_CAL_SPEC,
     build_tushare_api_registry,
@@ -165,11 +166,16 @@ def test_special_catalog_uses_entity_splitting_and_date_pagination() -> None:
     ]
     assert DC_CONCEPT_CONS_SPEC.split_policy == SplitPolicy.OFFSET
     assert DC_HOT_SPEC.natural_key == ()
+    assert THS_HOT_SPEC.natural_key == ("trade_date", "data_type", "ts_code", "rank_time")
+    assert [scope.params["is_new"] for scope in THS_HOT_SPEC.scopes(date(2026, 1, 9))] == ["Y"]
+    assert [
+        scope.params["is_new"] for scope in THS_HOT_SPEC.scopes(date(2026, 1, 9), historical=True)
+    ] == ["N"]
     assert MONEYFLOW_CNT_THS_SPEC.natural_key == ("trade_date", "name")
     assert DC_CONCEPT_SPEC.historical_retention_months == 3
-    assert [
-        scope.scope_key for scope in DC_CONCEPT_CONS_SPEC.scope_builder(date(2026, 7, 17))
-    ] == ["trade_date=20260717"]
+    assert [scope.scope_key for scope in DC_CONCEPT_CONS_SPEC.scope_builder(date(2026, 7, 17))] == [
+        "trade_date=20260717"
+    ]
 
 
 def test_index_catalog_uses_configured_index_and_month_scopes() -> None:
