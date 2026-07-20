@@ -6,6 +6,7 @@ from sqlalchemy import Table, select
 from sqlalchemy.orm import Session
 
 from app.catalog import WriteStrategy
+from app.catalog.bse_codes import canonical_stock_code
 from app.catalog.tushare import (
     ADJ_FACTOR_SPEC,
     DAILY_BASIC_SPEC,
@@ -135,12 +136,32 @@ class StockDailyCoreProcessor:
             asset_store,
             (DAILY_SPEC, DAILY_BASIC_SPEC, ADJ_FACTOR_SPEC),
         )
-        daily = _key_by_security_date(raw.rows_by_api["daily"], task.business_date, self.name)
+        daily_rows, daily_rejected, daily_warnings = _normalize_bse_code_rows(
+            raw.rows_by_api["daily"],
+            api_name="daily",
+            key_fields=("trade_date",),
+            matching_fields=tuple(field for field in DAILY_SPEC.fields if field != "ts_code"),
+        )
+        basic_rows, basic_rejected, basic_warnings = _normalize_bse_code_rows(
+            raw.rows_by_api["daily_basic"],
+            api_name="daily_basic",
+            key_fields=("trade_date",),
+            matching_fields=tuple(
+                field for field in DAILY_BASIC_SPEC.fields if field != "ts_code"
+            ),
+        )
+        factor_rows, factor_rejected, factor_warnings = _normalize_bse_code_rows(
+            raw.rows_by_api["adj_factor"],
+            api_name="adj_factor",
+            key_fields=("trade_date",),
+            matching_fields=("trade_date", "adj_factor"),
+        )
+        daily = _key_by_security_date(daily_rows, task.business_date, self.name)
         daily_basic = _key_by_security_date(
-            raw.rows_by_api["daily_basic"], task.business_date, self.name
+            basic_rows, task.business_date, self.name
         )
         adj_factor = _key_by_security_date(
-            raw.rows_by_api["adj_factor"], task.business_date, self.name
+            factor_rows, task.business_date, self.name
         )
         _require_same_keys("daily", daily, "daily_basic", daily_basic)
         _require_key_coverage("adj_factor", adj_factor, "daily", daily)
@@ -158,7 +179,14 @@ class StockDailyCoreProcessor:
         return PreparedDataset(
             payload=rows,
             rows_read=raw.row_count,
-            rows_rejected=len(adj_factor) - len(daily),
+            rows_rejected=(
+                daily_rejected
+                + basic_rejected
+                + factor_rejected
+                + len(adj_factor)
+                - len(daily)
+            ),
+            warning_messages=(*daily_warnings, *basic_warnings, *factor_warnings),
         )
 
     def write(
@@ -198,12 +226,23 @@ class StockDailyLimitProcessor:
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (STK_LIMIT_SPEC,))
+        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+            raw.rows_by_api["stk_limit"],
+            api_name="stk_limit",
+            key_fields=("trade_date",),
+            matching_fields=("trade_date", "pre_close", "up_limit", "down_limit"),
+        )
         rows = tuple(
-            _stock_limit_row(source, task.business_date) for source in raw.rows_by_api["stk_limit"]
+            _stock_limit_row(source, task.business_date) for source in normalized
         )
         if not rows:
             raise ProcessingError("stock_daily.limit cannot publish an empty trading day")
-        return PreparedDataset(payload=rows, rows_read=raw.row_count)
+        return PreparedDataset(
+            payload=rows,
+            rows_read=raw.row_count,
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
+        )
 
     def write(
         self,
@@ -269,13 +308,34 @@ class StockTechnicalDailyProcessor:
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (STK_FACTOR_SPEC,))
+        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+            raw.rows_by_api["stk_factor"],
+            api_name="stk_factor",
+            key_fields=("trade_date",),
+            matching_fields=(
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "pre_close",
+                "change",
+                "pct_change",
+                "vol",
+                "amount",
+            ),
+        )
         rows = tuple(
-            _stock_technical_row(source, task.business_date)
-            for source in raw.rows_by_api["stk_factor"]
+            _stock_technical_row(source, task.business_date) for source in normalized
         )
         if not rows:
             raise ProcessingError("stock_technical_daily cannot publish an empty trading day")
-        return PreparedDataset(payload=rows, rows_read=raw.row_count)
+        return PreparedDataset(
+            payload=rows,
+            rows_read=raw.row_count,
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
+        )
 
     def write(
         self,
@@ -336,12 +396,25 @@ class StockMoneyflowDailyProcessor:
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
         raw = read_raw_assets(dependencies, asset_store, (MONEYFLOW_SPEC,))
+        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+            raw.rows_by_api["moneyflow"],
+            api_name="moneyflow",
+            key_fields=("trade_date",),
+            matching_fields=tuple(
+                field for field in MONEYFLOW_SPEC.fields if field != "ts_code"
+            ),
+        )
         rows = tuple(
-            _moneyflow_row(source, task.business_date) for source in raw.rows_by_api["moneyflow"]
+            _moneyflow_row(source, task.business_date) for source in normalized
         )
         if not rows:
             raise ProcessingError("stock_moneyflow_daily cannot publish an empty trading day")
-        return PreparedDataset(payload=rows, rows_read=raw.row_count)
+        return PreparedDataset(
+            payload=rows,
+            rows_read=raw.row_count,
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
+        )
 
     def write(
         self,
@@ -382,12 +455,20 @@ class StockSuspendDailyProcessor:
         if task.business_date is None:
             raise ProcessingError("stock_suspend_daily requires a task business date")
         raw = read_raw_assets(dependencies, asset_store, (SUSPEND_SPEC,))
+        normalized, rows_rejected, warning_messages = _normalize_bse_code_rows(
+            raw.rows_by_api["suspend_d"],
+            api_name="suspend_d",
+            key_fields=("trade_date", "suspend_type"),
+            matching_fields=("trade_date", "suspend_type", "suspend_timing"),
+        )
         rows = tuple(
-            _suspend_row(source, task.business_date) for source in raw.rows_by_api["suspend_d"]
+            _suspend_row(source, task.business_date) for source in normalized
         )
         return PreparedDataset(
             payload=(task.business_date, rows),
             rows_read=raw.row_count,
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
         )
 
     def write(
@@ -425,6 +506,61 @@ def _key_by_security_date(
         require_business_date(trade_date, business_date, dataset)
         result[(ts_code, trade_date)] = row
     return result
+
+
+def _normalize_bse_code_rows(
+    rows: tuple[RawRow, ...],
+    *,
+    api_name: str,
+    key_fields: tuple[str, ...],
+    matching_fields: tuple[str, ...],
+) -> tuple[tuple[RawRow, ...], int, tuple[str, ...]]:
+    normalized: dict[tuple[object, ...], tuple[RawRow, bool]] = {}
+    mapped: dict[str, str] = {}
+    duplicate_count = 0
+
+    for source in rows:
+        old_code = required_text(source.get("ts_code"), "ts_code")
+        new_code = canonical_stock_code(old_code)
+        is_alias = new_code != old_code
+        row = {**source, "ts_code": new_code} if is_alias else source
+        if is_alias:
+            mapped[old_code] = new_code
+
+        key = (new_code, *(row.get(field) for field in key_fields))
+        previous = normalized.get(key)
+        if previous is None:
+            normalized[key] = (row, is_alias)
+            continue
+
+        previous_row, previous_is_alias = previous
+        mismatched = tuple(
+            field
+            for field in matching_fields
+            if previous_row.get(field) != row.get(field)
+        )
+        if mismatched:
+            raise ProcessingError(
+                f"{api_name} BSE code alias conflict for {new_code}; "
+                f"fields={mismatched[:5]}"
+            )
+        duplicate_count += 1
+        if previous_is_alias and not is_alias:
+            normalized[key] = (row, False)
+
+    if not mapped:
+        return tuple(row for row, _ in normalized.values()), duplicate_count, ()
+
+    examples = ", ".join(f"{old}->{new}" for old, new in sorted(mapped.items())[:5])
+    warning = f"{api_name} 已将 {len(mapped)} 个北交所旧代码映射为现行代码"
+    if duplicate_count:
+        warning += f"，并去除 {duplicate_count} 条新旧代码重复记录"
+    warning += f"（示例：{examples}）"
+    return (
+        tuple(row for row, _ in normalized.values()),
+        duplicate_count,
+        (warning,),
+    )
 
 
 def _require_same_keys(
