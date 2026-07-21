@@ -96,10 +96,14 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     const command = await retryAllFailedProcessingTasks({ reason: value.reason }, value)
     const retried = Number(command.result.retryCount ?? 0)
     const skipped = Number(command.result.skippedDependencyCount ?? 0)
+    const deduplicated = Number(command.result.deduplicatedCount ?? 0)
+    const skippedActive = Number(command.result.skippedActiveCount ?? 0)
+    const notes: string[] = []
+    if (skipped) notes.push(`${skipped} 个因依赖未就绪跳过`)
+    if (deduplicated) notes.push(`去除 ${deduplicated} 个重复失败`)
+    if (skippedActive) notes.push(`跳过 ${skippedActive} 个已有活动任务的范围`)
     ElMessage.success(
-      skipped
-        ? `已将 ${retried} 个任务加入队列，${skipped} 个因依赖未就绪跳过`
-        : `已将 ${retried} 个失败任务重新加入加工队列`,
+      `已将 ${retried} 个逻辑任务加入加工队列${notes.length ? `；${notes.join('，')}` : ''}`,
     )
     retryAllOpen.value = false
     await Promise.all([load(), loadFailed()])
@@ -317,7 +321,7 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     <AdminCommandDialog
       v-model="retryAllOpen"
       title="重试全部失败加工任务"
-      :description="`将重试近 30 天仍未恢复的 ${failedData?.total ?? 0} 个失败任务。依赖未就绪的任务会跳过并在结果中提示。`"
+      :description="`将重试近 30 天仍未恢复的 ${failedData?.total ?? 0} 个失败记录。系统会按数据集和业务日期去重；依赖未就绪或已有活动任务的范围会跳过并提示。`"
       confirm-text="确认全部重试"
       :loading="retryAllLoading"
       @submit="submitRetryAll"

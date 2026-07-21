@@ -73,6 +73,9 @@ class CollectionExecutor:
                     completed_at=now,
                 )
 
+            if _outside_historical_retention(task, spec, today=now.date()):
+                return self._handle_empty(task, spec, stats, now)
+
             first_page = self._query_page(spec, task.request_params, offset=0)
             stats.request_count += first_page.request_count
             first_table = first_page.table
@@ -285,9 +288,7 @@ class CollectionExecutor:
                 request_count=stats.request_count,
                 empty=True,
                 completed_at=now,
-                warning_message=(
-                    _historical_gap_warning(task) if historical_gap else None
-                ),
+                warning_message=(_historical_gap_warning(task) if historical_gap else None),
             )
         if spec.empty_policy == EmptyPolicy.UNSUPPORTED:
             return self._repository.fail_task(

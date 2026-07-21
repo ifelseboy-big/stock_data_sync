@@ -133,19 +133,56 @@ def test_top_list_processor_keeps_more_complete_duplicate_and_warns(tmp_path: Pa
     )
 
 
-def test_top_list_processor_still_rejects_true_duplicate_conflicts(tmp_path: Path) -> None:
+def test_top_list_processor_merges_name_only_duplicate_and_warns(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    first = _top_list_row() | {"name": "N示例转"}
+    second = _top_list_row() | {"name": "示例转债"}
+    dependency = _asset(store, batch_id, TOP_LIST_SPEC, [first, second])
+
+    prepared = StockTopListDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    payload = cast(DatedRows, prepared.payload)
+    assert len(payload.rows) == 1
+    assert payload.rows[0]["name"] == "N示例转"
+    assert prepared.rows_rejected == 1
+    assert "名称或数值精度差异" in prepared.warning_messages[0]
+    assert "name" in prepared.warning_messages[0]
+
+
+def test_top_list_processor_merges_small_provider_rounding_difference(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    first = _top_list_row() | {"l_buy": 323383200.0, "net_amount": 123440200.0}
+    second = _top_list_row() | {"l_buy": 323383102.12, "net_amount": 123440096.73}
+    dependency = _asset(store, batch_id, TOP_LIST_SPEC, [first, second])
+
+    prepared = StockTopListDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    payload = cast(DatedRows, prepared.payload)
+    assert len(payload.rows) == 1
+    assert str(payload.rows[0]["l_buy"]) == "323383102.12"
+    assert str(payload.rows[0]["net_amount"]) == "123440096.73"
+    assert prepared.rows_rejected == 1
+    assert "l_buy, net_amount" in prepared.warning_messages[0]
+
+
+def test_top_list_processor_quarantines_true_duplicate_conflict(tmp_path: Path) -> None:
     store = LocalRawAssetStore(tmp_path)
     batch_id = uuid4()
     first = _top_list_row() | {"l_buy": 100.0}
     second = _top_list_row() | {"l_buy": 200.0}
-    dependency = _asset(store, batch_id, TOP_LIST_SPEC, [first, second])
+    valid = _top_list_row() | {"ts_code": "920212.BJ", "name": "有效股票"}
+    dependency = _asset(store, batch_id, TOP_LIST_SPEC, [first, second, valid])
 
-    with pytest.raises(ProcessingError, match="conflicting duplicate key"):
-        StockTopListDailyProcessor().prepare(
-            _task(batch_id),
-            (dependency,),
-            store,
-        )
+    prepared = StockTopListDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+    payload = cast(DatedRows, prepared.payload)
+    assert [row["ts_code"] for row in payload.rows] == ["920212.BJ"]
+    assert prepared.rows_read == 3
+    assert prepared.rows_rejected == 2
+    assert "已隔离该主键并继续发布其余数据" in prepared.warning_messages[0]
+    assert "l_buy" in prepared.warning_messages[0]
 
 
 def test_theme_member_processor_deduplicates_identical_paged_rows(tmp_path: Path) -> None:

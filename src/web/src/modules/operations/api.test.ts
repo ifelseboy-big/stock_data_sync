@@ -5,6 +5,7 @@ import { http } from '@/api/http'
 import {
   createRepair,
   getDatasetReleaseCoverage,
+  retryAllFailedCollectionTasks,
   retryAllFailedProcessingTasks,
   retryFailedCollectionTasks,
 } from './api'
@@ -77,6 +78,10 @@ describe('bulk retry commands', () => {
       { reason: '批量重试采集' },
       { idempotencyKey: 'bulk-collection-request' },
     )
+    await retryAllFailedCollectionTasks(
+      { reason: '全局重试采集' },
+      { idempotencyKey: 'global-collection-request' },
+    )
     await retryAllFailedProcessingTasks(
       { reason: '批量重试加工' },
       { idempotencyKey: 'bulk-processing-request' },
@@ -90,6 +95,12 @@ describe('bulk retry commands', () => {
     )
     expect(http.post).toHaveBeenNthCalledWith(
       2,
+      '/operations/commands/collection-tasks/retry-all-failed',
+      { reason: '全局重试采集' },
+      expect.objectContaining({ headers: expect.any(Object) }),
+    )
+    expect(http.post).toHaveBeenNthCalledWith(
+      3,
       '/operations/commands/processing-tasks/retry-all-failed',
       { reason: '批量重试加工' },
       expect.objectContaining({ headers: expect.any(Object) }),

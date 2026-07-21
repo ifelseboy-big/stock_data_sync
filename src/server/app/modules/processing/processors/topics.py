@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from decimal import Decimal, InvalidOperation
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -929,9 +930,7 @@ def _validate_hot_snapshot(
                 f"{api_name} latest snapshot contains duplicate stock: {stock_key}"
             )
         if rank_key in rank_keys:
-            raise ProcessingError(
-                f"{api_name} latest snapshot contains duplicate rank: {rank_key}"
-            )
+            raise ProcessingError(f"{api_name} latest snapshot contains duplicate rank: {rank_key}")
         stock_keys.add(stock_key)
         rank_keys.add(rank_key)
 
@@ -1000,9 +999,12 @@ def _deduplicate_top_list_rows(
     rows: tuple[PreparedRow, ...],
 ) -> tuple[tuple[PreparedRow, ...], tuple[str, ...]]:
     unique: dict[tuple[object, object, object], PreparedRow] = {}
+    quarantined: set[tuple[object, object, object]] = set()
     warning_messages: list[str] = []
     for row in rows:
         key = (row["trade_date"], row["ts_code"], row["reason"])
+        if key in quarantined:
+            continue
         existing = unique.get(key)
         if existing is None:
             unique[key] = row
@@ -1015,7 +1017,23 @@ def _deduplicate_top_list_rows(
         elif _row_is_compatible_subset(row, existing):
             kept, discarded = existing, row
         else:
-            raise ProcessingError(f"top_list contains conflicting duplicate key: {key}")
+            merged, differing_fields = _merge_compatible_top_list_rows(existing, row)
+            if merged is None:
+                del unique[key]
+                quarantined.add(key)
+                warning_messages.append(
+                    "top_list 重复记录存在实质冲突，已隔离该主键并继续发布其余数据："
+                    f"日期 {key[0]}，股票 {key[1]}，上榜原因“{key[2]}”；"
+                    f"冲突字段：{', '.join(differing_fields)}"
+                )
+                continue
+            unique[key] = merged
+            warning_messages.append(
+                "top_list 重复记录仅有名称或数值精度差异，已确定性合并："
+                f"日期 {key[0]}，股票 {key[1]}，上榜原因“{key[2]}”；"
+                f"差异字段：{', '.join(differing_fields)}"
+            )
+            continue
         missing_fields = tuple(
             field for field, value in discarded.items() if value is None and kept[field] is not None
         )
@@ -1025,6 +1043,79 @@ def _deduplicate_top_list_rows(
             f"缺失字段：{', '.join(missing_fields)}"
         )
     return tuple(unique.values()), tuple(warning_messages)
+
+
+_TOP_LIST_MONETARY_FIELDS = frozenset(
+    {"amount", "l_sell", "l_buy", "l_amount", "net_amount", "float_values"}
+)
+_TOP_LIST_DECIMAL_FIELDS = frozenset(
+    {"close", "pct_change", "turnover_rate", "net_rate", "amount_rate"}
+)
+
+
+def _merge_compatible_top_list_rows(
+    first: PreparedRow,
+    second: PreparedRow,
+) -> tuple[PreparedRow | None, tuple[str, ...]]:
+    merged = dict(first)
+    differing_fields = tuple(field for field in first if first[field] != second[field])
+    for field in differing_fields:
+        first_value = first[field]
+        second_value = second[field]
+        if first_value is None:
+            merged[field] = second_value
+            continue
+        if second_value is None or field == "name":
+            continue
+        if field in _TOP_LIST_MONETARY_FIELDS and _decimal_values_close(
+            first_value,
+            second_value,
+            absolute=Decimal("500"),
+            relative=Decimal("0.001"),
+        ):
+            merged[field] = _more_precise_decimal(first_value, second_value)
+            continue
+        if field in _TOP_LIST_DECIMAL_FIELDS and _decimal_values_close(
+            first_value,
+            second_value,
+            absolute=Decimal("0.01"),
+            relative=Decimal("0.001"),
+        ):
+            merged[field] = _more_precise_decimal(first_value, second_value)
+            continue
+        return None, differing_fields
+    return merged, differing_fields
+
+
+def _decimal_values_close(
+    first: object,
+    second: object,
+    *,
+    absolute: Decimal,
+    relative: Decimal,
+) -> bool:
+    try:
+        first_decimal = Decimal(str(first))
+        second_decimal = Decimal(str(second))
+    except InvalidOperation:
+        return False
+    difference = abs(first_decimal - second_decimal)
+    scale = max(abs(first_decimal), abs(second_decimal))
+    return difference <= absolute and (scale == 0 or difference <= scale * relative)
+
+
+def _more_precise_decimal(first: object, second: object) -> object:
+    first_decimal = Decimal(str(first))
+    second_decimal = Decimal(str(second))
+    first_exponent = first_decimal.as_tuple().exponent
+    second_exponent = second_decimal.as_tuple().exponent
+    if (
+        isinstance(first_exponent, int)
+        and isinstance(second_exponent, int)
+        and second_exponent < first_exponent
+    ):
+        return second
+    return first
 
 
 def _deduplicate_theme_member_rows(

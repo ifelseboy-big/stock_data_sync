@@ -245,7 +245,7 @@ def test_allowed_empty_result_seals_zero_row_asset(tmp_path: Path) -> None:
 
 
 def test_backfill_empty_outside_provider_retention_is_valid(tmp_path: Path) -> None:
-    provider = FakeProvider([_table([])])
+    provider = FakeProvider([])
     repository = FakeRepository()
     old_date = datetime.now(TIMEZONE).date() - timedelta(days=120)
 
@@ -259,6 +259,7 @@ def test_backfill_empty_outside_provider_retention_is_valid(tmp_path: Path) -> N
     assert transition.status == CollectionTaskStatus.EMPTY_VALID
     assert repository.completed_metadata.row_count == 0
     assert "已记录数据缺口并停止重试" in repository.completed_values["warning_message"]
+    assert provider.calls == []
 
 
 def test_current_day_empty_waits_until_cutoff_after_attempt_budget(tmp_path: Path) -> None:

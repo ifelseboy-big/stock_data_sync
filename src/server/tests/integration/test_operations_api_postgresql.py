@@ -41,8 +41,10 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     legacy_collection_failure_id = uuid4()
     legacy_collection_success_id = uuid4()
     collection_gap_id = uuid4()
+    collection_gap_duplicate_id = uuid4()
     published_process_id = uuid4()
     warning_process_id = uuid4()
+    warning_process_duplicate_id = uuid4()
     ignored_warning_process_id = uuid4()
     blocked_process_id = uuid4()
     recovered_failure_id = uuid4()
@@ -112,6 +114,22 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     started_at=now - timedelta(minutes=5),
                     finished_at=now - timedelta(minutes=4),
                     warning_message="历史接口未返回数据，已记录数据缺口并停止重试",
+                ),
+                CollectionTask(
+                    task_id=collection_gap_duplicate_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name="ths_hot",
+                    scope_key=f"trade_date={now:%Y%m%d};market=热股;is_new=legacy",
+                    request_params={"trade_date": f"{now:%Y%m%d}", "is_new": "legacy"},
+                    status=CollectionTaskStatus.EMPTY_VALID.value,
+                    attempt_count=5,
+                    max_attempts=5,
+                    request_count=5,
+                    row_count=0,
+                    started_at=now - timedelta(minutes=7),
+                    finished_at=now - timedelta(minutes=6),
+                    warning_message="较早的历史数据缺口",
                 ),
             )
         )
@@ -200,6 +218,24 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     warning_message="已保留字段更完整的重复记录",
                 ),
                 ProcessingTask(
+                    process_id=warning_process_duplicate_id,
+                    source_batch_id=batch_id,
+                    process_type="stock_top_list_daily@1",
+                    business_date=now.date(),
+                    output_dataset="stock_top_list_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=7),
+                    finished_at=now - timedelta(minutes=6),
+                    rows_read=2,
+                    rows_rejected=1,
+                    rows_written=1,
+                    warning_message="较早的数据质量提醒",
+                ),
+                ProcessingTask(
                     process_id=ignored_warning_process_id,
                     source_batch_id=batch_id,
                     process_type="market_theme_member_daily@1",
@@ -215,9 +251,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     rows_read=2,
                     rows_rejected=1,
                     rows_written=1,
-                    warning_message=(
-                        "dc_concept_cons 返回 1 条完全重复记录，加工时已确定性去重"
-                    ),
+                    warning_message=("dc_concept_cons 返回 1 条完全重复记录，加工时已确定性去重"),
                 ),
                 ProcessingTask(
                     process_id=recovered_failure_id,
@@ -354,33 +388,28 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert any(item["datasetName"] == "test_daily" for item in releases.json()["items"])
     assert any(item["endpoint"] == "daily" for item in provider.json()["endpoints"])
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
-    assert all(
-        item["id"] != str(recovered_failure_id) for item in unresolved_runs.json()["items"]
-    )
+    assert all(item["id"] != str(recovered_failure_id) for item in unresolved_runs.json()["items"])
     assert resources.json()["database"]["sharedBuffersBytes"] > 0
-    assert all(
-        item["id"] != f"processing:{blocked_process_id}" for item in alerts.json()["items"]
-    )
+    assert all(item["id"] != f"processing:{blocked_process_id}" for item in alerts.json()["items"])
     warning_alert = next(
-        item
-        for item in alerts.json()["items"]
-        if item["id"] == f"processing:{warning_process_id}"
+        item for item in alerts.json()["items"] if item["id"] == f"processing:{warning_process_id}"
     )
     assert warning_alert["level"] == "warning"
     assert warning_alert["title"] == "stock_top_list_daily 数据质量提醒"
+    assert warning_alert["detail"].startswith("同类告警共 2 条，已聚合显示")
+    assert "已保留字段更完整的重复记录" in warning_alert["detail"]
     gap_alert = next(
-        item
-        for item in alerts.json()["items"]
-        if item["id"] == f"acquisition:{collection_gap_id}"
+        item for item in alerts.json()["items"] if item["id"] == f"acquisition:{collection_gap_id}"
     )
     assert gap_alert["level"] == "warning"
     assert gap_alert["title"] == "ths_hot 数据缺口提醒"
+    assert gap_alert["detail"].startswith("同类告警共 2 条，已聚合显示")
+    assert "历史接口未返回数据" in gap_alert["detail"]
     assert all(
         item["id"] != f"processing:{recovered_failure_id}" for item in alerts.json()["items"]
     )
     assert all(
-        item["id"] != f"processing:{ignored_warning_process_id}"
-        for item in alerts.json()["items"]
+        item["id"] != f"processing:{ignored_warning_process_id}" for item in alerts.json()["items"]
     )
     assert all(
         item["id"] != f"acquisition:{legacy_collection_failure_id}"

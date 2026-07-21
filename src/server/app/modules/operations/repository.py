@@ -51,6 +51,11 @@ COLLECTION_FAILED = (
     CollectionTaskStatus.CANCELLED.value,
 )
 COLLECTION_TERMINAL = (*COLLECTION_SUCCESS, *COLLECTION_FAILED)
+COLLECTION_ACTIVE = (
+    CollectionTaskStatus.PENDING.value,
+    CollectionTaskStatus.RUNNING.value,
+    CollectionTaskStatus.RETRY_WAIT.value,
+)
 PROCESSING_SUCCESS = (ProcessingTaskStatus.SUCCESS.value,)
 PROCESSING_FAILED = (
     ProcessingTaskStatus.FAILED.value,
@@ -58,6 +63,13 @@ PROCESSING_FAILED = (
     ProcessingTaskStatus.CANCELLED.value,
 )
 PROCESSING_TERMINAL = (*PROCESSING_SUCCESS, *PROCESSING_FAILED)
+PROCESSING_ACTIVE = (
+    ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+    ProcessingTaskStatus.QUEUED.value,
+    ProcessingTaskStatus.RUNNING.value,
+    ProcessingTaskStatus.RETRY_WAIT.value,
+    ProcessingTaskStatus.BLOCKED.value,
+)
 DATE_SCOPED_DATASETS = tuple(
     spec.dataset_name for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
 )
@@ -78,10 +90,26 @@ class OperationsRepository:
             .select_from(ProcessingTask)
             .where(ProcessingTask.status == ProcessingTaskStatus.RUNNING.value)
         )
+        recovered_blocked = aliased(DatasetRelease)
         blocked = await self._session.scalar(
             select(func.count())
             .select_from(ProcessingTask)
-            .where(ProcessingTask.status == ProcessingTaskStatus.BLOCKED.value)
+            .join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
+            .where(
+                ProcessingTask.status == ProcessingTaskStatus.BLOCKED.value,
+                ~select(literal(1))
+                .where(
+                    recovered_blocked.dataset_name == ProcessingTask.output_dataset,
+                    or_(
+                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                        recovered_blocked.business_date.is_not_distinct_from(
+                            ProcessingTask.business_date
+                        ),
+                    ),
+                    recovered_blocked.published_at > CollectionBatch.scheduled_at,
+                )
+                .exists(),
+            )
         )
         collection_success, collection_terminal = (
             await self._session.execute(
@@ -585,10 +613,42 @@ class OperationsRepository:
                 candidates,
                 _run_recovered_expression(candidates),
             ).subquery("enriched_runs")
-            filtered = select(enriched).where(
-                enriched.c.recovered.is_(False),
-                or_(enriched.c.run_type == "acquisition", enriched.c.attempt > 0),
+            unresolved = (
+                select(enriched)
+                .where(
+                    enriched.c.recovered.is_(False),
+                    or_(enriched.c.run_type == "acquisition", enriched.c.attempt > 0),
+                )
+                .subquery("unresolved_runs")
             )
+            logical_scope = case(
+                (
+                    unresolved.c.run_type == "acquisition",
+                    func.coalesce(unresolved.c.scope_key, literal("global")),
+                ),
+                else_=func.coalesce(
+                    sql_cast(unresolved.c.business_date, String),
+                    literal("global"),
+                ),
+            )
+            ranked_unresolved = select(
+                unresolved,
+                func.row_number()
+                .over(
+                    partition_by=(
+                        unresolved.c.run_type,
+                        unresolved.c.task_name,
+                        logical_scope,
+                    ),
+                    order_by=(
+                        unresolved.c.sort_time.desc(),
+                        unresolved.c.finished_at.desc().nullslast(),
+                        unresolved.c.id,
+                    ),
+                )
+                .label("logical_rank"),
+            ).subquery("ranked_unresolved_runs")
+            filtered = select(ranked_unresolved).where(ranked_unresolved.c.logical_rank == 1)
 
         filtered_rows = filtered.subquery("filtered_runs")
         total = await self._session.scalar(select(func.count()).select_from(filtered_rows))
@@ -700,7 +760,11 @@ class OperationsRepository:
         recovered_collection = aliased(CollectionTask)
         failed_collection_batch = aliased(CollectionBatch)
         recovered_collection_batch = aliased(CollectionBatch)
+        recovering_collection = aliased(CollectionTask)
+        recovering_collection_batch = aliased(CollectionBatch)
         recovered_processing = aliased(ProcessingTask)
+        recovering_processing = aliased(ProcessingTask)
+        recovering_processing_batch = aliased(CollectionBatch)
         recovered_scheduler = aliased(ScheduledJobExecution)
         processing_occurred_at = func.coalesce(
             ProcessingTask.finished_at,
@@ -716,60 +780,139 @@ class OperationsRepository:
             )
         )
         collection_warning = (
-            (CollectionTask.status == CollectionTaskStatus.EMPTY_VALID.value)
-            & CollectionTask.warning_message.is_not(None)
-        )
+            CollectionTask.status == CollectionTaskStatus.EMPTY_VALID.value
+        ) & CollectionTask.warning_message.is_not(None)
         scheduler_occurred_at = func.coalesce(
             ScheduledJobExecution.finished_at,
             ScheduledJobExecution.started_at,
             ScheduledJobExecution.created_at,
         )
-        collection = select(
-            CollectionTask.task_id.label("id"),
-            literal("acquisition").label("source"),
-            CollectionTask.api_name.label("task_name"),
-            CollectionTask.status.label("status"),
-            case(
-                (collection_warning, "DATA_GAP_WARNING"),
-                else_=CollectionTask.error_code,
-            ).label("error_code"),
-            case(
-                (collection_warning, CollectionTask.warning_message),
-                else_=CollectionTask.error_message,
-            ).label("error_message"),
-            CollectionTask.finished_at.label("occurred_at"),
-        ).join(
-            failed_collection_batch,
-            failed_collection_batch.batch_id == CollectionTask.batch_id,
-        ).where(
-            CollectionTask.finished_at >= since,
-            or_(
-                collection_warning,
-                and_(
-                    CollectionTask.status == CollectionTaskStatus.FAILED.value,
-                    ~select(literal(1))
-                    .select_from(recovered_collection)
-                    .join(
-                        recovered_collection_batch,
-                        recovered_collection_batch.batch_id == recovered_collection.batch_id,
-                    )
-                    .where(
-                        recovered_collection.api_name == CollectionTask.api_name,
-                        or_(
-                            recovered_collection.scope_key == CollectionTask.scope_key,
-                            and_(
-                                CollectionTask.api_name == "dc_concept_cons",
-                                recovered_collection_batch.business_date.is_not_distinct_from(
-                                    failed_collection_batch.business_date
-                                ),
-                            ),
+        collection_recovered = or_(
+            select(literal(1))
+            .select_from(recovered_collection)
+            .join(
+                recovered_collection_batch,
+                recovered_collection_batch.batch_id == recovered_collection.batch_id,
+            )
+            .where(
+                recovered_collection.api_name == CollectionTask.api_name,
+                or_(
+                    recovered_collection.scope_key == CollectionTask.scope_key,
+                    and_(
+                        CollectionTask.api_name == "dc_concept_cons",
+                        recovered_collection_batch.business_date.is_not_distinct_from(
+                            failed_collection_batch.business_date
                         ),
-                        recovered_collection.status.in_(COLLECTION_SUCCESS),
-                        recovered_collection.finished_at > CollectionTask.finished_at,
-                    )
-                    .exists(),
+                    ),
                 ),
-            ),
+                recovered_collection.status.in_(COLLECTION_SUCCESS),
+                recovered_collection.finished_at > CollectionTask.finished_at,
+            )
+            .exists(),
+            select(literal(1))
+            .select_from(recovering_collection)
+            .join(
+                recovering_collection_batch,
+                recovering_collection_batch.batch_id == recovering_collection.batch_id,
+            )
+            .where(
+                recovering_collection.api_name == CollectionTask.api_name,
+                or_(
+                    recovering_collection.scope_key == CollectionTask.scope_key,
+                    and_(
+                        CollectionTask.api_name == "dc_concept_cons",
+                        recovering_collection_batch.business_date.is_not_distinct_from(
+                            failed_collection_batch.business_date
+                        ),
+                    ),
+                ),
+                recovering_collection.status.in_(COLLECTION_ACTIVE),
+                recovering_collection_batch.scheduled_at > failed_collection_batch.scheduled_at,
+            )
+            .exists(),
+        )
+        processing_recovered = or_(
+            select(literal(1))
+            .where(
+                recovered_processing.output_dataset == ProcessingTask.output_dataset,
+                or_(
+                    ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                    recovered_processing.business_date.is_not_distinct_from(
+                        ProcessingTask.business_date
+                    ),
+                ),
+                recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
+                recovered_processing.finished_at > processing_occurred_at,
+            )
+            .exists(),
+            select(literal(1))
+            .select_from(recovering_processing)
+            .join(
+                recovering_processing_batch,
+                recovering_processing_batch.batch_id == recovering_processing.source_batch_id,
+            )
+            .where(
+                recovering_processing.output_dataset == ProcessingTask.output_dataset,
+                or_(
+                    ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                    recovering_processing.business_date.is_not_distinct_from(
+                        ProcessingTask.business_date
+                    ),
+                ),
+                recovering_processing.status.in_(PROCESSING_ACTIVE),
+                func.coalesce(
+                    recovering_processing.queued_at,
+                    recovering_processing.started_at,
+                    recovering_processing_batch.scheduled_at,
+                )
+                > processing_occurred_at,
+            )
+            .exists(),
+        )
+        collection = (
+            select(
+                CollectionTask.task_id.label("id"),
+                literal("acquisition").label("source"),
+                CollectionTask.api_name.label("task_name"),
+                CollectionTask.status.label("status"),
+                case(
+                    (collection_warning, "DATA_GAP_WARNING"),
+                    else_=CollectionTask.error_code,
+                ).label("error_code"),
+                case(
+                    (collection_warning, CollectionTask.warning_message),
+                    else_=CollectionTask.error_message,
+                ).label("error_message"),
+                CollectionTask.finished_at.label("occurred_at"),
+                case(
+                    (
+                        collection_warning,
+                        literal("warning:") + CollectionTask.api_name,
+                    ),
+                    else_=(
+                        literal("failure:")
+                        + CollectionTask.provider
+                        + literal(":")
+                        + CollectionTask.api_name
+                        + literal(":")
+                        + CollectionTask.scope_key
+                    ),
+                ).label("group_key"),
+            )
+            .join(
+                failed_collection_batch,
+                failed_collection_batch.batch_id == CollectionTask.batch_id,
+            )
+            .where(
+                CollectionTask.finished_at >= since,
+                or_(
+                    collection_warning,
+                    and_(
+                        CollectionTask.status == CollectionTaskStatus.FAILED.value,
+                        ~collection_recovered,
+                    ),
+                ),
+            )
         )
         processing = (
             select(
@@ -786,22 +929,28 @@ class OperationsRepository:
                     else_=ProcessingTask.error_message,
                 ).label("error_message"),
                 processing_occurred_at.label("occurred_at"),
+                case(
+                    (
+                        processing_warning,
+                        literal("warning:") + ProcessingTask.output_dataset,
+                    ),
+                    else_=(
+                        literal("failure:")
+                        + ProcessingTask.output_dataset
+                        + literal(":")
+                        + func.coalesce(
+                            sql_cast(ProcessingTask.business_date, String),
+                            literal("global"),
+                        )
+                    ),
+                ).label("group_key"),
             )
             .join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
             .where(
                 or_(
                     processing_warning,
                     (ProcessingTask.status == ProcessingTaskStatus.FAILED.value)
-                    & ~select(literal(1))
-                    .where(
-                        recovered_processing.output_dataset == ProcessingTask.output_dataset,
-                        recovered_processing.business_date.is_not_distinct_from(
-                            ProcessingTask.business_date
-                        ),
-                        recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
-                        recovered_processing.finished_at > processing_occurred_at,
-                    )
-                    .exists(),
+                    & ~processing_recovered,
                 ),
                 processing_occurred_at >= since,
             )
@@ -814,6 +963,7 @@ class OperationsRepository:
             literal(None).label("error_code"),
             ScheduledJobExecution.error_message.label("error_message"),
             scheduler_occurred_at.label("occurred_at"),
+            (literal("scheduler:") + ScheduledJobExecution.job_id).label("group_key"),
         ).where(
             ScheduledJobExecution.status == "FAILED",
             scheduler_occurred_at >= since,
@@ -826,13 +976,44 @@ class OperationsRepository:
             .exists(),
         )
         combined = union_all(collection, processing, scheduler).subquery()
-        statement = select(combined)
+        ranked = select(
+            combined,
+            func.count()
+            .over(partition_by=(combined.c.source, combined.c.group_key))
+            .label("alert_count"),
+            func.row_number()
+            .over(
+                partition_by=(combined.c.source, combined.c.group_key),
+                order_by=(combined.c.occurred_at.desc().nullslast(), combined.c.id),
+            )
+            .label("alert_rank"),
+        ).subquery()
+        statement = select(
+            ranked.c.id,
+            ranked.c.source,
+            ranked.c.task_name,
+            ranked.c.status,
+            ranked.c.error_code,
+            case(
+                (
+                    ranked.c.alert_count > 1,
+                    func.concat(
+                        "同类告警共 ",
+                        ranked.c.alert_count,
+                        " 条，已聚合显示；最新记录：",
+                        ranked.c.error_message,
+                    ),
+                ),
+                else_=ranked.c.error_message,
+            ).label("error_message"),
+            ranked.c.occurred_at,
+        ).where(ranked.c.alert_rank == 1)
         if source:
-            statement = statement.where(combined.c.source == source)
+            statement = statement.where(ranked.c.source == source)
         total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))
         rows = (
             await self._session.execute(
-                statement.order_by(combined.c.occurred_at.desc().nullslast())
+                statement.order_by(ranked.c.occurred_at.desc().nullslast())
                 .offset(offset)
                 .limit(limit)
             )
@@ -889,8 +1070,12 @@ def _run_status_condition(rows: Any, status: str | None) -> Any:
 def _run_recovered_expression(rows: Any) -> Any:
     recovered_collection = aliased(CollectionTask)
     recovered_collection_batch = aliased(CollectionBatch)
+    recovering_collection = aliased(CollectionTask)
+    recovering_collection_batch = aliased(CollectionBatch)
     recovered_release = aliased(DatasetRelease)
-    collection_recovered = (
+    recovering_processing = aliased(ProcessingTask)
+    recovering_processing_batch = aliased(CollectionBatch)
+    collection_recovered = or_(
         select(literal(1))
         .select_from(recovered_collection)
         .join(
@@ -911,9 +1096,30 @@ def _run_recovered_expression(rows: Any) -> Any:
             recovered_collection.status.in_(COLLECTION_SUCCESS),
             recovered_collection.finished_at > rows.c.finished_at,
         )
-        .exists()
+        .exists(),
+        select(literal(1))
+        .select_from(recovering_collection)
+        .join(
+            recovering_collection_batch,
+            recovering_collection_batch.batch_id == recovering_collection.batch_id,
+        )
+        .where(
+            recovering_collection.api_name == rows.c.task_name,
+            or_(
+                recovering_collection.scope_key == rows.c.scope_key,
+                and_(
+                    rows.c.task_name == "dc_concept_cons",
+                    recovering_collection_batch.business_date.is_not_distinct_from(
+                        rows.c.business_date
+                    ),
+                ),
+            ),
+            recovering_collection.status.in_(COLLECTION_ACTIVE),
+            recovering_collection_batch.scheduled_at > rows.c.sort_time,
+        )
+        .exists(),
     )
-    processing_recovered = (
+    processing_recovered = or_(
         select(literal(1))
         .where(
             recovered_release.dataset_name == rows.c.task_name,
@@ -923,7 +1129,28 @@ def _run_recovered_expression(rows: Any) -> Any:
             ),
             recovered_release.published_at > rows.c.sort_time,
         )
-        .exists()
+        .exists(),
+        select(literal(1))
+        .select_from(recovering_processing)
+        .join(
+            recovering_processing_batch,
+            recovering_processing_batch.batch_id == recovering_processing.source_batch_id,
+        )
+        .where(
+            recovering_processing.output_dataset == rows.c.task_name,
+            or_(
+                rows.c.task_name.not_in(DATE_SCOPED_DATASETS),
+                recovering_processing.business_date.is_not_distinct_from(rows.c.business_date),
+            ),
+            recovering_processing.status.in_(PROCESSING_ACTIVE),
+            func.coalesce(
+                recovering_processing.queued_at,
+                recovering_processing.started_at,
+                recovering_processing_batch.scheduled_at,
+            )
+            > func.coalesce(rows.c.finished_at, rows.c.sort_time),
+        )
+        .exists(),
     )
     return case(
         (rows.c.run_type == "acquisition", collection_recovered),

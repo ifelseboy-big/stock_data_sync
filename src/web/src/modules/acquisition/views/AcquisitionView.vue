@@ -14,6 +14,7 @@ import {
   getAcquisitionBatches,
   getManualCommandOptions,
   getRunRecords,
+  retryAllFailedCollectionTasks,
   retryFailedCollectionTasks,
   runTaskCommand,
 } from '@/modules/operations/api'
@@ -47,6 +48,8 @@ const retryTarget = ref<RunRecordItem | null>(null)
 const retryLoading = ref(false)
 const retryAllOpen = ref(false)
 const retryAllLoading = ref(false)
+const globalRetryAllOpen = ref(false)
+const globalRetryAllLoading = ref(false)
 const commandForm = reactive({
   startDate: '',
   endDate: '',
@@ -62,6 +65,15 @@ const { data, loading, error, load } = useApiResource(() =>
     dataCycle: dataCycle.value || undefined,
     page: page.value,
     pageSize: 20,
+  }),
+)
+const { data: failedData, load: loadFailed } = useApiResource(() =>
+  getRunRecords({
+    runType: 'acquisition',
+    status: 'failed',
+    unresolvedOnly: true,
+    page: 1,
+    pageSize: 1,
   }),
 )
 
@@ -235,7 +247,7 @@ async function submitTaskRetry(value: { reason: string; idempotencyKey: string }
     )
     ElMessage.success('已创建单任务修复批次，调度器将自动执行')
     retryTarget.value = null
-    await Promise.all([loadBatchTasks(), load()])
+    await Promise.all([loadBatchTasks(), load(), loadFailed()])
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '任务重试失败')
   } finally {
@@ -255,11 +267,32 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     const taskCount = Number(command.result.taskCount ?? 0)
     ElMessage.success(`已为 ${taskCount} 个失败任务创建一个修复批次`)
     retryAllOpen.value = false
-    await Promise.all([loadBatchTasks(), load()])
+    await Promise.all([loadBatchTasks(), load(), loadFailed()])
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '全部失败采集任务重试失败')
   } finally {
     retryAllLoading.value = false
+  }
+}
+
+async function submitGlobalRetryAll(value: { reason: string; idempotencyKey: string }) {
+  globalRetryAllLoading.value = true
+  try {
+    const command = await retryAllFailedCollectionTasks({ reason: value.reason }, value)
+    const retried = Number(command.result.retryCount ?? 0)
+    const batches = Number(command.result.batchCount ?? 0)
+    const deduplicated = Number(command.result.deduplicatedCount ?? 0)
+    ElMessage.success(
+      deduplicated
+        ? `已将 ${retried} 个采集范围合并到 ${batches} 个修复批次，并去除 ${deduplicated} 个重复失败`
+        : `已将 ${retried} 个失败采集范围合并到 ${batches} 个修复批次`,
+    )
+    globalRetryAllOpen.value = false
+    await Promise.all([load(), loadFailed()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '全局失败采集任务重试失败')
+  } finally {
+    globalRetryAllLoading.value = false
   }
 }
 </script>
@@ -268,6 +301,15 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
   <section>
     <PageHeader title="采集运行" description="按批次观察原始数据采集、失败重试和最终结果。">
       <template #actions>
+        <el-button
+          type="warning"
+          plain
+          :disabled="!failedData?.total"
+          :loading="globalRetryAllLoading"
+          @click="globalRetryAllOpen = true"
+        >
+          全部重试{{ failedData?.total ? `（${failedData.total}）` : '' }}
+        </el-button>
         <el-button @click="openManualCommand('repair')">创建修复</el-button>
         <el-button type="primary" @click="openManualCommand('backfill')">历史回填</el-button>
         <el-button :loading="loading" @click="load">刷新</el-button>
@@ -613,6 +655,14 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
       confirm-text="确认全部重试"
       :loading="retryAllLoading"
       @submit="submitRetryAll"
+    />
+    <AdminCommandDialog
+      v-model="globalRetryAllOpen"
+      title="全局重试失败采集任务"
+      :description="`将重试近 30 天仍未恢复的 ${failedData?.total ?? 0} 个失败记录。系统会先按接口和采集范围去重，再按业务日期合并成修复批次。`"
+      confirm-text="确认全部重试"
+      :loading="globalRetryAllLoading"
+      @submit="submitGlobalRetryAll"
     />
   </section>
 </template>

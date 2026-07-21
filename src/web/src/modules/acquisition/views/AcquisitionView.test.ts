@@ -9,6 +9,7 @@ const apiMocks = vi.hoisted(() => ({
   createBackfill: vi.fn(),
   getAcquisitionBatches: vi.fn(),
   getManualCommandOptions: vi.fn(),
+  getRunRecords: vi.fn(),
 }))
 
 vi.mock('@/modules/operations/api', () => ({
@@ -17,7 +18,9 @@ vi.mock('@/modules/operations/api', () => ({
   createRepair: vi.fn(),
   getAcquisitionBatches: apiMocks.getAcquisitionBatches,
   getManualCommandOptions: apiMocks.getManualCommandOptions,
-  getRunRecords: vi.fn(),
+  getRunRecords: apiMocks.getRunRecords,
+  retryAllFailedCollectionTasks: vi.fn(),
+  retryFailedCollectionTasks: vi.fn(),
   runTaskCommand: vi.fn(),
 }))
 
@@ -25,6 +28,7 @@ describe('AcquisitionView manual backfill', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     apiMocks.getAcquisitionBatches.mockResolvedValue({ items: [], page: 1, pageSize: 20, total: 0 })
+    apiMocks.getRunRecords.mockResolvedValue({ items: [], page: 1, pageSize: 1, total: 0 })
     apiMocks.getManualCommandOptions.mockResolvedValue({
       acquisitionApis: [
         {
