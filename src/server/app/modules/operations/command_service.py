@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import func, literal, or_, select, update
@@ -13,8 +14,9 @@ from sqlalchemy.orm import aliased
 
 from app.catalog import ApiSpec, ScheduleGroup, SpecRegistry
 from app.catalog.datasets import ALL_DATASET_SPECS
-from app.catalog.specs import ParameterValue, ReleaseScope, RequestScope
+from app.catalog.specs import DependencyKind, ParameterValue, ReleaseScope, RequestScope
 from app.catalog.tushare import ths_member_scopes
+from app.core.config import settings
 from app.modules.acquisition.models import (
     BatchStatus,
     BatchType,
@@ -50,6 +52,13 @@ COLLECTION_RETRYABLE = frozenset(
 )
 COLLECTION_MUTABLE = frozenset(
     {CollectionTaskStatus.PENDING.value, CollectionTaskStatus.RETRY_WAIT.value}
+)
+COLLECTION_ACTIVE = frozenset(
+    {
+        CollectionTaskStatus.PENDING.value,
+        CollectionTaskStatus.RUNNING.value,
+        CollectionTaskStatus.RETRY_WAIT.value,
+    }
 )
 PROCESSING_RETRYABLE = frozenset(
     {
@@ -206,6 +215,159 @@ class OperationCommandService:
         return await self._execute(
             action="CREATE_REPAIR",
             target_type="collection_batch",
+            target_id=None,
+            reason=reason,
+            payload=payload,
+            context=context,
+            apply=apply,
+            command_id=command_id,
+        )
+
+    async def recover_release_gaps(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        batch_type: BatchType,
+        reason: str,
+        context: "CommandContext",
+    ) -> OperationCommandResult:
+        if batch_type not in {BatchType.BACKFILL, BatchType.REPAIR}:
+            raise ValueError("release gap recovery requires a backfill or repair batch")
+        command_id = uuid4()
+        payload: dict[str, object] = {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "batch_type": batch_type.value,
+            "reason": reason,
+        }
+
+        async def apply(now: datetime) -> dict[str, object]:
+            if end_date < start_date:
+                raise OperationCommandError("结束日期不能早于开始日期", status_code=422)
+            if (end_date - start_date).days + 1 > MAX_BACKFILL_DAYS:
+                raise OperationCommandError(
+                    f"单次缺失修复范围不能超过 {MAX_BACKFILL_DAYS} 天",
+                    status_code=422,
+                )
+            today = now.astimezone(ZoneInfo(settings.scheduler_timezone)).date()
+            if end_date > today:
+                raise OperationCommandError("结束日期不能晚于今天", status_code=422)
+
+            trading_dates = tuple(
+                business_date
+                for business_date in await self._trading_dates(start_date, end_date)
+                if business_date < today
+            )
+            if not trading_dates:
+                raise OperationCommandError("所选范围没有可修复的历史交易日")
+
+            date_dataset_specs = tuple(
+                spec for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
+            )
+            expected_names = tuple(spec.dataset_name for spec in date_dataset_specs)
+            published_by_date: dict[date, set[str]] = {}
+            published_rows = await self._session.execute(
+                select(DatasetRelease.business_date, DatasetRelease.dataset_name).where(
+                    DatasetRelease.business_date.in_(trading_dates),
+                    DatasetRelease.dataset_name.in_(expected_names),
+                )
+            )
+            for business_date, dataset_name in published_rows:
+                if business_date is not None:
+                    published_by_date.setdefault(business_date, set()).add(dataset_name)
+
+            missing_by_date = {
+                business_date: tuple(
+                    spec
+                    for spec in date_dataset_specs
+                    if spec.dataset_name not in published_by_date.get(business_date, set())
+                )
+                for business_date in trading_dates
+            }
+            missing_by_date = {
+                business_date: specs for business_date, specs in missing_by_date.items() if specs
+            }
+            if not missing_by_date:
+                raise OperationCommandError("所选范围的历史数据发布已经完整")
+
+            active_rows = await self._session.execute(
+                select(CollectionBatch.business_date, CollectionTask.api_name)
+                .join(
+                    CollectionTask,
+                    CollectionTask.batch_id == CollectionBatch.batch_id,
+                )
+                .where(
+                    CollectionBatch.business_date.in_(tuple(missing_by_date)),
+                    CollectionTask.status.in_(COLLECTION_ACTIVE),
+                )
+                .distinct()
+            )
+            active_by_date: dict[date, set[str]] = {}
+            for business_date, api_name in active_rows:
+                if business_date is not None:
+                    active_by_date.setdefault(business_date, set()).add(api_name)
+
+            connection = await self._session.connection()
+            partition_names = await connection.run_sync(
+                lambda sync_connection: ensure_partitions_for_range(
+                    sync_connection,
+                    start_date=min(missing_by_date),
+                    end_date=max(missing_by_date),
+                )
+            )
+            batch_ids: list[str] = []
+            planned_api_count = 0
+            skipped_active_api_count = 0
+            deferred_stage_count = 0
+            for business_date, missing_specs in missing_by_date.items():
+                required_api_names = {
+                    dependency.name
+                    for spec in missing_specs
+                    for dependency in spec.dependencies
+                    if dependency.kind == DependencyKind.RAW_ASSET
+                }
+                active_api_names = active_by_date.get(business_date, set())
+                skipped_active_api_count += len(required_api_names & active_api_names)
+                required_api_names -= active_api_names
+                if not required_api_names:
+                    continue
+                api_specs = self._resolve_specs(
+                    tuple(sorted(required_api_names)),
+                    daily_only=True,
+                )
+                planned_specs, deferred_count = await self._manual_batch_specs(
+                    api_specs,
+                    business_date=business_date,
+                    batch_type=batch_type,
+                    command_id=command_id,
+                )
+                deferred_stage_count += deferred_count
+                planned_api_count += len(api_specs)
+                batch_ids.append(
+                    str(
+                        await self._create_batch(
+                            batch_type=batch_type,
+                            business_date=business_date,
+                            specs=planned_specs,
+                            now=now,
+                        )
+                    )
+                )
+            return {
+                "batchIds": batch_ids,
+                "batchCount": len(batch_ids),
+                "missingDateCount": len(missing_by_date),
+                "missingDatasetCount": sum(len(specs) for specs in missing_by_date.values()),
+                "plannedApiCount": planned_api_count,
+                "skippedActiveApiCount": skipped_active_api_count,
+                "partitionCount": len(partition_names),
+                "deferredStageCount": deferred_stage_count,
+            }
+
+        return await self._execute(
+            action=f"RECOVER_RELEASE_GAPS_{batch_type.value}",
+            target_type="dataset_release_range",
             target_id=None,
             reason=reason,
             payload=payload,

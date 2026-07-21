@@ -242,6 +242,11 @@ class CreateRepairCommand(ManualCommandBase):
     api_names: list[str] = Field(min_length=1, max_length=64)
 
 
+class RecoverReleaseGapsCommand(ManualCommandBase):
+    start_date: date
+    end_date: date
+
+
 class TaskCommand(ManualCommandBase):
     pass
 

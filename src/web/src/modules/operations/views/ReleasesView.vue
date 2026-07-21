@@ -1,15 +1,28 @@
 <script setup lang="ts">
+import { ElMessage } from 'element-plus'
 import { computed, ref } from 'vue'
 
+import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { useApiResource } from '@/composables/useApiResource'
-import { getDatasetReleaseCoverage, getDatasetReleases } from '@/modules/operations/api'
+import {
+  getDatasetReleaseCoverage,
+  getDatasetReleases,
+  recoverReleaseGaps,
+} from '@/modules/operations/api'
 import type { DatasetReleaseCoverageItem } from '@/modules/operations/contracts'
 import { formatDateTime } from '@/modules/operations/presentation'
 
 const datasetName = ref('')
 const page = ref(1)
+const gapTarget = ref<{
+  action: 'backfill' | 'repair'
+  startDate: string
+  endDate: string
+  missingDateCount: number
+} | null>(null)
+const gapLoading = ref(false)
 
 function localDate(value: Date) {
   const year = value.getFullYear()
@@ -22,6 +35,13 @@ const today = new Date()
 const defaultStart = new Date(today)
 defaultStart.setDate(defaultStart.getDate() - 29)
 const coverageRange = ref<[string, string] | null>([localDate(defaultStart), localDate(today)])
+const coveragePresets = [
+  { label: '近 7 天', days: 7 },
+  { label: '近 30 天', days: 30 },
+  { label: '近 90 天', days: 90 },
+  { label: '近半年', days: 180 },
+  { label: '近一年', days: 365 },
+] as const
 
 const { data, loading, error, load } = useApiResource(() =>
   getDatasetReleases({
@@ -51,6 +71,21 @@ const coverageSummary = computed(() => {
     pendingCount: items.filter((item) => item.coverageStatus === 'pending').length,
   }
 })
+const missingRows = computed(() =>
+  (coverage.value ?? []).filter((item) => item.coverageStatus === 'missing'),
+)
+const gapDialogTitle = computed(() =>
+  gapTarget.value?.action === 'repair' ? '修复当日缺失数据' : '回填范围内缺失数据',
+)
+const gapDialogDescription = computed(() => {
+  const target = gapTarget.value
+  if (!target) return ''
+  const range =
+    target.startDate === target.endDate
+      ? target.startDate
+      : `${target.startDate} 至 ${target.endDate}`
+  return `系统将重新核对 ${range} 的发布完整性，只为 ${target.missingDateCount} 个缺失交易日创建必要的采集任务；完整日期和已有活动任务不会重复创建。`
+})
 
 const coverageStatusMap = {
   complete: { label: '完整', type: 'success' },
@@ -73,6 +108,69 @@ function search() {
 
 function searchCoverage() {
   void loadCoverage()
+}
+
+function applyCoveragePreset(days: number) {
+  const end = new Date()
+  const start = new Date(end)
+  start.setDate(start.getDate() - days + 1)
+  coverageRange.value = [localDate(start), localDate(end)]
+  void loadCoverage()
+}
+
+function applyCurrentYear() {
+  const end = new Date()
+  coverageRange.value = [localDate(new Date(end.getFullYear(), 0, 1)), localDate(end)]
+  void loadCoverage()
+}
+
+function openRangeGapBackfill() {
+  if (!coverageRange.value || !missingRows.value.length) return
+  gapTarget.value = {
+    action: 'backfill',
+    startDate: coverageRange.value[0],
+    endDate: coverageRange.value[1],
+    missingDateCount: missingRows.value.length,
+  }
+}
+
+function openDateGapRepair(value: unknown) {
+  const row = value as DatasetReleaseCoverageItem
+  gapTarget.value = {
+    action: 'repair',
+    startDate: row.businessDate,
+    endDate: row.businessDate,
+    missingDateCount: 1,
+  }
+}
+
+async function submitGapRecovery(value: { reason: string; idempotencyKey: string }) {
+  const target = gapTarget.value
+  if (!target) return
+  gapLoading.value = true
+  try {
+    const command = await recoverReleaseGaps(
+      target.action,
+      {
+        startDate: target.startDate,
+        endDate: target.endDate,
+        reason: value.reason,
+      },
+      { idempotencyKey: value.idempotencyKey },
+    )
+    const batches = Number(command.result.batchCount ?? 0)
+    const missingDates = Number(command.result.missingDateCount ?? 0)
+    const skippedActive = Number(command.result.skippedActiveApiCount ?? 0)
+    ElMessage.success(
+      `已为 ${missingDates} 个缺失交易日创建 ${batches} 个任务批次${skippedActive ? `，跳过 ${skippedActive} 个正在处理的接口` : ''}`,
+    )
+    gapTarget.value = null
+    await Promise.all([loadCoverage(), load()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '缺失数据恢复失败')
+  } finally {
+    gapLoading.value = false
+  }
 }
 
 function missingDatasetText(value: unknown) {
@@ -98,6 +196,15 @@ function missingDatasetText(value: unknown) {
             <h3>时间范围数据完整性</h3>
             <p>仅检查交易日；今天尚未完成的发布标记为“进行中”，不会误报为历史缺失。</p>
           </div>
+          <el-button
+            type="danger"
+            plain
+            :disabled="coverageLoading || !missingRows.length"
+            :loading="gapLoading"
+            @click="openRangeGapBackfill"
+          >
+            回填全部缺失{{ missingRows.length ? `（${missingRows.length} 日）` : '' }}
+          </el-button>
         </div>
       </template>
 
@@ -112,7 +219,20 @@ function missingDatasetText(value: unknown) {
             end-placeholder="结束日期"
             value-format="YYYY-MM-DD"
             :clearable="false"
+            @change="searchCoverage"
           />
+        </el-form-item>
+        <el-form-item label="快捷范围">
+          <el-button-group>
+            <el-button
+              v-for="preset in coveragePresets"
+              :key="preset.label"
+              @click="applyCoveragePreset(preset.days)"
+            >
+              {{ preset.label }}
+            </el-button>
+            <el-button @click="applyCurrentYear">今年</el-button>
+          </el-button-group>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="coverageLoading">
@@ -167,6 +287,20 @@ function missingDatasetText(value: unknown) {
               >
                 {{ row.missingDatasetDisplayNames.join('、') }}
               </span>
+              <span v-else>--</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.coverageStatus === 'missing'"
+                type="danger"
+                link
+                :disabled="gapLoading"
+                @click="openDateGapRepair(row)"
+              >
+                修复当日
+              </el-button>
               <span v-else>--</span>
             </template>
           </el-table-column>
@@ -225,6 +359,16 @@ function missingDatasetText(value: unknown) {
         </div>
       </DataState>
     </el-card>
+
+    <AdminCommandDialog
+      :model-value="gapTarget !== null"
+      :title="gapDialogTitle"
+      :description="gapDialogDescription"
+      :confirm-text="gapTarget?.action === 'repair' ? '确认修复' : '确认回填'"
+      :loading="gapLoading"
+      @update:model-value="!$event && (gapTarget = null)"
+      @submit="submitGapRecovery"
+    />
   </section>
 </template>
 

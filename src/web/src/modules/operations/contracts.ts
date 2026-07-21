@@ -232,6 +232,12 @@ export interface CreateRepairCommand {
   reason: string
 }
 
+export interface RecoverReleaseGapsCommand {
+  startDate: string
+  endDate: string
+  reason: string
+}
+
 export interface TaskCommand {
   reason: string
 }

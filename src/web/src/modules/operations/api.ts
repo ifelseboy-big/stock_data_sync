@@ -21,6 +21,7 @@ import type {
   ProcessingQueueItem,
   ProcessingQueueQuery,
   ProviderMonitoring,
+  RecoverReleaseGapsCommand,
   RunRecordItem,
   RunRecordQuery,
   ScheduledJobAction,
@@ -145,6 +146,19 @@ export async function createRepair(
     {
       headers: await commandHeaders(options),
     },
+  )
+  return response.data
+}
+
+export async function recoverReleaseGaps(
+  action: 'backfill' | 'repair',
+  payload: RecoverReleaseGapsCommand,
+  options: AdminCommandOptions,
+): Promise<OperationCommandResult> {
+  const response = await http.post<OperationCommandResult>(
+    `/operations/commands/release-gaps/${action}`,
+    payload,
+    { headers: await commandHeaders(options) },
   )
   return response.data
 }

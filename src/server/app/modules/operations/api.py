@@ -12,6 +12,7 @@ from app.catalog.presentation import TUSHARE_API_PRESENTATION_BY_NAME
 from app.catalog.tushare import build_tushare_api_registry
 from app.core.config import settings
 from app.db.session import get_db
+from app.modules.acquisition.models import BatchType
 from app.modules.operations.command_service import (
     MAX_BACKFILL_DAYS,
     CommandContext,
@@ -35,6 +36,7 @@ from app.modules.operations.schemas import (
     PageResult,
     ProcessingQueueItem,
     ProviderMonitoring,
+    RecoverReleaseGapsCommand,
     RunRecordItem,
     ScheduledJobCommand,
     ScheduledJobExecutionItem,
@@ -280,6 +282,34 @@ async def create_repair(
         db=db,
         request=request,
         action="CREATE_REPAIR",
+    )
+
+
+@router.post(
+    "/commands/release-gaps/{action}",
+    response_model=OperationCommandResult,
+    status_code=202,
+)
+async def recover_release_gaps(
+    action: Literal["backfill", "repair"],
+    payload: RecoverReleaseGapsCommand,
+    request: Request,
+    db: DbSession,
+    admin: Admin,
+    idempotency_key: IdempotencyKey,
+) -> OperationCommandResult:
+    service = OperationCommandService(db, build_tushare_api_registry())
+    return await _run_command(
+        service.recover_release_gaps(
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            batch_type=(BatchType.BACKFILL if action == "backfill" else BatchType.REPAIR),
+            reason=payload.reason,
+            context=_context(request, admin, idempotency_key),
+        ),
+        db=db,
+        request=request,
+        action=f"RECOVER_RELEASE_GAPS_{action.upper()}",
     )
 
 

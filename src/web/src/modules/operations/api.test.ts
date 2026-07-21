@@ -5,6 +5,7 @@ import { http } from '@/api/http'
 import {
   createRepair,
   getDatasetReleaseCoverage,
+  recoverReleaseGaps,
   retryAllFailedCollectionTasks,
   retryAllFailedProcessingTasks,
   retryFailedCollectionTasks,
@@ -62,6 +63,35 @@ describe('release coverage query', () => {
         endDate: '2026-07-19',
       },
     })
+  })
+
+  it('submits precise release gap recovery commands', async () => {
+    vi.mocked(http.get).mockResolvedValueOnce({
+      data: { admin_api_token: 'configured-admin-token' },
+    })
+    vi.mocked(http.post).mockResolvedValueOnce({ data: { commandId: 'gap-command' } })
+
+    await recoverReleaseGaps(
+      'backfill',
+      {
+        startDate: '2026-07-01',
+        endDate: '2026-07-19',
+        reason: '补齐缺失发布',
+      },
+      { idempotencyKey: 'release-gap-request' },
+    )
+
+    expect(http.post).toHaveBeenCalledWith(
+      '/operations/commands/release-gaps/backfill',
+      {
+        startDate: '2026-07-01',
+        endDate: '2026-07-19',
+        reason: '补齐缺失发布',
+      },
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'Idempotency-Key': 'release-gap-request' }),
+      }),
+    )
   })
 })
 

@@ -6,6 +6,8 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
+from app.catalog.datasets import ALL_DATASET_SPECS
+from app.catalog.specs import DependencyKind, ReleaseScope
 from app.db.sync_session import SyncSessionFactory
 from app.main import app
 from app.modules.acquisition.models import (
@@ -655,3 +657,138 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert duplicate_process.status == ProcessingTaskStatus.FAILED.value
     assert blocked_process is not None
     assert blocked_process.status == ProcessingTaskStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_release_gap_recovery_plans_only_missing_dataset_apis() -> None:
+    now = datetime.now(UTC)
+    business_date = date(2026, 7, 16)
+    source_batch_id = uuid4()
+    active_batch_id = uuid4()
+    released_process_id = uuid4()
+    released_version_id = uuid4()
+
+    with SyncSessionFactory() as session, session.begin():
+        session.add(
+            TradeCalendar(
+                exchange="SSE",
+                cal_date=business_date,
+                is_open=True,
+                pretrade_date=business_date - timedelta(days=1),
+                synced_at=now,
+            )
+        )
+        session.add_all(
+            (
+                CollectionBatch(
+                    batch_id=source_batch_id,
+                    batch_type=BatchType.DAILY.value,
+                    business_date=business_date,
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now - timedelta(hours=2),
+                    plan_version="e" * 64,
+                    expected_task_count=1,
+                    planning_completed_at=now - timedelta(hours=2),
+                    closed_at=now - timedelta(hours=1),
+                ),
+                CollectionBatch(
+                    batch_id=active_batch_id,
+                    batch_type=BatchType.REPAIR.value,
+                    business_date=business_date,
+                    status=BatchStatus.PENDING.value,
+                    scheduled_at=now - timedelta(minutes=10),
+                    plan_version="f" * 64,
+                    expected_task_count=1,
+                    planning_completed_at=now - timedelta(minutes=10),
+                ),
+            )
+        )
+        session.flush()
+        session.add_all(
+            (
+                ProcessingTask(
+                    process_id=released_process_id,
+                    source_batch_id=source_batch_id,
+                    process_type="stock_daily_core@1",
+                    business_date=business_date,
+                    output_dataset="stock_daily.core",
+                    output_version=released_version_id,
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    finished_at=now - timedelta(hours=1),
+                ),
+                CollectionTask(
+                    batch_id=active_batch_id,
+                    provider="TUSHARE",
+                    api_name="top_list",
+                    scope_key="trade_date=20260716",
+                    request_params={"trade_date": "20260716"},
+                    status=CollectionTaskStatus.PENDING.value,
+                    max_attempts=5,
+                ),
+            )
+        )
+        session.flush()
+        session.add(
+            DatasetRelease(
+                dataset_name="stock_daily.core",
+                scope_type=ReleaseScopeType.DATE.value,
+                scope_key=business_date.isoformat(),
+                business_date=business_date,
+                version_id=released_version_id,
+                process_id=released_process_id,
+                row_count=1,
+                published_at=now - timedelta(hours=1),
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/operations/commands/release-gaps/backfill",
+            headers={
+                "Authorization": f"Bearer {ADMIN_TOKEN}",
+                "Idempotency-Key": "recover-release-gaps-command",
+            },
+            json={
+                "startDate": business_date.isoformat(),
+                "endDate": business_date.isoformat(),
+                "reason": "补齐数据发布缺失",
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    result = response.json()["result"]
+    assert result["batchCount"] == 1
+    assert result["missingDateCount"] == 1
+    assert result["skippedActiveApiCount"] == 1
+
+    date_specs = tuple(
+        spec for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
+    )
+    expected_api_names = {
+        dependency.name
+        for spec in date_specs
+        if spec.dataset_name != "stock_daily.core"
+        for dependency in spec.dependencies
+        if dependency.kind == DependencyKind.RAW_ASSET
+    } - {"top_list"}
+    assert result["missingDatasetCount"] == len(date_specs) - 1
+    assert result["plannedApiCount"] == len(expected_api_names)
+
+    recovery_batch_id = UUID(result["batchIds"][0])
+    with SyncSessionFactory() as session:
+        recovery_batch = session.get(CollectionBatch, recovery_batch_id)
+        recovery_tasks = tuple(
+            session.scalars(
+                select(CollectionTask).where(CollectionTask.batch_id == recovery_batch_id)
+            )
+        )
+
+    assert recovery_batch is not None
+    assert recovery_batch.batch_type == BatchType.BACKFILL.value
+    assert recovery_batch.business_date == business_date
+    assert {task.api_name for task in recovery_tasks} == expected_api_names
+    assert {"daily", "daily_basic", "adj_factor", "top_list"}.isdisjoint(
+        {task.api_name for task in recovery_tasks}
+    )
