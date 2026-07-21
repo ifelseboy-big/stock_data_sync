@@ -127,7 +127,7 @@ SCHEDULED_JOB_DEFINITIONS = (
     ScheduledJobDefinition(
         "plan-daily-final",
         "补齐并冻结当日采集批次",
-        "补齐遗漏的日频接口，加入股票技术指标任务后冻结当天采集计划。",
+        "补齐遗漏的日频接口，刷新收盘后的股票列表，再冻结当天采集计划。",
         "daily",
         "每日 19:00",
     ),

@@ -22,6 +22,7 @@ from app.catalog.tushare import (
     MASTER_SPECIAL_SPECS,
     MASTER_STOCK_SPECS,
     MONTHLY_INDEX_SPECS,
+    STOCK_BASIC_SPEC,
     TRADE_CAL_SPEC,
     next_year_trade_calendar_scopes,
     ths_member_scopes,
@@ -407,7 +408,11 @@ def plan_daily_final() -> None:
     daily_specs = tuple(
         spec for spec in ALL_TUSHARE_API_SPECS if spec.schedule_group.value == "DAILY"
     )
-    _plan_daily_stage(daily_specs, finalize=True, stage_name="daily_final")
+    _plan_daily_stage(
+        (*daily_specs, STOCK_BASIC_SPEC),
+        finalize=True,
+        stage_name="daily_final",
+    )
 
 
 def plan_theme_members() -> None:

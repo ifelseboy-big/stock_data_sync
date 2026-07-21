@@ -16,7 +16,7 @@ from app.catalog.tushare import (
     STK_LIMIT_SPEC,
     SUSPEND_SPEC,
 )
-from app.common.errors import ProcessingError
+from app.common.errors import ProcessingError, UnknownStockCodesError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.processors.base import PreparedDataset, PublicationResult
 from app.modules.processing.processors.raw_reader import RawRow, read_raw_assets
@@ -712,4 +712,4 @@ def _validate_stock_codes(session: Session, rows: tuple[PreparedRow, ...]) -> No
     existing = set(session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes))))
     missing = codes - existing
     if missing:
-        raise ProcessingError(f"dataset references unknown stocks: {sorted(missing)[:5]}")
+        raise UnknownStockCodesError(missing)

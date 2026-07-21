@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from app.catalog import ApiSpec
 from app.modules.acquisition.planner import StagePlan
 from app.scheduler import jobs
 
@@ -68,6 +69,30 @@ def test_trade_calendar_planner_creates_a_daily_batch(
     assert captured[0].business_date == FrozenDateTime(2026, 7, 19).date()
     assert captured[0].scheduled_at.date() == FrozenDateTime(2026, 7, 19).date()
     assert (captured[0].scheduled_at.hour, captured[0].scheduled_at.minute) == (8, 20)
+
+
+def test_daily_final_refreshes_stock_master_before_freezing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[tuple[ApiSpec, ...], bool, str]] = []
+
+    def capture_stage(
+        specs: tuple[ApiSpec, ...],
+        *,
+        finalize: bool,
+        stage_name: str,
+    ) -> None:
+        captured.append((specs, finalize, stage_name))
+
+    monkeypatch.setattr(jobs, "_plan_daily_stage", capture_stage)
+
+    jobs.plan_daily_final()
+
+    assert len(captured) == 1
+    specs, finalize, stage_name = captured[0]
+    assert finalize is True
+    assert stage_name == "daily_final"
+    assert "stock_basic" in {spec.api_name for spec in specs}
 
 
 def test_board_member_planner_creates_a_daily_batch(

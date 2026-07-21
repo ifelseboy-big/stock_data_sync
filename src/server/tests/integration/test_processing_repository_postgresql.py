@@ -19,9 +19,17 @@ from app.db.sync_session import SyncSessionFactory
 from app.modules.acquisition.domain import TaskBlueprint
 from app.modules.acquisition.models import BatchStatus, BatchType, CollectionBatch
 from app.modules.acquisition.repository import AcquisitionRepository
-from app.modules.processing.models import DatasetRelease, ProcessingTask, ProcessingTaskStatus
+from app.modules.processing.models import (
+    DatasetRelease,
+    DependencyStatus,
+    DependencyType,
+    ProcessingDependency,
+    ProcessingTask,
+    ProcessingTaskStatus,
+)
 from app.modules.processing.processors.base import PreparedDataset, PublicationResult
 from app.modules.processing.repository import ProcessingRepository
+from app.modules.stocks.models import Stock
 from app.storage import RawAssetMetadata
 
 pytestmark = pytest.mark.skipif(
@@ -298,6 +306,141 @@ def test_processing_dependencies_and_global_slot_roundtrip() -> None:
         )
     assert current_downstream_release is not None
     assert current_downstream_release.process_id == baseline_downstream_process_id
+
+
+def test_stock_release_requeues_failures_after_unknown_codes_become_available() -> None:
+    now = datetime(2037, 2, 2, 19, 5, tzinfo=TIMEZONE)
+    old_stock_process_id = uuid4()
+    new_stock_process_id = uuid4()
+    failed_process_id = uuid4()
+    master_batch_id = uuid4()
+    daily_batch_id = uuid4()
+    with SyncSessionFactory() as session, session.begin():
+        session.add_all(
+            (
+                CollectionBatch(
+                    batch_id=master_batch_id,
+                    batch_type=BatchType.DAILY.value,
+                    business_date=now.date(),
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now,
+                    closed_at=now,
+                ),
+                CollectionBatch(
+                    batch_id=daily_batch_id,
+                    batch_type=BatchType.DAILY.value,
+                    business_date=now.date(),
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now - timedelta(hours=3),
+                    closed_at=now - timedelta(hours=1),
+                ),
+            )
+        )
+        session.add_all(
+            (
+                ProcessingTask(
+                    process_id=old_stock_process_id,
+                    source_batch_id=daily_batch_id,
+                    process_type="stock@1",
+                    business_date=now.date(),
+                    output_dataset="stock",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=2,
+                    started_at=now - timedelta(hours=4),
+                    finished_at=now - timedelta(hours=4),
+                ),
+                ProcessingTask(
+                    process_id=new_stock_process_id,
+                    source_batch_id=master_batch_id,
+                    process_type="stock@1",
+                    business_date=now.date(),
+                    output_dataset="stock",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.QUEUED.value,
+                    priority=100,
+                    attempt_count=0,
+                    max_attempts=2,
+                    queued_at=now,
+                ),
+                ProcessingTask(
+                    process_id=failed_process_id,
+                    source_batch_id=daily_batch_id,
+                    process_type="stock_moneyflow_daily@1",
+                    business_date=now.date(),
+                    output_dataset="stock_moneyflow_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=2,
+                    max_attempts=2,
+                    started_at=now - timedelta(hours=2),
+                    finished_at=now - timedelta(hours=1),
+                    error_message="dataset references unknown stocks: ['699999.SH']",
+                ),
+                Stock(
+                    ts_code="699999.SH",
+                    symbol="699999",
+                    name="自动恢复测试",
+                    exchange="SSE",
+                    list_status="L",
+                    synced_at=now,
+                ),
+            )
+        )
+        session.flush()
+        session.add(
+            ProcessingDependency(
+                process_id=failed_process_id,
+                dependency_type=DependencyType.DATASET_RELEASE.value,
+                dependency_name="stock",
+                dependency_scope_key="GLOBAL",
+                dependency_scope={"scope_type": "GLOBAL", "scope_key": "GLOBAL"},
+                status=DependencyStatus.READY.value,
+                resolved_release_process_id=old_stock_process_id,
+            )
+        )
+
+    stock_spec = DatasetSpec(
+        dataset_name="stock",
+        processor="noop",
+        processor_version="1",
+        dependencies=(
+            DatasetDependencySpec(DependencyKind.RAW_ASSET, "stock_basic", ReleaseScope.GLOBAL),
+        ),
+        write_strategy=WriteStrategy.MASTER_MERGE,
+        release_scope=ReleaseScope.GLOBAL,
+        quality_rules=(QualityRuleSpec("test"),),
+    )
+    repository = ProcessingRepository(SyncSessionFactory)
+    claimed = repository.claim_next(now=now, advisory_lock_id=731_599_904)
+    assert claimed is not None and claimed.process_id == new_stock_process_id
+
+    repository.publish_success(
+        claimed,
+        stock_spec,
+        prepared=PreparedDataset(None, 1),
+        processor=NoopProcessor(),
+        published_at=now,
+        rows_read=1,
+        rows_rejected=0,
+    )
+
+    with SyncSessionFactory() as session:
+        recovered = session.get(ProcessingTask, failed_process_id)
+        dependency = session.get(
+            ProcessingDependency,
+            (failed_process_id, DependencyType.DATASET_RELEASE.value, "stock", "GLOBAL"),
+        )
+    assert recovered is not None
+    assert recovered.status == ProcessingTaskStatus.QUEUED.value
+    assert recovered.max_attempts == 3
+    assert recovered.error_message is None
+    assert dependency is not None
+    assert dependency.status == DependencyStatus.READY.value
+    assert dependency.resolved_release_process_id == new_stock_process_id
 
 
 def _dataset(

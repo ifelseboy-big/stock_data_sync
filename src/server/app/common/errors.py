@@ -68,6 +68,19 @@ class ProcessingError(AppError):
         self.retryable = retryable
 
 
+class UnknownStockCodesError(ProcessingError):
+    """Raised when a fact dataset arrives before its stock master rows."""
+
+    code = "unknown_stock_codes"
+
+    def __init__(self, codes: set[str]) -> None:
+        self.codes = tuple(sorted(codes))
+        super().__init__(
+            f"dataset references unknown stocks: {list(self.codes)[:20]}",
+            retryable=True,
+        )
+
+
 class RawAssetError(AppError):
     """Raised when an immutable raw asset cannot be written or verified."""
 

@@ -775,8 +775,16 @@ class OperationsRepository:
         processing_warning = (
             (ProcessingTask.status == ProcessingTaskStatus.SUCCESS.value)
             & ProcessingTask.warning_message.is_not(None)
-            & ~ProcessingTask.warning_message.like(
-                "dc_concept_cons 返回%完全重复记录，加工时已确定性去重"
+            & ~or_(
+                ProcessingTask.warning_message.like(
+                    "%个证券历史代码映射为现行代码%"
+                ),
+                ProcessingTask.warning_message.like(
+                    "%重复记录仅有名称或数值精度差异，已确定性合并%"
+                ),
+                ProcessingTask.warning_message.like(
+                    "%完全重复记录，加工时已确定性去重%"
+                ),
             )
         )
         collection_warning = (

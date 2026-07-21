@@ -46,6 +46,8 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     warning_process_id = uuid4()
     warning_process_duplicate_id = uuid4()
     ignored_warning_process_id = uuid4()
+    ignored_alias_warning_process_id = uuid4()
+    ignored_merge_warning_process_id = uuid4()
     blocked_process_id = uuid4()
     recovered_failure_id = uuid4()
     recovered_success_id = uuid4()
@@ -254,6 +256,46 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     warning_message=("dc_concept_cons 返回 1 条完全重复记录，加工时已确定性去重"),
                 ),
                 ProcessingTask(
+                    process_id=ignored_alias_warning_process_id,
+                    source_batch_id=batch_id,
+                    process_type="stock_daily_core@1",
+                    business_date=now.date(),
+                    output_dataset="stock_daily.core",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    rows_read=2,
+                    rows_rejected=1,
+                    rows_written=1,
+                    warning_message=(
+                        "daily 已将 1 个证券历史代码映射为现行代码，并去除重复记录"
+                    ),
+                ),
+                ProcessingTask(
+                    process_id=ignored_merge_warning_process_id,
+                    source_batch_id=batch_id,
+                    process_type="stock_top_inst_daily@1",
+                    business_date=now.date(),
+                    output_dataset="stock_top_inst_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    started_at=now - timedelta(minutes=5),
+                    finished_at=now - timedelta(minutes=4),
+                    rows_read=2,
+                    rows_rejected=1,
+                    rows_written=1,
+                    warning_message=(
+                        "top_inst 重复记录仅有名称或数值精度差异，已确定性合并"
+                    ),
+                ),
+                ProcessingTask(
                     process_id=recovered_failure_id,
                     source_batch_id=batch_id,
                     process_type="recovered@1",
@@ -410,6 +452,14 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     )
     assert all(
         item["id"] != f"processing:{ignored_warning_process_id}" for item in alerts.json()["items"]
+    )
+    assert all(
+        item["id"] != f"processing:{ignored_alias_warning_process_id}"
+        for item in alerts.json()["items"]
+    )
+    assert all(
+        item["id"] != f"processing:{ignored_merge_warning_process_id}"
+        for item in alerts.json()["items"]
     )
     assert all(
         item["id"] != f"acquisition:{legacy_collection_failure_id}"

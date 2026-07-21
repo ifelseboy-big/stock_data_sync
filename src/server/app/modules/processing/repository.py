@@ -1,7 +1,9 @@
+from ast import literal_eval
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 from uuid import UUID, uuid5
 
+import structlog
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -32,6 +34,7 @@ from app.modules.processing.models import (
     ProcessingTaskStatus,
 )
 from app.modules.processing.processors.base import DatasetProcessor, PreparedDataset
+from app.modules.stocks.models import Stock
 
 type SessionFactory = Callable[[], Session]
 
@@ -44,6 +47,7 @@ PROCESSING_TERMINAL_STATUSES = frozenset(
         ProcessingTaskStatus.CANCELLED.value,
     }
 )
+UNKNOWN_STOCKS_ERROR_PREFIX = "dataset references unknown stocks:"
 
 
 class ProcessingRepository:
@@ -319,11 +323,94 @@ class ProcessingRepository:
             process.error_message = None
             process.warning_message = "\n".join(prepared.warning_messages)[:4000] or None
             self._resolve_downstream_after_success(session, process.process_id, published_at)
+            if spec.dataset_name == "stock":
+                recovered_count = self._recover_resolved_unknown_stock_tasks(
+                    session,
+                    stock_release_process_id=process.process_id,
+                    now=published_at,
+                )
+                if recovered_count:
+                    structlog.get_logger("processing_repository").info(
+                        "unknown_stock_tasks_requeued",
+                        recovered_count=recovered_count,
+                        stock_release_process_id=str(process.process_id),
+                    )
             return ProcessingTransition(
                 task.process_id,
                 ProcessingTaskStatus.SUCCESS,
                 None,
             )
+
+    @staticmethod
+    def _recover_resolved_unknown_stock_tasks(
+        session: Session,
+        *,
+        stock_release_process_id: UUID,
+        now: datetime,
+    ) -> int:
+        candidates = session.scalars(
+            select(ProcessingTask)
+            .where(
+                ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
+                ProcessingTask.error_message.like(f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"),
+                ProcessingTask.finished_at >= now - timedelta(days=30),
+            )
+            .order_by(ProcessingTask.finished_at, ProcessingTask.process_id)
+            .with_for_update(skip_locked=True)
+        ).all()
+        parsed = {
+            task.process_id: parsed_codes
+            for task in candidates
+            if (parsed_codes := _unknown_stock_codes(task.error_message))
+        }
+        if not parsed:
+            return 0
+
+        referenced_codes = set().union(*parsed.values())
+        available_codes = set(
+            session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(referenced_codes)))
+        )
+        dependencies = session.scalars(
+            select(ProcessingDependency)
+            .where(ProcessingDependency.process_id.in_(tuple(parsed)))
+            .with_for_update()
+        ).all()
+        dependencies_by_process: dict[UUID, list[ProcessingDependency]] = {}
+        for dependency in dependencies:
+            dependencies_by_process.setdefault(dependency.process_id, []).append(dependency)
+
+        recovered_count = 0
+        for task in candidates:
+            required_codes = parsed.get(task.process_id)
+            if not required_codes or not required_codes.issubset(available_codes):
+                continue
+            task_dependencies = dependencies_by_process.get(task.process_id, [])
+            stock_dependencies = [
+                dependency
+                for dependency in task_dependencies
+                if dependency.dependency_type == DependencyType.DATASET_RELEASE.value
+                and dependency.dependency_name == "stock"
+            ]
+            if len(stock_dependencies) != 1:
+                continue
+            stock_dependency = stock_dependencies[0]
+            stock_dependency.status = DependencyStatus.READY.value
+            stock_dependency.resolved_release_process_id = stock_release_process_id
+            stock_dependency.blocked_reason = None
+            if any(
+                dependency.status != DependencyStatus.READY.value
+                for dependency in task_dependencies
+            ):
+                continue
+            task.status = ProcessingTaskStatus.QUEUED.value
+            task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
+            task.next_retry_at = None
+            task.queued_at = now
+            task.started_at = None
+            task.finished_at = None
+            task.error_message = None
+            recovered_count += 1
+        return recovered_count
 
     def fail_task(
         self,
@@ -749,6 +836,18 @@ def _affected_dataset_specs(
                 selected_names.add(spec.dataset_name)
                 changed = True
     return tuple(spec for spec in dataset_specs if spec.dataset_name in selected_names)
+
+
+def _unknown_stock_codes(message: str | None) -> set[str]:
+    if message is None or not message.startswith(UNKNOWN_STOCKS_ERROR_PREFIX):
+        return set()
+    try:
+        value = literal_eval(message.removeprefix(UNKNOWN_STOCKS_ERROR_PREFIX).strip())
+    except (SyntaxError, ValueError):
+        return set()
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        return set()
+    return set(value)
 
 
 def _release_scope_key(scope: ReleaseScope, business_date: date | None) -> str:
