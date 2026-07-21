@@ -443,6 +443,119 @@ def test_stock_release_requeues_failures_after_unknown_codes_become_available() 
     assert dependency.resolved_release_process_id == new_stock_process_id
 
 
+def test_unknown_stock_reconciliation_requests_only_one_newer_master_refresh() -> None:
+    now = datetime(2037, 2, 3, 19, 5, tzinfo=TIMEZONE)
+    stock_process_id = uuid4()
+    failed_process_id = uuid4()
+    master_batch_id = uuid4()
+    daily_batch_id = uuid4()
+    with SyncSessionFactory() as session, session.begin():
+        session.add_all(
+            (
+                CollectionBatch(
+                    batch_id=master_batch_id,
+                    batch_type=BatchType.MASTER.value,
+                    business_date=now.date(),
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now - timedelta(hours=3),
+                    closed_at=now - timedelta(hours=2),
+                ),
+                CollectionBatch(
+                    batch_id=daily_batch_id,
+                    batch_type=BatchType.DAILY.value,
+                    business_date=now.date(),
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now - timedelta(hours=2),
+                    closed_at=now - timedelta(minutes=30),
+                ),
+            )
+        )
+        session.add_all(
+            (
+                ProcessingTask(
+                    process_id=stock_process_id,
+                    source_batch_id=master_batch_id,
+                    process_type="stock@1",
+                    business_date=now.date(),
+                    output_dataset="stock",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.SUCCESS.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=2,
+                    started_at=now - timedelta(hours=3),
+                    finished_at=now - timedelta(hours=2),
+                ),
+                ProcessingTask(
+                    process_id=failed_process_id,
+                    source_batch_id=daily_batch_id,
+                    process_type="stock_daily_core@1",
+                    business_date=now.date(),
+                    output_dataset="stock_daily.core",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=2,
+                    max_attempts=2,
+                    started_at=now - timedelta(minutes=10),
+                    finished_at=now - timedelta(minutes=5),
+                    error_message="dataset references unknown stocks: ['699998.SH']",
+                ),
+            )
+        )
+        session.flush()
+        release = session.get(DatasetRelease, ("stock", "GLOBAL", "GLOBAL"))
+        if release is None:
+            session.add(
+                DatasetRelease(
+                    dataset_name="stock",
+                    scope_type="GLOBAL",
+                    scope_key="GLOBAL",
+                    business_date=None,
+                    version_id=uuid4(),
+                    process_id=stock_process_id,
+                    row_count=1,
+                    published_at=now - timedelta(hours=2),
+                )
+            )
+        else:
+            release.version_id = uuid4()
+            release.process_id = stock_process_id
+            release.row_count = 1
+            release.published_at = now - timedelta(hours=2)
+        session.add(
+            ProcessingDependency(
+                process_id=failed_process_id,
+                dependency_type=DependencyType.DATASET_RELEASE.value,
+                dependency_name="stock",
+                dependency_scope_key="GLOBAL",
+                dependency_scope={"scope_type": "GLOBAL", "scope_key": "GLOBAL"},
+                status=DependencyStatus.READY.value,
+                resolved_release_process_id=stock_process_id,
+            )
+        )
+
+    repository = ProcessingRepository(SyncSessionFactory)
+    first = repository.reconcile_unknown_stock_failures(now=now)
+
+    assert first.requeued_count == 0
+    assert first.missing_codes == ("699998.SH",)
+    assert first.master_refresh_required is True
+    assert first.latest_failure_at == now - timedelta(minutes=5)
+
+    with SyncSessionFactory() as session, session.begin():
+        release = session.get(DatasetRelease, ("stock", "GLOBAL", "GLOBAL"))
+        assert release is not None
+        release.published_at = now + timedelta(minutes=1)
+
+    after_newer_refresh = repository.reconcile_unknown_stock_failures(
+        now=now + timedelta(minutes=2)
+    )
+
+    assert after_newer_refresh.missing_codes == ("699998.SH",)
+    assert after_newer_refresh.master_refresh_required is False
+
+
 def _dataset(
     name: str,
     raw_name: str,

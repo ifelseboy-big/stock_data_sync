@@ -16,6 +16,7 @@ from app.catalog import ApiSpec, ScheduleGroup, SpecRegistry
 from app.catalog.datasets import ALL_DATASET_SPECS
 from app.catalog.specs import DependencyKind, ParameterValue, ReleaseScope, RequestScope
 from app.catalog.tushare import ths_member_scopes
+from app.common.errors import parse_unknown_stock_codes
 from app.core.config import settings
 from app.modules.acquisition.models import (
     BatchStatus,
@@ -39,7 +40,7 @@ from app.modules.processing.models import (
     ProcessingTask,
     ProcessingTaskStatus,
 )
-from app.modules.stocks.models import TradeCalendar
+from app.modules.stocks.models import Stock, TradeCalendar
 from app.modules.topics.models import ConceptBoard, ThemeIndex
 from app.scheduler.catalog import SCHEDULED_JOB_BY_ID, ScheduledJobDefinition
 
@@ -747,6 +748,13 @@ class OperationCommandService:
                 raise OperationCommandError("加工任务不存在", status_code=404)
             if task.status not in PROCESSING_RETRYABLE:
                 raise OperationCommandError(f"状态 {task.status} 不允许人工重试")
+            missing_stock_codes = await self._missing_unknown_stock_codes(
+                task.error_message
+            )
+            if missing_stock_codes:
+                raise OperationCommandError(
+                    "股票主数据尚未补齐，任务正在等待自动修复，不能重复重试"
+                )
             unavailable = await self._session.scalar(
                 select(func.count())
                 .select_from(ProcessingDependency)
@@ -869,14 +877,45 @@ class OperationCommandService:
                     .distinct()
                 )
             )
-            retried = tuple(task for task in candidates if task.process_id not in unavailable_ids)
+            unknown_codes_by_process = {
+                task.process_id: codes
+                for task in candidates
+                if (codes := parse_unknown_stock_codes(task.error_message))
+            }
+            all_unknown_codes = set().union(*unknown_codes_by_process.values()) if (
+                unknown_codes_by_process
+            ) else set()
+            available_stock_codes = set(
+                await self._session.scalars(
+                    select(Stock.ts_code).where(Stock.ts_code.in_(all_unknown_codes))
+                )
+            )
+            unresolved_root_cause_ids = {
+                process_id
+                for process_id, codes in unknown_codes_by_process.items()
+                if not codes.issubset(available_stock_codes)
+            }
+            retried = tuple(
+                task
+                for task in candidates
+                if task.process_id not in unavailable_ids
+                and task.process_id not in unresolved_root_cause_ids
+            )
             if not retried:
+                if unresolved_root_cause_ids:
+                    raise OperationCommandError(
+                        "失败任务的股票主数据尚未补齐，正在等待自动修复"
+                    )
                 raise OperationCommandError("全部失败加工任务仍有未就绪依赖，暂不能重试")
             for task in retried:
                 self._queue_processing_task(task, now)
             return {
                 "retryCount": len(retried),
-                "skippedDependencyCount": len(candidates) - len(retried),
+                "skippedDependencyCount": len(
+                    ({task.process_id for task in candidates} & unavailable_ids)
+                    - unresolved_root_cause_ids
+                ),
+                "skippedRootCauseCount": len(unresolved_root_cause_ids),
                 "deduplicatedCount": len(task_rows) - len(logical_tasks),
                 "skippedActiveCount": len(logical_tasks) - len(candidates),
             }
@@ -1354,6 +1393,17 @@ class OperationCommandService:
         task.started_at = None
         task.finished_at = None
         task.error_message = None
+
+    async def _missing_unknown_stock_codes(self, message: str | None) -> set[str]:
+        codes = parse_unknown_stock_codes(message)
+        if not codes:
+            return set()
+        available = set(
+            await self._session.scalars(
+                select(Stock.ts_code).where(Stock.ts_code.in_(codes))
+            )
+        )
+        return codes - available
 
     async def _block_processing_downstream(self, process_id: UUID, reason: str) -> None:
         dependencies = tuple(

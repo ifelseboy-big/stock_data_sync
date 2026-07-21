@@ -28,6 +28,7 @@ from app.modules.processing.processors.stock_daily import (
     StockMoneyflowDailyProcessor,
     StockSuspendDailyProcessor,
     StockTechnicalDailyProcessor,
+    _validate_limit_pre_close,
 )
 from app.modules.processing.staging import PreparedRow
 from app.storage import LocalRawAssetStore, RawAssetContext
@@ -254,6 +255,19 @@ def test_stock_suspend_maps_old_only_bse_code_without_rejecting_it(
     assert rows[0]["ts_code"] == "920961.BJ"
     assert prepared.rows_rejected == 0
     assert "831961.BJ->920961.BJ" in prepared.warning_messages[0]
+
+
+def test_stock_daily_limit_uses_core_pre_close_when_provider_value_is_missing() -> None:
+    _validate_limit_pre_close("000001.SZ", Decimal("10.23"), None)
+
+
+def test_stock_daily_limit_still_rejects_conflicting_pre_close() -> None:
+    with pytest.raises(ProcessingError, match="pre_close mismatch"):
+        _validate_limit_pre_close(
+            "000001.SZ",
+            Decimal("10.23"),
+            Decimal("10.24"),
+        )
 
 
 def _asset(

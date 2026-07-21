@@ -6,7 +6,8 @@ from app.catalog import (
     ReleaseScope,
     WriteStrategy,
 )
-from app.modules.processing.repository import _affected_dataset_specs, _unknown_stock_codes
+from app.common.errors import parse_unknown_stock_codes
+from app.modules.processing.repository import _affected_dataset_specs
 
 
 def _dataset(
@@ -64,8 +65,8 @@ def test_triggering_release_dependency_remains_transitive() -> None:
 
 
 def test_unknown_stock_error_codes_are_parsed_only_from_expected_failures() -> None:
-    assert _unknown_stock_codes(
+    assert parse_unknown_stock_codes(
         "dataset references unknown stocks: ['688806.SH', '920001.BJ']"
     ) == {"688806.SH", "920001.BJ"}
-    assert _unknown_stock_codes("another processing failure") == set()
-    assert _unknown_stock_codes("dataset references unknown stocks: invalid") == set()
+    assert parse_unknown_stock_codes("another processing failure") == set()
+    assert parse_unknown_stock_codes("dataset references unknown stocks: invalid") == set()

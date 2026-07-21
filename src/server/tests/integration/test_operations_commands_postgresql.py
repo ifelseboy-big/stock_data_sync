@@ -395,6 +395,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     ready_process_id = uuid4()
     duplicate_process_id = uuid4()
     blocked_process_id = uuid4()
+    unknown_stock_process_id = uuid4()
     active_failed_process_id = uuid4()
     active_process_id = uuid4()
 
@@ -509,6 +510,20 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
                     error_message="test failure",
                 ),
                 ProcessingTask(
+                    process_id=unknown_stock_process_id,
+                    source_batch_id=source_batch_id,
+                    process_type="stock_moneyflow_daily@1",
+                    business_date=business_date,
+                    output_dataset="stock_moneyflow_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=3,
+                    max_attempts=3,
+                    finished_at=now - timedelta(minutes=30),
+                    error_message="dataset references unknown stocks: ['699997.SH']",
+                ),
+                ProcessingTask(
                     process_id=active_failed_process_id,
                     source_batch_id=source_batch_id,
                     process_type="bulk_active@1",
@@ -563,6 +578,14 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
                     status=DependencyStatus.MISSING.value,
                 ),
                 ProcessingDependency(
+                    process_id=unknown_stock_process_id,
+                    dependency_type=DependencyType.RAW_ASSET.value,
+                    dependency_name="moneyflow",
+                    dependency_scope_key="trade_date=20260718",
+                    dependency_scope={"trade_date": "20260718"},
+                    status=DependencyStatus.READY.value,
+                ),
+                ProcessingDependency(
                     process_id=active_failed_process_id,
                     dependency_type=DependencyType.RAW_ASSET.value,
                     dependency_name="daily",
@@ -610,6 +633,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert processing_retry.json()["result"] == {
         "retryCount": 1,
         "skippedDependencyCount": 1,
+        "skippedRootCauseCount": 1,
         "deduplicatedCount": 1,
         "skippedActiveCount": 1,
     }
@@ -646,6 +670,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
         ready_process = session.get(ProcessingTask, ready_process_id)
         duplicate_process = session.get(ProcessingTask, duplicate_process_id)
         blocked_process = session.get(ProcessingTask, blocked_process_id)
+        unknown_stock_process = session.get(ProcessingTask, unknown_stock_process_id)
 
     assert repair_batch is not None
     assert repair_batch.expected_task_count == 2
@@ -657,6 +682,9 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert duplicate_process.status == ProcessingTaskStatus.FAILED.value
     assert blocked_process is not None
     assert blocked_process.status == ProcessingTaskStatus.FAILED.value
+    assert unknown_stock_process is not None
+    assert unknown_stock_process.status == ProcessingTaskStatus.FAILED.value
+    assert unknown_stock_process.attempt_count == 3
 
 
 @pytest.mark.asyncio

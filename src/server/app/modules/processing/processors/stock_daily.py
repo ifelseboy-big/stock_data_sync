@@ -266,12 +266,11 @@ class StockDailyLimitProcessor:
             raise ProcessingError("stock_daily.limit has no rows matching stock_daily.core")
         for row in matched_rows:
             ts_code = cast(str, row["ts_code"])
-            source_pre_close_value = row["source_pre_close"]
-            if not isinstance(source_pre_close_value, Decimal):
-                raise ProcessingError(f"stock_daily.limit has no pre_close for {ts_code}")
-            source_pre_close = source_pre_close_value
-            if abs(existing[ts_code] - source_pre_close) > Decimal("0.001"):
-                raise ProcessingError(f"pre_close mismatch for {ts_code}")
+            _validate_limit_pre_close(
+                ts_code,
+                existing[ts_code],
+                row["source_pre_close"],
+            )
         values = tuple(
             {
                 "ts_code": row["ts_code"],
@@ -650,6 +649,19 @@ def _stock_limit_row(source: RawRow, business_date: date | None) -> PreparedRow:
         "up_limit": decimal_value(source.get("up_limit"), "up_limit"),
         "down_limit": decimal_value(source.get("down_limit"), "down_limit"),
     }
+
+
+def _validate_limit_pre_close(
+    ts_code: str,
+    core_pre_close: Decimal,
+    source_pre_close: object,
+) -> None:
+    if source_pre_close is None:
+        return
+    if not isinstance(source_pre_close, Decimal):
+        raise ProcessingError(f"stock_daily.limit has invalid pre_close for {ts_code}")
+    if abs(core_pre_close - source_pre_close) > Decimal("0.001"):
+        raise ProcessingError(f"pre_close mismatch for {ts_code}")
 
 
 def _stock_technical_row(source: RawRow, business_date: date | None) -> PreparedRow:

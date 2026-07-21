@@ -92,6 +92,29 @@ async def test_unresolved_run_records_apply_recovery_lookup_before_pagination() 
 
 
 @pytest.mark.asyncio
+async def test_processing_queue_hides_tasks_covered_by_a_newer_release() -> None:
+    session = _StatementCapture()
+    repository = OperationsRepository(session)  # type: ignore[arg-type]
+
+    await repository.processing_queue(
+        status=None,
+        dataset_name=None,
+        offset=0,
+        limit=20,
+    )
+
+    sql = str(
+        session.page_statement.compile(
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "dataset_release" in sql
+    assert "published_at > coalesce" in sql
+    assert "processing_task.status IN" in sql
+
+
+@pytest.mark.asyncio
 async def test_alerts_hide_dependency_blocks_and_expected_duplicate_warnings() -> None:
     session = _StatementCapture()
     repository = OperationsRepository(session)  # type: ignore[arg-type]

@@ -49,6 +49,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     ignored_alias_warning_process_id = uuid4()
     ignored_merge_warning_process_id = uuid4()
     blocked_process_id = uuid4()
+    recovered_blocked_process_id = uuid4()
     recovered_failure_id = uuid4()
     recovered_success_id = uuid4()
     scheduler_failure_id = uuid4()
@@ -199,6 +200,19 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     attempt_count=0,
                     max_attempts=3,
                     queued_at=now - timedelta(minutes=5),
+                    error_message="required asset is missing",
+                ),
+                ProcessingTask(
+                    process_id=recovered_blocked_process_id,
+                    source_batch_id=batch_id,
+                    process_type="recovered_blocked@1",
+                    business_date=now.date(),
+                    output_dataset="recovered_blocked_daily",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.BLOCKED.value,
+                    priority=100,
+                    attempt_count=0,
+                    max_attempts=3,
                     error_message="required asset is missing",
                 ),
                 ProcessingTask(
@@ -360,6 +374,16 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     row_count=10,
                     published_at=now - timedelta(minutes=2),
                 ),
+                DatasetRelease(
+                    dataset_name="recovered_blocked_daily",
+                    scope_type="DATE",
+                    scope_key=now.date().isoformat(),
+                    business_date=now.date(),
+                    version_id=uuid4(),
+                    process_id=recovered_success_id,
+                    row_count=10,
+                    published_at=now - timedelta(minutes=2),
+                ),
             )
         )
         session.add_all(
@@ -422,6 +446,10 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert overview.json()["metrics"]["providerSuccessRateToday"] == 1.0
     assert any(item["id"] == str(batch_id) for item in batches.json()["items"])
     assert any(item["id"] == str(blocked_process_id) for item in queue.json()["items"])
+    assert all(
+        item["id"] != str(recovered_blocked_process_id)
+        for item in queue.json()["items"]
+    )
     readiness = dependencies.json()["items"]
     blocked_readiness = next(item for item in readiness if item["id"] == str(blocked_process_id))
     assert blocked_readiness["readinessStatus"] == "blocked"

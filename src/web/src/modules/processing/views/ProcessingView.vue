@@ -96,10 +96,14 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     const command = await retryAllFailedProcessingTasks({ reason: value.reason }, value)
     const retried = Number(command.result.retryCount ?? 0)
     const skipped = Number(command.result.skippedDependencyCount ?? 0)
+    const skippedRootCause = Number(command.result.skippedRootCauseCount ?? 0)
     const deduplicated = Number(command.result.deduplicatedCount ?? 0)
     const skippedActive = Number(command.result.skippedActiveCount ?? 0)
     const notes: string[] = []
     if (skipped) notes.push(`${skipped} 个因依赖未就绪跳过`)
+    if (skippedRootCause) {
+      notes.push(`${skippedRootCause} 个因股票主数据未补齐等待自动修复`)
+    }
     if (deduplicated) notes.push(`去除 ${deduplicated} 个重复失败`)
     if (skippedActive) notes.push(`跳过 ${skippedActive} 个已有活动任务的范围`)
     ElMessage.success(

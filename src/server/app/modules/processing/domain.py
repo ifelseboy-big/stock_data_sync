@@ -41,3 +41,11 @@ class ProcessingPlanResult:
     created_task_count: int
     queued_task_count: int
     blocked_task_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownStockRecoveryResult:
+    requeued_count: int
+    missing_codes: tuple[str, ...]
+    latest_failure_at: datetime | None
+    master_refresh_required: bool

@@ -217,6 +217,7 @@ class OperationsRepository:
         offset: int,
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
+        recovered_release = aliased(DatasetRelease)
         active_statuses = (
             ProcessingTaskStatus.WAITING_DEPENDENCY.value,
             ProcessingTaskStatus.QUEUED.value,
@@ -252,6 +253,26 @@ class OperationsRepository:
                 ProcessingDependency.process_id == ProcessingTask.process_id,
             )
             .where(ProcessingTask.status.in_(active_statuses))
+            .where(
+                ~select(literal(1))
+                .where(
+                    recovered_release.dataset_name == ProcessingTask.output_dataset,
+                    or_(
+                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                        recovered_release.business_date.is_not_distinct_from(
+                            ProcessingTask.business_date
+                        ),
+                    ),
+                    recovered_release.published_at
+                    > func.coalesce(
+                        ProcessingTask.finished_at,
+                        ProcessingTask.started_at,
+                        ProcessingTask.queued_at,
+                        CollectionBatch.scheduled_at,
+                    ),
+                )
+                .exists()
+            )
             .group_by(ProcessingTask.process_id, CollectionBatch.batch_type)
         )
         if dataset_name:

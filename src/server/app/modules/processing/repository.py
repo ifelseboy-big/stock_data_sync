@@ -1,4 +1,3 @@
-from ast import literal_eval
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 from uuid import UUID, uuid5
@@ -9,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.catalog import DatasetSpec, DependencyKind, ReleaseScope
+from app.common.errors import UNKNOWN_STOCKS_ERROR_PREFIX, parse_unknown_stock_codes
 from app.modules.acquisition.domain import TERMINAL_TASK_STATUSES
 from app.modules.acquisition.models import (
     BatchStatus,
@@ -24,6 +24,7 @@ from app.modules.processing.domain import (
     ProcessingPlanResult,
     ProcessingTransition,
     RawDependencyAsset,
+    UnknownStockRecoveryResult,
 )
 from app.modules.processing.models import (
     DatasetRelease,
@@ -47,9 +48,6 @@ PROCESSING_TERMINAL_STATUSES = frozenset(
         ProcessingTaskStatus.CANCELLED.value,
     }
 )
-UNKNOWN_STOCKS_ERROR_PREFIX = "dataset references unknown stocks:"
-
-
 class ProcessingRepository:
     def __init__(self, session_factory: SessionFactory) -> None:
         self._session_factory = session_factory
@@ -361,7 +359,7 @@ class ProcessingRepository:
         parsed = {
             task.process_id: parsed_codes
             for task in candidates
-            if (parsed_codes := _unknown_stock_codes(task.error_message))
+            if (parsed_codes := parse_unknown_stock_codes(task.error_message))
         }
         if not parsed:
             return 0
@@ -411,6 +409,66 @@ class ProcessingRepository:
             task.error_message = None
             recovered_count += 1
         return recovered_count
+
+    def reconcile_unknown_stock_failures(
+        self,
+        *,
+        now: datetime,
+    ) -> UnknownStockRecoveryResult:
+        with self._session_factory() as session, session.begin():
+            release = session.get(
+                DatasetRelease,
+                ("stock", ReleaseScope.GLOBAL.value, "GLOBAL"),
+            )
+            requeued_count = (
+                self._recover_resolved_unknown_stock_tasks(
+                    session,
+                    stock_release_process_id=release.process_id,
+                    now=now,
+                )
+                if release is not None
+                else 0
+            )
+            session.flush()
+            candidates = session.scalars(
+                select(ProcessingTask).where(
+                    ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
+                    ProcessingTask.error_message.like(
+                        f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"
+                    ),
+                    ProcessingTask.finished_at.is_not(None),
+                    ProcessingTask.finished_at >= now - timedelta(days=30),
+                )
+            ).all()
+            parsed = {
+                task.process_id: parsed_codes
+                for task in candidates
+                if (parsed_codes := parse_unknown_stock_codes(task.error_message))
+            }
+            if not parsed:
+                return UnknownStockRecoveryResult(requeued_count, (), None, False)
+
+            referenced_codes = set().union(*parsed.values())
+            available_codes = set(
+                session.scalars(
+                    select(Stock.ts_code).where(Stock.ts_code.in_(referenced_codes))
+                )
+            )
+            missing_codes = tuple(sorted(referenced_codes - available_codes))
+            latest_failure_at = max(
+                task.finished_at
+                for task in candidates
+                if task.process_id in parsed and task.finished_at is not None
+            )
+            master_refresh_required = bool(missing_codes) and (
+                release is None or release.published_at <= latest_failure_at
+            )
+            return UnknownStockRecoveryResult(
+                requeued_count,
+                missing_codes,
+                latest_failure_at,
+                master_refresh_required,
+            )
 
     def fail_task(
         self,
@@ -836,18 +894,6 @@ def _affected_dataset_specs(
                 selected_names.add(spec.dataset_name)
                 changed = True
     return tuple(spec for spec in dataset_specs if spec.dataset_name in selected_names)
-
-
-def _unknown_stock_codes(message: str | None) -> set[str]:
-    if message is None or not message.startswith(UNKNOWN_STOCKS_ERROR_PREFIX):
-        return set()
-    try:
-        value = literal_eval(message.removeprefix(UNKNOWN_STOCKS_ERROR_PREFIX).strip())
-    except (SyntaxError, ValueError):
-        return set()
-    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
-        return set()
-    return set(value)
 
 
 def _release_scope_key(scope: ReleaseScope, business_date: date | None) -> str:
