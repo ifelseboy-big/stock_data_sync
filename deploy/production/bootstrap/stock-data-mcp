@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROGRAM_DIR="$(cd -- "$BIN_DIR/.." && pwd)"
+TARGET="$PROGRAM_DIR/bin/run-service"
+[[ -x "$TARGET" ]] || {
+  printf '错误：MCP启动入口不存在：%s\n' "$TARGET" >&2
+  exit 1
+}
+exec /bin/bash "$TARGET" mcp

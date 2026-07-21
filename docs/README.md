@@ -21,7 +21,8 @@
 | 4 | [管理后台与可观测性设计](04-admin-console.md) | 运维页面、指标口径、管理 API 和告警规则 |
 | 5 | [技术依赖说明](05-dependencies.md) | 引入哪些库以及它们承担的职责 |
 | 6 | [Mac mini 安装、升级与运行](06-deployment.md) | 源码安装、程序升级、doctor、配置和服务管理 |
-| 7 | [数据模型](data-model/README.md) | PostgreSQL 表结构、索引分区、写入规则和 Parquet 资产 |
+| 7 | [本机 MCP 只读服务](07-mcp-read-only.md) | 本机 stdio 工具、发布口径和独立只读数据库边界 |
+| 8 | [数据模型](data-model/README.md) | PostgreSQL 表结构、索引分区、写入规则和 Parquet 资产 |
 
 ## 维护规则
 

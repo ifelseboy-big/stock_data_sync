@@ -187,6 +187,7 @@ RELEASE_DIR="$BUILT_RELEASE_DIR"
 APP_VERSION="$BUILT_RELEASE_VERSION"
 
 POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+MCP_DATABASE_PASSWORD="$(openssl rand -hex 24)"
 ADMIN_API_TOKEN="$(openssl rand -hex 32)"
 ORIGINAL_UMASK="$(umask)"
 umask 077
@@ -216,6 +217,8 @@ umask 077
   printf '# 生产数据库用户。[安装器维护，请勿修改]\n'; deploy_write_env_value POSTGRES_USER stock_sync
   printf '# PostgreSQL 随机密码。[安装器维护，敏感信息]\n'; deploy_write_env_value POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
   printf '# 应用数据库连接地址。[安装器维护，敏感信息]\n'; deploy_write_env_value DATABASE_URL "postgresql+psycopg://stock_sync:$POSTGRES_PASSWORD@127.0.0.1:$POSTGRES_PORT/stock_data_sync"
+  printf '# 本机MCP只读数据库连接地址。[安装器维护，敏感信息]\n'; deploy_write_env_value MCP_DATABASE_URL "postgresql+psycopg://stock_mcp_reader:$MCP_DATABASE_PASSWORD@127.0.0.1:$POSTGRES_PORT/stock_data_sync"
+  printf '# MCP单次查询超时秒数。[用户可修改]\n'; deploy_write_env_value MCP_QUERY_TIMEOUT_SECONDS 30
   printf '\n# =============================================================================\n# 数据、容量与前端配置\n# =============================================================================\n\n'
   printf '# 不可变 Parquet 原始资产目录。[安装器维护，请勿修改]\n'; deploy_write_env_value RAW_DATA_DIR "$DATA_DIR/data/raw"
   printf '# 磁盘使用率达到该百分比时告警。[用户可修改]\n'; deploy_write_env_value RAW_STORAGE_WARNING_USED_PERCENT 85
@@ -253,6 +256,7 @@ umask "$ORIGINAL_UMASK"
 
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/installed-stock-data-sync" "$PROGRAM_DIR/bin/stock-data-sync"
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/run-service" "$PROGRAM_DIR/bin/run-service"
+install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/stock-data-mcp" "$PROGRAM_DIR/bin/stock-data-mcp"
 install -d -o root -g wheel -m 0755 /usr/local/bin
 install -o root -g wheel -m 0755 "$SCRIPT_DIR/bootstrap/global-stock-data-sync" /usr/local/bin/stock-data-sync
 install -d -o root -g wheel -m 0755 /usr/local/libexec
@@ -280,6 +284,7 @@ PASSWORD_FILE=""
 "$PROGRAM_DIR/bin/stock-data-sync" install-services
 "$PROGRAM_DIR/bin/stock-data-sync" start postgres
 "$PROGRAM_DIR/bin/stock-data-sync" migrate
+"$PROGRAM_DIR/bin/stock-data-sync" mcp setup
 
 if (( START_AFTER_INSTALL == 1 )); then
   "$PROGRAM_DIR/bin/stock-data-sync" start

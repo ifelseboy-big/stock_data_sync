@@ -38,6 +38,7 @@ usage() {
   config [show|path|validate|edit]
                            查看或修改单一 app.env 配置
   migrate                  显式执行数据库迁移；普通升级不会调用
+  mcp setup|command        配置只读角色；或输出本机stdio MCP启动命令
   backup TARGET [--full]   手工备份数据库和 Parquet
   verify-backup DIR        校验备份
   restore DIR --confirm-database-replace
@@ -624,6 +625,7 @@ refresh_stable_entries() {
   [[ -d "$bootstrap" ]] || fail "目标版本缺少稳定启动入口"
   install -o root -g wheel -m 0755 "$bootstrap/installed-stock-data-sync" "$PROGRAM_DIR/bin/stock-data-sync"
   install -o root -g wheel -m 0755 "$bootstrap/run-service" "$PROGRAM_DIR/bin/run-service"
+  install -o root -g wheel -m 0755 "$bootstrap/stock-data-mcp" "$PROGRAM_DIR/bin/stock-data-mcp"
   install -o root -g wheel -m 0755 "$bootstrap/global-stock-data-sync" /usr/local/bin/stock-data-sync
   install -o root -g wheel -m 0755 "$bootstrap/system-run-service" "$SYSTEM_RUN_SERVICE"
 }
@@ -771,6 +773,7 @@ validate_config_candidate() {
     original_postgres_user="$POSTGRES_USER"
     original_postgres_password="$POSTGRES_PASSWORD"
     original_database_url="$DATABASE_URL"
+    original_mcp_database_url="${MCP_DATABASE_URL:-}"
     original_raw_data_dir="$RAW_DATA_DIR"
     original_web_dist_dir="$WEB_DIST_DIR"
     original_scheduler_jobstore_table="$SCHEDULER_JOBSTORE_TABLE"
@@ -788,6 +791,7 @@ validate_config_candidate() {
       original_key="original_$(printf "%s" "$key" | tr "[:upper:]" "[:lower:]")"
       [[ "${!key}" == "${!original_key}" ]] || { printf "%s 由安装器维护，不允许修改\\n" "$key" >&2; exit 1; }
     done
+    [[ "${MCP_DATABASE_URL:-}" == "$original_mcp_database_url" ]] || { printf "MCP_DATABASE_URL 由安装器维护，不允许修改\n" >&2; exit 1; }
     [[ "$PROGRAM_DIR" == "$actual_program_dir" ]] || { printf "PROGRAM_DIR 与真实主程序目录不一致\\n" >&2; exit 1; }
     [[ "$DATA_DIR" == "$actual_data_dir" && "$INSTALL_DIR" == "$actual_data_dir" ]] || { printf "数据目录配置不一致\\n" >&2; exit 1; }
     [[ "$HTTP_BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { printf "HTTP_BIND 必须是 IPv4 地址\\n" >&2; exit 1; }
@@ -839,6 +843,35 @@ run_config() {
   esac
 }
 
+run_mcp() {
+  local action="${1:-}" password
+  case "$action" in
+    setup)
+      start_postgres
+      if [[ -z "${MCP_DATABASE_URL:-}" ]]; then
+        password="$(openssl rand -hex 24)"
+        {
+          printf '\n# 本机MCP只读数据库配置。[stock-data-sync mcp setup 维护]\n'
+          deploy_write_env_value MCP_DATABASE_URL "postgresql+psycopg://stock_mcp_reader:$password@127.0.0.1:$POSTGRES_PORT/$POSTGRES_DB"
+          deploy_write_env_value MCP_QUERY_TIMEOUT_SECONDS 30
+        } >> "$ENV_FILE"
+        chown root:wheel "$ENV_FILE"
+        chmod 0600 "$ENV_FILE"
+        chmod +a "$SERVICE_USER allow read" "$ENV_FILE"
+        load_environment
+      fi
+      /usr/bin/sudo -u "$SERVICE_USER" -H /bin/bash "$SYSTEM_RUN_SERVICE" \
+        "$PROGRAM_DIR" "$DATA_DIR" mcp-provision
+      printf 'MCP启动命令：%s/bin/stock-data-mcp\n' "$PROGRAM_DIR"
+      ;;
+    command)
+      [[ -n "${MCP_DATABASE_URL:-}" ]] || fail "请先执行 sudo stock-data-sync mcp setup"
+      printf '%s/bin/stock-data-mcp\n' "$PROGRAM_DIR"
+      ;;
+    *) fail "用法：stock-data-sync mcp setup|command" ;;
+  esac
+}
+
 [[ -n "$command_name" ]] || { usage; exit 1; }
 shift
 if [[ "$command_name" == "version" ]]; then
@@ -884,6 +917,7 @@ case "$command_name" in
   rollback) run_rollback "$@" ;;
   doctor) run_doctor "$@" ;;
   config) run_config "$@" ;;
+  mcp) run_mcp "$@" ;;
   logs) show_logs "${1:-server}" ;;
   migrate)
     start_postgres

@@ -1,4 +1,4 @@
-.PHONY: server-install server-dev scheduler-dev server-check web-install web-dev web-check check performance live-validation live-etf-validation live-full-validation live-ths-theme-validation live-backfill-concurrency-validation live-provider-compatibility-validation release
+.PHONY: server-install server-dev scheduler-dev mcp-dev server-check web-install web-dev web-check check performance live-validation live-etf-validation live-full-validation live-ths-theme-validation live-backfill-concurrency-validation live-provider-compatibility-validation release
 
 server-install:
 	cd src/server && uv sync --all-groups
@@ -8,6 +8,9 @@ server-dev:
 
 scheduler-dev:
 	cd src/server && uv run python -m app.scheduler.runner
+
+mcp-dev:
+	cd src/server && uv run python -m app.mcp.server
 
 server-check:
 	cd src/server && uv run ruff check . && uv run mypy app && uv run pytest

@@ -64,6 +64,19 @@ case "$service_name" in
     cd "$RELEASE_DIR/server"
     exec .venv/bin/python -m alembic upgrade head
     ;;
+  mcp)
+    [[ -n "${MCP_DATABASE_URL:-}" ]] || {
+      printf '缺少MCP_DATABASE_URL；请先执行 sudo stock-data-sync mcp setup\n' >&2
+      exit 1
+    }
+    unset DATABASE_URL POSTGRES_PASSWORD PGPASSWORD
+    cd "$RELEASE_DIR/server"
+    exec .venv/bin/python -m app.mcp.server
+    ;;
+  mcp-provision)
+    cd "$RELEASE_DIR/server"
+    exec .venv/bin/python -m app.mcp.provision
+    ;;
   backup)
     [[ -n "${2:-}" ]] || { printf '缺少备份目标目录\n' >&2; exit 1; }
     cd "$RELEASE_DIR/server"

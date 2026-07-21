@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     app_log_backup_count: int = Field(default=10, ge=1, le=100)
 
     database_url: str = "postgresql+psycopg://stock_sync:stock_sync@localhost:5432/stock_data_sync"
+    mcp_database_url: str | None = None
+    mcp_query_timeout_seconds: int = Field(default=30, ge=1, le=300)
     raw_data_dir: Path = ROOT_DIR / "data" / "raw"
     raw_storage_warning_used_percent: float = Field(default=85, ge=1, le=99)
     raw_storage_protect_used_percent: float = Field(default=92, ge=1, le=99)
