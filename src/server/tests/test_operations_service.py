@@ -42,8 +42,40 @@ async def test_provider_monitoring_lists_unrequested_configured_endpoints() -> N
     assert set(endpoints) == {spec.api_name for spec in build_tushare_api_registry().all()}
     assert endpoints["fund_daily"].request_count_today == 2
     assert endpoints["fund_daily"].success_rate_today == 1.0
+    assert endpoints["fund_daily"].endpoint_display_name == "ETF 日线行情"
+    assert endpoints["fund_daily"].endpoint_description
     assert endpoints["daily"].request_count_today == 0
     assert endpoints["daily"].success_rate_today is None
+
+
+@pytest.mark.asyncio
+async def test_releases_include_dataset_presentation() -> None:
+    class ReleaseRepositoryStub:
+        async def releases(self, **_: Any) -> tuple[list[dict[str, Any]], int]:
+            return (
+                [
+                    {
+                        "dataset_name": "stock_daily.core",
+                        "scope_type": "DATE",
+                        "scope_key": "2026-07-21",
+                        "business_date": date(2026, 7, 21),
+                        "version_id": "version-id",
+                        "process_id": "process-id",
+                        "process_type": "stock_daily.core@1",
+                        "row_count": 100,
+                        "published_at": datetime.now(UTC),
+                    }
+                ],
+                1,
+            )
+
+    service = OperationsService(ReleaseRepositoryStub())  # type: ignore[arg-type]
+
+    releases = await service.releases(dataset_name=None, page=1, page_size=20)
+
+    assert releases.items[0].dataset_display_name == "股票核心日线"
+    assert releases.items[0].dataset_name == "stock_daily.core"
+    assert releases.items[0].dataset_description
 
 
 def test_closed_batch_is_presented_as_a_result_status() -> None:
@@ -69,7 +101,9 @@ def test_processing_data_quality_warning_is_presented_as_warning() -> None:
     )
 
     assert alert.level == "warning"
-    assert alert.title == "stock_top_list_daily 数据质量提醒"
+    assert alert.task_display_name == "龙虎榜股票明细"
+    assert alert.task_name == "stock_top_list_daily"
+    assert alert.title == "数据质量提醒"
     assert alert.detail == "已保留字段更完整的重复记录"
 
 
@@ -90,7 +124,9 @@ def test_collection_data_gap_is_presented_as_warning() -> None:
     )
 
     assert alert.level == "warning"
-    assert alert.title == "ths_hot 数据缺口提醒"
+    assert alert.task_display_name == "同花顺股票热榜"
+    assert alert.task_name == "ths_hot"
+    assert alert.title == "数据缺口提醒"
     assert alert.detail == "历史接口未返回数据，已记录数据缺口并停止重试"
 
 

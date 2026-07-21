@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getRunRecords, runTaskCommand } from '@/modules/operations/api'
@@ -120,11 +121,11 @@ async function submitCommand(value: { reason: string; idempotencyKey: string }) 
           </el-table-column>
           <el-table-column label="任务" min-width="270">
             <template #default="{ row }">
-              <div class="run-task-name">
-                <strong>{{ row.taskDisplayName }}</strong>
-                <span>{{ row.taskDescription }}</span>
-                <code>{{ row.taskName }}</code>
-              </div>
+              <ResourceLabel
+                :display-name="row.taskDisplayName"
+                :identifier="row.taskName"
+                :description="row.taskDescription"
+              />
             </template>
           </el-table-column>
           <el-table-column prop="scopeKey" label="任务范围" min-width="220" show-overflow-tooltip />
@@ -196,17 +197,3 @@ async function submitCommand(value: { reason: string; idempotencyKey: string }) 
     />
   </section>
 </template>
-
-<style scoped>
-.run-task-name {
-  display: grid;
-  gap: 3px;
-}
-
-.run-task-name span,
-.run-task-name code {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  line-height: 1.4;
-}
-</style>

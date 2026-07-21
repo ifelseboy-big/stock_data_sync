@@ -53,7 +53,7 @@ watch(isMobile, (mobile) => appStore.setSidebarCollapsed(mobile), { immediate: t
             <el-menu-item index="/">运行概览</el-menu-item>
             <el-menu-item index="/acquisition">
               <el-icon><Collection /></el-icon>
-              <template #title>采集运行</template>
+              <template #title>采集批次</template>
             </el-menu-item>
             <el-menu-item index="/processing">
               <el-icon><SetUp /></el-icon>
@@ -79,7 +79,7 @@ watch(isMobile, (mobile) => appStore.setSidebarCollapsed(mobile), { immediate: t
             </el-menu-item>
             <el-menu-item index="/providers">
               <el-icon><Connection /></el-icon>
-              <template #title>接口监控</template>
+              <template #title>接口用量与质量</template>
             </el-menu-item>
             <el-menu-item index="/runs">
               <el-icon><Document /></el-icon>

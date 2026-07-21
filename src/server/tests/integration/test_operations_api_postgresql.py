@@ -285,9 +285,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     rows_read=2,
                     rows_rejected=1,
                     rows_written=1,
-                    warning_message=(
-                        "daily 已将 1 个证券历史代码映射为现行代码，并去除重复记录"
-                    ),
+                    warning_message=("daily 已将 1 个证券历史代码映射为现行代码，并去除重复记录"),
                 ),
                 ProcessingTask(
                     process_id=ignored_merge_warning_process_id,
@@ -305,9 +303,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
                     rows_read=2,
                     rows_rejected=1,
                     rows_written=1,
-                    warning_message=(
-                        "top_inst 重复记录仅有名称或数值精度差异，已确定性合并"
-                    ),
+                    warning_message=("top_inst 重复记录仅有名称或数值精度差异，已确定性合并"),
                 ),
                 ProcessingTask(
                     process_id=recovered_failure_id,
@@ -446,17 +442,20 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert overview.json()["metrics"]["providerSuccessRateToday"] == 1.0
     assert any(item["id"] == str(batch_id) for item in batches.json()["items"])
     assert any(item["id"] == str(blocked_process_id) for item in queue.json()["items"])
-    assert all(
-        item["id"] != str(recovered_blocked_process_id)
-        for item in queue.json()["items"]
-    )
+    assert all(item["id"] != str(recovered_blocked_process_id) for item in queue.json()["items"])
     readiness = dependencies.json()["items"]
     blocked_readiness = next(item for item in readiness if item["id"] == str(blocked_process_id))
     assert blocked_readiness["readinessStatus"] == "blocked"
     assert blocked_readiness["blockedDependencyCount"] == 1
     assert blocked_readiness["sources"][0]["sourceName"] == "missing_api"
-    assert any(item["datasetName"] == "test_daily" for item in releases.json()["items"])
-    assert any(item["endpoint"] == "daily" for item in provider.json()["endpoints"])
+    test_release = next(
+        item for item in releases.json()["items"] if item["datasetName"] == "test_daily"
+    )
+    assert test_release["datasetDisplayName"] == "test_daily"
+    daily_endpoint = next(
+        item for item in provider.json()["endpoints"] if item["endpoint"] == "daily"
+    )
+    assert daily_endpoint["endpointDisplayName"] == "股票日线行情"
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
     assert all(item["id"] != str(recovered_failure_id) for item in unresolved_runs.json()["items"])
     assert resources.json()["database"]["sharedBuffersBytes"] > 0
@@ -465,14 +464,18 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         item for item in alerts.json()["items"] if item["id"] == f"processing:{warning_process_id}"
     )
     assert warning_alert["level"] == "warning"
-    assert warning_alert["title"] == "stock_top_list_daily 数据质量提醒"
+    assert warning_alert["taskDisplayName"] == "龙虎榜股票明细"
+    assert warning_alert["taskName"] == "stock_top_list_daily"
+    assert warning_alert["title"] == "数据质量提醒"
     assert warning_alert["detail"].startswith("同类告警共 2 条，已聚合显示")
     assert "已保留字段更完整的重复记录" in warning_alert["detail"]
     gap_alert = next(
         item for item in alerts.json()["items"] if item["id"] == f"acquisition:{collection_gap_id}"
     )
     assert gap_alert["level"] == "warning"
-    assert gap_alert["title"] == "ths_hot 数据缺口提醒"
+    assert gap_alert["taskDisplayName"] == "同花顺股票热榜"
+    assert gap_alert["taskName"] == "ths_hot"
+    assert gap_alert["title"] == "数据缺口提醒"
     assert gap_alert["detail"].startswith("同类告警共 2 条，已聚合显示")
     assert "历史接口未返回数据" in gap_alert["detail"]
     assert all(

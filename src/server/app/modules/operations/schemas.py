@@ -125,6 +125,8 @@ class DependencyItem(OperationsModel):
 
 class ProviderEndpointMetric(OperationsModel):
     endpoint: str
+    endpoint_display_name: str
+    endpoint_description: str
     request_count_today: int
     success_rate_today: float | None
     p50_duration_ms: float | None
@@ -144,6 +146,8 @@ class AlertItem(OperationsModel):
     id: str
     level: AlertLevel
     source: str
+    task_name: str
+    task_display_name: str
     title: str
     detail: str
     occurred_at: datetime
@@ -199,6 +203,8 @@ class ScheduledJobExecutionItem(OperationsModel):
 
 class DatasetReleaseItem(OperationsModel):
     dataset_name: str
+    dataset_display_name: str
+    dataset_description: str
     scope_type: str
     scope_key: str
     business_date: date | None

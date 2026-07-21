@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import {
   getDatasetReleaseCoverage,
@@ -16,6 +17,7 @@ import { formatDateTime } from '@/modules/operations/presentation'
 
 const datasetName = ref('')
 const page = ref(1)
+const coverageFilter = ref<DatasetReleaseCoverageItem['coverageStatus'] | 'all'>('all')
 const gapTarget = ref<{
   action: 'backfill' | 'repair'
   startDate: string
@@ -74,6 +76,11 @@ const coverageSummary = computed(() => {
 const missingRows = computed(() =>
   (coverage.value ?? []).filter((item) => item.coverageStatus === 'missing'),
 )
+const filteredCoverageRows = computed(() =>
+  coverageFilter.value === 'all'
+    ? (coverage.value ?? [])
+    : (coverage.value ?? []).filter((item) => item.coverageStatus === coverageFilter.value),
+)
 const gapDialogTitle = computed(() =>
   gapTarget.value?.action === 'repair' ? '修复当日缺失数据' : '回填范围内缺失数据',
 )
@@ -122,6 +129,10 @@ function applyCurrentYear() {
   const end = new Date()
   coverageRange.value = [localDate(new Date(end.getFullYear(), 0, 1)), localDate(end)]
   void loadCoverage()
+}
+
+function applyCoverageFilter(value: DatasetReleaseCoverageItem['coverageStatus'] | 'all') {
+  coverageFilter.value = value
 }
 
 function openRangeGapBackfill() {
@@ -241,30 +252,65 @@ function missingDatasetText(value: unknown) {
         </el-form-item>
       </el-form>
 
-      <div class="coverage-summary" aria-label="数据完整性汇总">
-        <div class="coverage-summary__item">
-          <span>交易日</span><strong>{{ coverageSummary.tradingDayCount }}</strong>
-        </div>
-        <div class="coverage-summary__item coverage-summary__item--success">
+      <div class="coverage-summary" aria-label="数据完整性筛选">
+        <button
+          type="button"
+          class="coverage-summary__item"
+          :class="{ 'is-active': coverageFilter === 'all' }"
+          :aria-pressed="coverageFilter === 'all'"
+          data-testid="coverage-filter-all"
+          @click="applyCoverageFilter('all')"
+        >
+          <span>全部交易日</span><strong>{{ coverageSummary.tradingDayCount }}</strong>
+          <small>点击查看全部</small>
+        </button>
+        <button
+          type="button"
+          class="coverage-summary__item coverage-summary__item--success"
+          :class="{ 'is-active': coverageFilter === 'complete' }"
+          :aria-pressed="coverageFilter === 'complete'"
+          :disabled="coverageSummary.completeCount === 0"
+          data-testid="coverage-filter-complete"
+          @click="applyCoverageFilter('complete')"
+        >
           <span>完整</span><strong>{{ coverageSummary.completeCount }}</strong>
-        </div>
-        <div class="coverage-summary__item coverage-summary__item--danger">
+          <small>点击只看完整日期</small>
+        </button>
+        <button
+          type="button"
+          class="coverage-summary__item coverage-summary__item--danger"
+          :class="{ 'is-active': coverageFilter === 'missing' }"
+          :aria-pressed="coverageFilter === 'missing'"
+          :disabled="coverageSummary.missingCount === 0"
+          data-testid="coverage-filter-missing"
+          @click="applyCoverageFilter('missing')"
+        >
           <span>存在缺失</span><strong>{{ coverageSummary.missingCount }}</strong>
-        </div>
-        <div class="coverage-summary__item coverage-summary__item--warning">
+          <small>点击只看缺失日期</small>
+        </button>
+        <button
+          type="button"
+          class="coverage-summary__item coverage-summary__item--warning"
+          :class="{ 'is-active': coverageFilter === 'pending' }"
+          :aria-pressed="coverageFilter === 'pending'"
+          :disabled="coverageSummary.pendingCount === 0"
+          data-testid="coverage-filter-pending"
+          @click="applyCoverageFilter('pending')"
+        >
           <span>今日进行中</span><strong>{{ coverageSummary.pendingCount }}</strong>
-        </div>
+          <small>点击查看今日进度</small>
+        </button>
       </div>
 
       <DataState
         :loading="coverageLoading"
         :error="coverageError"
-        :empty="coverage?.length === 0"
-        empty-title="所选范围内没有交易日"
-        empty-description="请调整日期范围后重新检查。"
+        :empty="filteredCoverageRows.length === 0"
+        :empty-title="coverage?.length ? '当前筛选下没有交易日' : '所选范围内没有交易日'"
+        empty-description="可以切换汇总筛选或调整日期范围。"
         @retry="loadCoverage"
       >
-        <el-table :data="coverage ?? []">
+        <el-table :data="filteredCoverageRows" data-testid="coverage-table">
           <el-table-column prop="businessDate" label="交易日" width="130" />
           <el-table-column label="完整度" width="130">
             <template #default="{ row }"
@@ -280,13 +326,18 @@ function missingDatasetText(value: unknown) {
           </el-table-column>
           <el-table-column label="缺失数据集" min-width="320">
             <template #default="{ row }">
-              <span
+              <div
                 v-if="row.missingDatasets.length"
                 class="missing-datasets"
                 :title="missingDatasetText(row)"
               >
-                {{ row.missingDatasetDisplayNames.join('、') }}
-              </span>
+                <ResourceLabel
+                  v-for="(identifier, index) in row.missingDatasets"
+                  :key="identifier"
+                  :display-name="row.missingDatasetDisplayNames[index] ?? identifier"
+                  :identifier="identifier"
+                />
+              </div>
               <span v-else>--</span>
             </template>
           </el-table-column>
@@ -332,7 +383,15 @@ function missingDatasetText(value: unknown) {
         @retry="load"
       >
         <el-table :data="data?.items ?? []" scrollbar-always-on>
-          <el-table-column prop="datasetName" label="数据集" min-width="190" fixed="left" />
+          <el-table-column label="数据集" min-width="230" fixed="left">
+            <template #default="{ row }">
+              <ResourceLabel
+                :display-name="row.datasetDisplayName"
+                :identifier="row.datasetName"
+                :title="row.datasetDescription"
+              />
+            </template>
+          </el-table-column>
           <el-table-column prop="scopeType" label="范围类型" width="110" />
           <el-table-column prop="scopeKey" label="发布范围" min-width="140" />
           <el-table-column prop="rowCount" label="发布行数" width="120" />
@@ -385,19 +444,56 @@ function missingDatasetText(value: unknown) {
 }
 
 .coverage-summary__item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: center;
-  justify-content: space-between;
   min-height: 64px;
   padding: 12px 16px;
   border: 1px solid var(--el-border-color-light);
   border-left: 4px solid var(--el-color-info);
   border-radius: var(--el-border-radius-base);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: var(--el-fill-color-blank);
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+}
+
+.coverage-summary__item:hover:not(:disabled) {
+  border-color: var(--el-color-primary-light-5);
+  transform: translateY(-1px);
+}
+
+.coverage-summary__item:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
+.coverage-summary__item.is-active {
+  border-color: var(--el-color-primary-light-3);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-8);
+}
+
+.coverage-summary__item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .coverage-summary__item strong {
+  grid-row: 1 / span 2;
+  grid-column: 2;
   font-size: 24px;
   font-variant-numeric: tabular-nums;
+}
+
+.coverage-summary__item small {
+  margin-top: 4px;
+  color: var(--app-text-secondary);
+  font-size: 11px;
 }
 
 .coverage-summary__item--success {
@@ -413,10 +509,8 @@ function missingDatasetText(value: unknown) {
 }
 
 .missing-datasets {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: grid;
+  gap: 8px;
 }
 
 @media (max-width: 900px) {

@@ -235,7 +235,30 @@ a {
 }
 
 .summary-card {
+  height: 100%;
   border-color: var(--app-border);
+}
+
+.summary-card-shell {
+  display: block;
+  min-width: 0;
+  height: 100%;
+  color: inherit;
+  text-decoration: none;
+}
+
+.summary-card-link .summary-card {
+  transition:
+    border-color 180ms ease-out,
+    box-shadow 180ms ease-out,
+    transform 180ms ease-out;
+}
+
+.summary-card-link:hover .summary-card,
+.summary-card-link:focus-visible .summary-card {
+  border-color: var(--app-primary);
+  box-shadow: 0 8px 20px rgb(30 64 175 / 10%);
+  transform: translateY(-1px);
 }
 
 .summary-card__topline,
@@ -287,6 +310,16 @@ a {
   margin: 6px 0 0;
   color: var(--app-text-secondary);
   font-size: 12px;
+}
+
+.summary-card__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--app-primary);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .dashboard-grid {
@@ -399,6 +432,13 @@ a {
   margin-top: 12px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.quota-panel__hint {
+  margin: 10px 0 0;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .filter-card .el-form-item {

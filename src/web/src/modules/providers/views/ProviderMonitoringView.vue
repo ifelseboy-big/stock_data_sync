@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getProviderMonitoring } from '@/modules/operations/api'
 import { formatDateTime, formatDuration, formatPercent } from '@/modules/operations/presentation'
@@ -20,8 +21,8 @@ const quotaPercent = computed(() => {
 <template>
   <section>
     <PageHeader
-      title="接口监控"
-      description="观察 Tushare 本地安全预算、主动平滑排队、成功率与响应耗时。"
+      title="接口用量与质量"
+      description="按单次 Tushare 请求查看调用量、成功率、耗时和本地安全上限；业务日期是否采集完成请查看“采集批次”。"
     >
       <template #actions><el-button :loading="loading" @click="load">刷新</el-button></template>
     </PageHeader>
@@ -30,7 +31,7 @@ const quotaPercent = computed(() => {
       <el-card shadow="never" class="quota-card">
         <div v-if="data?.quota" class="quota-card__layout">
           <div>
-            <span class="eyebrow">最近 60 秒请求窗口</span>
+            <span class="eyebrow">最近 60 秒请求量 / 本地安全上限</span>
             <div class="quota-card__number">
               <strong>{{ data.quota.usedInCurrentWindow }}</strong>
               <span>/ {{ data.quota.limitPerMinute }} 次</span>
@@ -43,6 +44,9 @@ const quotaPercent = computed(() => {
               <span>平滑排队请求 {{ data.quota.delayedRequestCount }}（主动保护）</span>
               <span>采集时间 {{ formatDateTime(data.quota.capturedAt) }}</span>
             </div>
+            <p class="quota-panel__hint">
+              低于上限不等于采集线程空闲；任务选取、结果校验和原始数据落盘期间不会产生接口请求。
+            </p>
           </div>
         </div>
         <el-empty v-else description="尚未上报本地请求预算" :image-size="72" />
@@ -53,12 +57,20 @@ const quotaPercent = computed(() => {
           <div class="panel-card__header">
             <div>
               <h3>接口明细</h3>
-              <p>耗时不包含限流器中的排队等待。</p>
+              <p>今日请求为累计值；耗时不包含限流器中的排队等待。</p>
             </div>
           </div>
         </template>
         <el-table :data="data?.endpoints ?? []" empty-text="暂无接口调用数据" scrollbar-always-on>
-          <el-table-column prop="endpoint" label="接口" min-width="170" fixed="left" />
+          <el-table-column label="接口" min-width="230" fixed="left">
+            <template #default="{ row }">
+              <ResourceLabel
+                :display-name="row.endpointDisplayName"
+                :identifier="row.endpoint"
+                :title="row.endpointDescription"
+              />
+            </template>
+          </el-table-column>
           <el-table-column prop="requestCountToday" label="今日请求" width="110" />
           <el-table-column label="请求成功率" width="120">
             <template #default="{ row }">{{ formatPercent(row.successRateToday) }}</template>

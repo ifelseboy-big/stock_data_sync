@@ -104,6 +104,8 @@ export interface DependencyItem {
 
 export interface ProviderEndpointMetric {
   endpoint: string
+  endpointDisplayName: string
+  endpointDescription: string
   requestCountToday: number
   successRateToday: number | null
   p50DurationMs: number | null
@@ -117,6 +119,8 @@ export interface AlertItem {
   id: string
   level: AlertLevel
   source: string
+  taskName: string
+  taskDisplayName: string
   title: string
   detail: string
   occurredAt: string
@@ -173,6 +177,8 @@ export interface ProviderMonitoring {
 
 export interface DatasetReleaseItem {
   datasetName: string
+  datasetDisplayName: string
+  datasetDescription: string
   scopeType: string
   scopeKey: string
   businessDate: string | null

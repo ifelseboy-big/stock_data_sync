@@ -44,6 +44,7 @@ declare module 'vue' {
     ElTag: typeof import('element-plus/es')['ElTag']
     MetricCard: typeof import('./components/MetricCard.vue')['default']
     PageHeader: typeof import('./components/PageHeader.vue')['default']
+    ResourceLabel: typeof import('./components/ResourceLabel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     StatusTag: typeof import('./components/StatusTag.vue')['default']

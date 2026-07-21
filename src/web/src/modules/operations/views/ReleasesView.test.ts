@@ -27,10 +27,24 @@ describe('ReleasesView coverage recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     apiMocks.getDatasetReleases.mockResolvedValue({
-      items: [],
+      items: [
+        {
+          datasetName: 'stock_daily.core',
+          datasetDisplayName: '股票核心日线',
+          datasetDescription: '股票每日行情、复权因子和估值指标。',
+          scopeType: 'DATE',
+          scopeKey: '2026-07-21',
+          businessDate: '2026-07-21',
+          versionId: 'version-id',
+          processId: 'process-id',
+          processorVersion: '1',
+          rowCount: 100,
+          publishedAt: '2026-07-21T10:00:00Z',
+        },
+      ],
       page: 1,
       pageSize: 20,
-      total: 0,
+      total: 1,
     })
     apiMocks.getDatasetReleaseCoverage.mockResolvedValue([
       {
@@ -40,6 +54,22 @@ describe('ReleasesView coverage recovery', () => {
         coverageStatus: 'missing',
         missingDatasets: ['stock_top_list_daily'],
         missingDatasetDisplayNames: ['龙虎榜明细'],
+      },
+      {
+        businessDate: '2026-07-17',
+        expectedCount: 18,
+        publishedCount: 18,
+        coverageStatus: 'complete',
+        missingDatasets: [],
+        missingDatasetDisplayNames: [],
+      },
+      {
+        businessDate: '2026-07-21',
+        expectedCount: 18,
+        publishedCount: 12,
+        coverageStatus: 'pending',
+        missingDatasets: ['stock_daily'],
+        missingDatasetDisplayNames: ['日线行情'],
       },
     ])
     apiMocks.recoverReleaseGaps.mockResolvedValue({
@@ -111,5 +141,36 @@ describe('ReleasesView coverage recovery', () => {
       },
       { idempotencyKey: 'gap-request-key' },
     )
+  })
+
+  it('filters the completeness table when a summary card is clicked', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const table = wrapper.get('[data-testid="coverage-table"]')
+    expect(table.text()).toContain('2026-07-18')
+    expect(table.text()).toContain('2026-07-17')
+    expect(table.text()).toContain('2026-07-21')
+
+    await wrapper.get('[data-testid="coverage-filter-complete"]').trigger('click')
+    expect(table.text()).not.toContain('2026-07-18')
+    expect(table.text()).toContain('2026-07-17')
+    expect(table.text()).not.toContain('2026-07-21')
+    expect(wrapper.get('[data-testid="coverage-filter-complete"]').attributes('aria-pressed')).toBe(
+      'true',
+    )
+
+    await wrapper.get('[data-testid="coverage-filter-all"]').trigger('click')
+    expect(table.text()).toContain('2026-07-18')
+    expect(table.text()).toContain('2026-07-17')
+    expect(table.text()).toContain('2026-07-21')
+  })
+
+  it('shows the dataset meaning before its technical name', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('股票核心日线')
+    expect(wrapper.findAll('code').some((item) => item.text() === 'stock_daily.core')).toBe(true)
   })
 })

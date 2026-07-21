@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import {
@@ -129,7 +130,12 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
       <div class="execution-slot__label">当前运行任务 {{ currentTasks.length }} 个</div>
       <div v-for="task in currentTasks" :key="task.id" class="execution-slot__content">
         <div>
-          <strong>{{ task.taskName }}</strong>
+          <ResourceLabel
+            class="resource-label--prominent"
+            :display-name="task.taskDisplayName"
+            :identifier="task.taskName"
+            :description="task.taskDescription"
+          />
           <p>{{ task.batchCode }} · {{ task.dataCycle }}</p>
         </div>
         <div class="execution-slot__meta">
@@ -177,11 +183,11 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
         <el-table :data="failedData?.items ?? []" scrollbar-always-on>
           <el-table-column label="加工任务" min-width="280" fixed="left">
             <template #default="{ row }">
-              <div class="processing-task-name">
-                <strong>{{ row.taskDisplayName }}</strong>
-                <span>{{ row.taskDescription }}</span>
-                <code>{{ row.taskName }}</code>
-              </div>
+              <ResourceLabel
+                :display-name="row.taskDisplayName"
+                :identifier="row.taskName"
+                :description="row.taskDescription"
+              />
             </template>
           </el-table-column>
           <el-table-column prop="dataCycle" label="数据周期" width="120" />
@@ -260,11 +266,11 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
           <el-table-column prop="queuePosition" label="#" width="60" />
           <el-table-column label="加工任务" min-width="280">
             <template #default="{ row }">
-              <div class="processing-task-name">
-                <strong>{{ row.taskDisplayName }}</strong>
-                <span>{{ row.taskDescription }}</span>
-                <code>{{ row.taskName }}</code>
-              </div>
+              <ResourceLabel
+                :display-name="row.taskDisplayName"
+                :identifier="row.taskName"
+                :description="row.taskDescription"
+              />
             </template>
           </el-table-column>
           <el-table-column prop="batchCode" label="批次" min-width="170" />
@@ -342,17 +348,5 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.processing-task-name {
-  display: grid;
-  gap: 3px;
-}
-
-.processing-task-name span,
-.processing-task-name code {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  line-height: 1.4;
 }
 </style>

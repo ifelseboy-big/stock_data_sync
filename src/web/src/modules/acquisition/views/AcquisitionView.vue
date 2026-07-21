@@ -5,6 +5,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import {
@@ -299,7 +300,10 @@ async function submitGlobalRetryAll(value: { reason: string; idempotencyKey: str
 
 <template>
   <section>
-    <PageHeader title="采集运行" description="按批次观察原始数据采集、失败重试和最终结果。">
+    <PageHeader
+      title="采集批次"
+      description="按业务日期查看原始数据采集批次、任务进度和失败恢复；请求次数、耗时与限流情况请查看“接口用量与质量”。"
+    >
       <template #actions>
         <el-button
           type="warning"
@@ -450,11 +454,11 @@ async function submitGlobalRetryAll(value: { reason: string; idempotencyKey: str
         <el-table :data="taskData?.items ?? []" scrollbar-always-on max-height="520">
           <el-table-column label="采集数据" min-width="270" fixed="left">
             <template #default="{ row }">
-              <div class="batch-task-name">
-                <strong>{{ row.taskDisplayName }}</strong>
-                <span>{{ row.taskDescription }}</span>
-                <code>{{ row.taskName }}</code>
-              </div>
+              <ResourceLabel
+                :display-name="row.taskDisplayName"
+                :identifier="row.taskName"
+                :description="row.taskDescription"
+              />
             </template>
           </el-table-column>
           <el-table-column prop="scopeKey" label="采集范围" min-width="220" show-overflow-tooltip />
@@ -597,8 +601,7 @@ async function submitGlobalRetryAll(value: { reason: string; idempotencyKey: str
               class="api-option"
             >
               <div class="api-option__title">
-                <span>{{ item.displayName }}</span>
-                <code>{{ item.apiName }}</code>
+                <ResourceLabel :display-name="item.displayName" :identifier="item.apiName" />
                 <el-tag size="small" type="info">
                   {{ scheduleGroupMap[item.scheduleGroup] ?? item.scheduleGroup }}
                 </el-tag>
@@ -676,18 +679,6 @@ async function submitGlobalRetryAll(value: { reason: string; idempotencyKey: str
   margin-top: 16px;
 }
 
-.batch-task-name {
-  display: grid;
-  gap: 3px;
-}
-
-.batch-task-name span,
-.batch-task-name code {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 .command-date-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -713,16 +704,12 @@ async function submitGlobalRetryAll(value: { reason: string; idempotencyKey: str
 
 .api-option__title {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 8px;
   padding-right: 24px;
   color: var(--el-text-color-primary);
   font-weight: 600;
-}
-
-.api-option__title code {
-  color: var(--el-text-color-secondary);
-  font-weight: 400;
 }
 
 .api-option__description,

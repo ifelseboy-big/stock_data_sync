@@ -3,6 +3,7 @@ import { ref } from 'vue'
 
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getAlerts } from '@/modules/operations/api'
 import type { AlertLevel } from '@/modules/operations/contracts'
@@ -71,7 +72,12 @@ const sourceMap = {
               sourceMap[row.source as keyof typeof sourceMap] ?? row.source
             }}</template>
           </el-table-column>
-          <el-table-column prop="title" label="告警" min-width="190" />
+          <el-table-column label="对象" min-width="230">
+            <template #default="{ row }">
+              <ResourceLabel :display-name="row.taskDisplayName" :identifier="row.taskName" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="title" label="告警" min-width="140" />
           <el-table-column prop="detail" label="详情" min-width="280" show-overflow-tooltip />
           <el-table-column label="发生时间" min-width="170">
             <template #default="{ row }">{{ formatDateTime(row.occurredAt) }}</template>

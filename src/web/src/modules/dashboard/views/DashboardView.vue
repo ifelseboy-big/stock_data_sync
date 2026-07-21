@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import DataState from '@/components/DataState.vue'
 import MetricCard from '@/components/MetricCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getOperationsOverview } from '@/modules/operations/api'
@@ -51,6 +52,8 @@ const quotaPercent = computed(() => {
           note="必要依赖尚未就绪"
           :icon="Warning"
           tone="danger"
+          :to="{ path: '/dependencies', query: { readiness: 'blocked' } }"
+          action-label="查看阻塞原因"
         />
         <MetricCard
           label="今日任务成功率"
@@ -86,7 +89,12 @@ const quotaPercent = computed(() => {
             :key="task.id"
             class="current-task"
           >
-            <strong>{{ task.taskName }}</strong>
+            <ResourceLabel
+              class="resource-label--prominent"
+              :display-name="task.taskDisplayName"
+              :identifier="task.taskName"
+              :description="task.taskDescription"
+            />
             <dl class="definition-grid">
               <div>
                 <dt>批次</dt>
@@ -118,7 +126,7 @@ const quotaPercent = computed(() => {
             <div class="panel-card__header">
               <div>
                 <h3>Tushare 本地安全预算</h3>
-                <p>最近 60 秒实际请求数；平滑排队是主动保护，不是供应方限流。</p>
+                <p>最近 60 秒实际请求数；低于上限不代表采集线程空闲。</p>
               </div>
             </div>
           </template>
@@ -132,6 +140,7 @@ const quotaPercent = computed(() => {
               <span>预算余量 {{ data.quota.remainingInCurrentWindow }}</span>
               <span>平滑排队请求 {{ data.quota.delayedRequestCount }}</span>
             </div>
+            <p class="quota-panel__hint">任务选取、结果校验和原始数据落盘期间不会产生接口请求。</p>
           </div>
           <el-empty v-else description="尚未上报本地请求预算" :image-size="72" />
         </el-card>

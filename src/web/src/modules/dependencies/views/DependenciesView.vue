@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import DataState from '@/components/DataState.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ResourceLabel from '@/components/ResourceLabel.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getDependencies } from '@/modules/operations/api'
@@ -142,10 +143,10 @@ function sourceCountText(value: unknown) {
                 <el-table :data="row.sources" size="small">
                   <el-table-column label="前置数据" min-width="230">
                     <template #default="{ row: source }">
-                      <div class="source-name">
-                        <strong>{{ source.sourceDisplayName }}</strong>
-                        <code>{{ source.sourceName }}</code>
-                      </div>
+                      <ResourceLabel
+                        :display-name="source.sourceDisplayName"
+                        :identifier="source.sourceName"
+                      />
                     </template>
                   </el-table-column>
                   <el-table-column label="来源类型" width="120">
@@ -175,11 +176,11 @@ function sourceCountText(value: unknown) {
           </el-table-column>
           <el-table-column label="加工任务" min-width="280" fixed="left">
             <template #default="{ row }">
-              <div class="task-name">
-                <strong>{{ row.processingTaskDisplayName }}</strong>
-                <span>{{ row.processingTaskDescription }}</span>
-                <code>{{ row.processingTaskName }}</code>
-              </div>
+              <ResourceLabel
+                :display-name="row.processingTaskDisplayName"
+                :identifier="row.processingTaskName"
+                :description="row.processingTaskDescription"
+              />
             </template>
           </el-table-column>
           <el-table-column prop="dataCycle" label="数据周期" width="120" />
@@ -267,23 +268,10 @@ function sourceCountText(value: unknown) {
   border-left-color: var(--el-color-success);
 }
 
-.task-name,
-.source-name {
-  display: grid;
-  gap: 3px;
-}
-
-.task-name span,
 .source-detail__header span {
   color: var(--el-text-color-secondary);
   font-size: 12px;
   line-height: 1.45;
-}
-
-.task-name code,
-.source-name code {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
 }
 
 .dependency-hint {

@@ -17,7 +17,7 @@ const router = createRouter({
           path: 'acquisition',
           name: 'acquisition',
           component: () => import('@/modules/acquisition/views/AcquisitionView.vue'),
-          meta: { title: '采集运行' },
+          meta: { title: '采集批次' },
         },
         {
           path: 'processing',
@@ -47,7 +47,7 @@ const router = createRouter({
           path: 'providers',
           name: 'providers',
           component: () => import('@/modules/providers/views/ProviderMonitoringView.vue'),
-          meta: { title: '接口监控' },
+          meta: { title: '接口用量与质量' },
         },
         {
           path: 'runs',

@@ -83,9 +83,7 @@ class OperationsService:
                 provider_p95_duration_ms=_optional_float(counts["provider_p95"]),
             ),
             quota=quota,
-            current_processing_tasks=[
-                item for item in queue.items if item.status == "running"
-            ],
+            current_processing_tasks=[item for item in queue.items if item.status == "running"],
             recent_batches=[self._batch_item(row, now) for row in batch_rows],
             recent_alerts=alerts.items,
         )
@@ -274,10 +272,19 @@ class OperationsService:
             offset=(page - 1) * page_size,
             limit=page_size,
         )
-        return PageResult[DatasetReleaseItem](
-            items=[
+        items: list[DatasetReleaseItem] = []
+        for row in rows:
+            item_dataset_name = cast(str, row["dataset_name"])
+            presentation = DATASET_PRESENTATION_BY_NAME.get(item_dataset_name)
+            items.append(
                 DatasetReleaseItem(
-                    dataset_name=cast(str, row["dataset_name"]),
+                    dataset_name=item_dataset_name,
+                    dataset_display_name=(
+                        presentation.display_name if presentation else item_dataset_name
+                    ),
+                    dataset_description=(
+                        presentation.description if presentation else "已发布的数据集。"
+                    ),
                     scope_type=cast(str, row["scope_type"]),
                     scope_key=cast(str, row["scope_key"]),
                     business_date=cast(date | None, row["business_date"]),
@@ -287,8 +294,9 @@ class OperationsService:
                     row_count=cast(int, row["row_count"]),
                     published_at=cast(datetime, row["published_at"]),
                 )
-                for row in rows
-            ],
+            )
+        return PageResult[DatasetReleaseItem](
+            items=items,
             total=total,
             page=page,
             page_size=page_size,
@@ -355,6 +363,12 @@ class OperationsService:
             endpoints=[
                 ProviderEndpointMetric(
                     endpoint=spec.api_name,
+                    endpoint_display_name=TUSHARE_API_PRESENTATION_BY_NAME[
+                        spec.api_name
+                    ].display_name,
+                    endpoint_description=TUSHARE_API_PRESENTATION_BY_NAME[
+                        spec.api_name
+                    ].description,
                     request_count_today=cast(int, row.get("request_count", 0)),
                     success_rate_today=_ratio(
                         cast(int, row.get("success_count", 0)),
@@ -486,7 +500,9 @@ class OperationsService:
                     id=f"storage:{capacity.level.value}",
                     level="critical" if capacity.level == CapacityLevel.PROTECT else "warning",
                     source="storage",
-                    title="原始数据目录达到容量保护阈值",
+                    task_name="raw_data_dir",
+                    task_display_name="原始数据目录",
+                    title="达到容量保护阈值",
                     detail=(f"已用 {capacity.used_percent:.1f}%，剩余 {capacity.free_bytes} 字节"),
                     occurred_at=generated_at,
                 ),
@@ -588,6 +604,13 @@ class OperationsService:
     def _alert_item(row: dict[str, Any], now: datetime) -> AlertItem:
         source = cast(str, row["source"])
         task_name = cast(str, row["task_name"])
+        presentation = (
+            TUSHARE_API_PRESENTATION_BY_NAME.get(task_name)
+            if source == "acquisition"
+            else DATASET_PRESENTATION_BY_NAME.get(task_name)
+            if source == "processing"
+            else None
+        )
         error_code = cast(str | None, row["error_code"])
         critical_codes = {"TOKEN_INVALID", "PERMISSION_DENIED", "SCHEMA_CHANGED"}
         is_data_quality_warning = error_code in {
@@ -603,12 +626,14 @@ class OperationsService:
             id=f"{source}:{row['id']}",
             level=cast(Any, level),
             source=source,
+            task_name=task_name,
+            task_display_name=presentation.display_name if presentation else task_name,
             title=(
-                f"{task_name} 数据缺口提醒"
+                "数据缺口提醒"
                 if error_code == "DATA_GAP_WARNING"
-                else f"{task_name} 数据质量提醒"
+                else "数据质量提醒"
                 if is_data_quality_warning
-                else f"{task_name} 执行异常"
+                else "执行异常"
             ),
             detail=_localized_error(cast(str | None, row["error_message"]))
             or error_code
