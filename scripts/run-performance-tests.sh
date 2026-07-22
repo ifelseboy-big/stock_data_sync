@@ -104,9 +104,15 @@ printf '执行失败恢复与告警查询回归...\n'
     UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache \
     uv run alembic upgrade head
   DATABASE_URL="$INTEGRATION_DATABASE_URL" \
+    ADMIN_API_TOKEN=integration-admin-token \
     RUN_POSTGRES_INTEGRATION=1 \
     UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache \
-    uv run pytest tests/integration/test_operations_api_postgresql.py -q
+    uv run pytest \
+      tests/integration/test_operations_api_postgresql.py \
+      tests/integration/test_operations_commands_postgresql.py::test_bulk_retry_queues_unresolved_collection_and_processing_tasks \
+      tests/integration/test_processing_repository_postgresql.py::test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task \
+      tests/integration/test_processing_repository_postgresql.py::test_stock_daily_invalidation_locks_task_before_dependency \
+      -q
 )
 
 printf '执行 %s 规模性能测试...\n' "$PERF_PROFILE"

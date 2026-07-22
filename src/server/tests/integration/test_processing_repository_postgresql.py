@@ -974,7 +974,7 @@ def test_stock_daily_invalidation_locks_task_before_dependency() -> None:
                 ProcessingTask(
                     process_id=old_core_process_id,
                     source_batch_id=old_core_batch_id,
-                    process_type="stock_daily_core@2",
+                    process_type="stock_daily_core@3",
                     business_date=business_date,
                     output_dataset="stock_daily.core",
                     output_version=uuid4(),
@@ -984,7 +984,7 @@ def test_stock_daily_invalidation_locks_task_before_dependency() -> None:
                 ProcessingTask(
                     process_id=new_core_process_id,
                     source_batch_id=new_core_batch_id,
-                    process_type="stock_daily_core@3",
+                    process_type="stock_daily_core@4",
                     business_date=business_date,
                     output_dataset="stock_daily.core",
                     output_version=uuid4(),

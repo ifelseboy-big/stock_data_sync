@@ -267,7 +267,7 @@ def test_stock_daily_core_isolates_systematic_bse_previous_close_lag(
     assert "BSE segment matches previous-close snapshot" in prepared.warning_messages[0]
 
 
-def test_stock_daily_core_still_blocks_large_unexplained_bse_close_gap(
+def test_stock_daily_core_isolates_bse_daily_basic_close_mismatches(
     tmp_path: Path,
 ) -> None:
     store = LocalRawAssetStore(tmp_path)
@@ -296,8 +296,63 @@ def test_stock_daily_core_still_blocks_large_unexplained_bse_close_gap(
         ),
     )
 
-    with pytest.raises(ProcessingError, match="quality threshold exceeded"):
-        StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert len(rows) == len(codes)
+    assert prepared.rows_rejected == 2
+    assert "daily_basic 已隔离 2 条" in prepared.warning_messages[0]
+    assert "daily/daily_basic close mismatch" in prepared.warning_messages[0]
+
+
+def test_stock_daily_core_allows_historical_bse_daily_basic_coverage_gap(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    bse_codes = tuple(f"920{index:03d}.BJ" for index in range(136))
+    other_codes = tuple(f"{index:06d}.SZ" for index in range(4_526))
+    codes = (*bse_codes, *other_codes)
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [_daily_source(code) for code in codes]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [
+                {"ts_code": code, "trade_date": "20260717", "close": 10.5}
+                for code in other_codes
+            ]
+            + [
+                {
+                    "ts_code": bse_codes[-1],
+                    "trade_date": "20260717",
+                    "close": 10.5,
+                    "turnover_rate": 1.5,
+                }
+            ],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [
+                {"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25}
+                for code in codes
+            ],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert len(rows) == 4_662
+    assert prepared.rows_rejected == 135
+    bse_rows = [row for row in rows if cast(str, row["ts_code"]).endswith(".BJ")]
+    assert sum(row["turnover_rate"] is None for row in bse_rows) == 135
+    assert sum(row["turnover_rate"] == Decimal("1.5") for row in bse_rows) == 1
+    assert "daily_basic 已隔离 135 条" in prepared.warning_messages[0]
+    assert "daily_basic row is missing" in prepared.warning_messages[0]
 
 
 def test_stock_daily_core_isolates_single_missing_previous_close(

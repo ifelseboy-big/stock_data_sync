@@ -338,6 +338,12 @@ sudo stock-data-sync upgrade \
 20260722_0013 (head)
 ```
 
+v0.1.35 将 `stock_daily.core` 加工规则升级为 `stock_daily_core@4`：北交所历史 `daily_basic` 覆盖缺失或价格错位时隔离可空估值字段，继续发布已经通过自身校验的 `daily + adj_factor` 行情；沪深和必需依赖的质量门禁不变。该版本不新增数据库迁移，目标 revision 仍为 `20260722_0013`。升级后对旧 `stock_daily_core@3` 失败项执行批量重试会创建新的 `@4` 任务，旧任务保留用于审计：
+
+```bash
+sudo stock-data-sync upgrade --version 0.1.35
+```
+
 详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。
 
 ## 12. 手工备份与恢复

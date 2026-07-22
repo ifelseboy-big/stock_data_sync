@@ -393,6 +393,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     latest_daily_task_id = uuid4()
     daily_basic_task_id = uuid4()
     ready_process_id = uuid4()
+    legacy_core_process_id = uuid4()
     duplicate_process_id = uuid4()
     blocked_process_id = uuid4()
     unknown_stock_process_id = uuid4()
@@ -482,6 +483,20 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
                     error_message="test failure",
                 ),
                 ProcessingTask(
+                    process_id=legacy_core_process_id,
+                    source_batch_id=source_batch_id,
+                    process_type="stock_daily_core@3",
+                    business_date=business_date,
+                    output_dataset="stock_daily.core",
+                    output_version=uuid4(),
+                    status=ProcessingTaskStatus.FAILED.value,
+                    priority=100,
+                    attempt_count=1,
+                    max_attempts=3,
+                    finished_at=now - timedelta(minutes=30),
+                    error_message="daily_basic enrichment quality threshold exceeded",
+                ),
+                ProcessingTask(
                     process_id=duplicate_process_id,
                     source_batch_id=source_batch_id,
                     process_type="bulk_ready@1",
@@ -561,6 +576,17 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
                     dependency_scope={"trade_date": "20260718"},
                     status=DependencyStatus.READY.value,
                 ),
+                *(
+                    ProcessingDependency(
+                        process_id=legacy_core_process_id,
+                        dependency_type=DependencyType.RAW_ASSET.value,
+                        dependency_name=dependency_name,
+                        dependency_scope_key="trade_date=20260718",
+                        dependency_scope={"trade_date": "20260718"},
+                        status=DependencyStatus.READY.value,
+                    )
+                    for dependency_name in ("daily", "daily_basic", "adj_factor")
+                ),
                 ProcessingDependency(
                     process_id=duplicate_process_id,
                     dependency_type=DependencyType.RAW_ASSET.value,
@@ -631,7 +657,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert len(collection_retry.json()["result"]["batchIds"]) == 1
     assert processing_retry.status_code == 202, processing_retry.text
     assert processing_retry.json()["result"] == {
-        "retryCount": 1,
+        "retryCount": 2,
         "skippedDependencyCount": 1,
         "skippedRootCauseCount": 1,
         "skippedUnchangedCount": 0,
@@ -672,6 +698,25 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
         duplicate_process = session.get(ProcessingTask, duplicate_process_id)
         blocked_process = session.get(ProcessingTask, blocked_process_id)
         unknown_stock_process = session.get(ProcessingTask, unknown_stock_process_id)
+        legacy_core_process = session.get(ProcessingTask, legacy_core_process_id)
+        current_core_process = session.scalar(
+            select(ProcessingTask).where(
+                ProcessingTask.source_batch_id == source_batch_id,
+                ProcessingTask.output_dataset == "stock_daily.core",
+                ProcessingTask.process_type == "stock_daily_core@4",
+            )
+        )
+        current_core_dependencies = (
+            ()
+            if current_core_process is None
+            else tuple(
+                session.scalars(
+                    select(ProcessingDependency).where(
+                        ProcessingDependency.process_id == current_core_process.process_id
+                    )
+                )
+            )
+        )
 
     assert repair_batch is not None
     assert repair_batch.expected_task_count == 2
@@ -686,6 +731,16 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert unknown_stock_process is not None
     assert unknown_stock_process.status == ProcessingTaskStatus.FAILED.value
     assert unknown_stock_process.attempt_count == 3
+    assert legacy_core_process is not None
+    assert legacy_core_process.status == ProcessingTaskStatus.FAILED.value
+    assert current_core_process is not None
+    assert current_core_process.process_id != legacy_core_process_id
+    assert current_core_process.status == ProcessingTaskStatus.QUEUED.value
+    assert {dependency.dependency_name for dependency in current_core_dependencies} == {
+        "daily",
+        "daily_basic",
+        "adj_factor",
+    }
 
 
 @pytest.mark.asyncio

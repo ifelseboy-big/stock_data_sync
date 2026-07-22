@@ -199,9 +199,13 @@ class StockDailyCoreProcessor:
         daily_basic_issues: list[tuple[tuple[str, date], str]] = []
         threshold_daily_basic_issues: list[tuple[tuple[str, date], str]] = []
         daily_price_issues: list[tuple[tuple[str, date], str]] = []
-        valid_daily_basic_count = 0
+        required_daily_basic_count = sum(
+            1 for ts_code, _business_date in daily if not ts_code.endswith(".BJ")
+        )
+        valid_required_daily_basic_count = 0
         for key in sorted(daily):
             source = daily[key]
+            is_bse = key[0].endswith(".BJ")
             if bse_previous_close_lag and key[0].endswith(".BJ"):
                 daily_basic_issues.append(
                     (key, "daily_basic BSE segment matches previous-close snapshot")
@@ -216,10 +220,12 @@ class StockDailyCoreProcessor:
                 except ProcessingError as exc:
                     issue = (key, str(exc))
                     daily_basic_issues.append(issue)
-                    threshold_daily_basic_issues.append(issue)
+                    if not is_bse:
+                        threshold_daily_basic_issues.append(issue)
                     enrichment = _empty_daily_basic_enrichment()
                 else:
-                    valid_daily_basic_count += 1
+                    if not is_bse:
+                        valid_required_daily_basic_count += 1
             try:
                 row = _stock_daily_core_row(
                     source,
@@ -236,10 +242,11 @@ class StockDailyCoreProcessor:
         for key in extra_basic_keys:
             issue = (key, "daily_basic has no matching daily row")
             daily_basic_issues.append(issue)
-            threshold_daily_basic_issues.append(issue)
+            if not key[0].endswith(".BJ"):
+                threshold_daily_basic_issues.append(issue)
         _validate_daily_basic_quality(
-            daily_count=len(daily),
-            valid_count=valid_daily_basic_count,
+            daily_count=required_daily_basic_count,
+            valid_count=valid_required_daily_basic_count,
             issues=threshold_daily_basic_issues,
         )
         _validate_daily_price_quality(

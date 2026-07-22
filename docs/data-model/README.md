@@ -5,7 +5,7 @@
 ## 设计范围
 
 - 28 张业务表、9 张控制面运行表和 2 张运维支撑表，共 39 张应用表；股票、ETF、指数、同花顺概念与主题、东方财富题材分别建模。
-- `stock_daily` 合并 `daily`、`daily_basic` 和 `adj_factor`，`stk_limit` 只补充涨跌停价。
+- `stock_daily` 合并 `daily`、`daily_basic` 和 `adj_factor`，`stk_limit` 只补充涨跌停价；北交所历史 `daily_basic` 仅作为可空估值增强，缺失或错位不丢弃已验证的日线事实。
 - 6 张持续增长的日事实表按 `trade_date` 月分区，其他表使用普通表和针对性索引。
 - Tushare 原始结果以不可变 Parquet 封存；正式消费者只读取已经登记发布的 PostgreSQL 数据。
 - `dataset_release` 表达当前发布完整性和血缘，不代表业务表支持历史版本指针回滚。
