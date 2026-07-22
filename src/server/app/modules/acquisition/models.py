@@ -75,6 +75,21 @@ class CollectionBatch(Base):
             "batch_id",
             postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
         ),
+        Index(
+            "idx_collection_batch_active_claim",
+            text(
+                "(CASE WHEN batch_type = 'REPAIR' THEN 50 "
+                "WHEN batch_type IN ('DAILY', 'MASTER', 'HOT', 'DELAYED') THEN 100 "
+                "WHEN batch_type = 'BACKFILL' THEN 400 ELSE 500 END)"
+            ),
+            text(
+                "(CASE WHEN batch_type = 'BACKFILL' THEN business_date ELSE NULL END) "
+                "DESC NULLS LAST"
+            ),
+            "scheduled_at",
+            "batch_id",
+            postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
+        ),
     )
 
     batch_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

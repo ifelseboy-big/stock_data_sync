@@ -77,6 +77,16 @@ class ProcessingTask(Base):
             "process_id",
             postgresql_where=text("status = 'RETRY_WAIT'"),
         ),
+        Index(
+            "idx_processing_active_recovery",
+            "output_dataset",
+            "business_date",
+            postgresql_include=("source_batch_id", "queued_at", "started_at"),
+            postgresql_where=text(
+                "status IN ('WAITING_DEPENDENCY', 'QUEUED', 'RUNNING', "
+                "'RETRY_WAIT', 'BLOCKED')"
+            ),
+        ),
     )
 
     process_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

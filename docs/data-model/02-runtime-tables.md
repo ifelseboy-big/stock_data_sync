@@ -39,10 +39,11 @@ started_at timestamptz null -- 本次任务开始时间
 finished_at timestamptz null -- 任务最终结束时间
 error_code varchar(64) null -- 最近一次错误码
 error_message text null -- 最近一次错误说明
+warning_message text null -- 采集结果有效但存在历史范围缺口等可接受数据质量问题
 unique (batch_id, api_name, scope_key) -- 同一批次内接口和调用范围唯一
 ```
 
-一个任务只对应一个接口和一个确定范围。scope_key用于表达交易日、股票批次、指数代码或概念代码，避免重复调度。普通运行记录分页不计算恢复状态，只执行基础合并、计数、排序和分页；只有“未恢复失败任务”筛选需要判断失败任务是否已被同接口、同范围的后续成功任务恢复。`idx_collection_task_recovery (api_name, scope_key, finished_at) WHERE status IN ('SUCCESS','EMPTY_VALID')` 为该筛选提供直接访问路径，避免对以 `batch_id` 开头的批次唯一索引执行大量跳跃扫描。
+一个任务只对应一个接口和一个确定范围。scope_key用于表达交易日、股票批次、指数代码或概念代码，避免重复调度。`warning_message` 不改变成功状态，数据缺口告警可据此展示并继续保留发布资格。普通运行记录分页不计算恢复状态，只执行基础合并、计数、排序和分页；只有“未恢复失败任务”筛选需要判断失败任务是否已被同接口、同范围的后续成功或活动任务恢复。常规范围与 `dc_concept_cons` 的按业务日兼容查询必须拆为独立 `EXISTS`，不能在索引列上合并为 `OR`。`idx_collection_task_recovery (api_name, scope_key, finished_at) WHERE status IN ('SUCCESS','EMPTY_VALID')` 为常规恢复筛选提供直接访问路径。
 
 ## raw_data_asset
 
@@ -88,7 +89,7 @@ error_message text null -- 加工失败或阻塞的错误说明
 warning_message text null -- 加工成功但存在可接受数据质量问题时的警告说明
 ```
 
-消费一个或多个原始资产并生成正式数据。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。全局加工入口并发数固定为1，但采集任务可以在Tushare额度内并行。
+消费一个或多个原始资产并生成正式数据。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。失败是否已经恢复，优先按 `dataset_release` 主键 `(dataset_name, scope_type, scope_key)` 精确查找当前发布；尚未发布时再按同数据集、同发布范围查找活动加工任务。`idx_processing_active_recovery (output_dataset, business_date) INCLUDE (source_batch_id, queued_at, started_at)` 仅覆盖活动状态，为后一个判断提供访问路径。全局加工入口并发数固定为1，但采集任务可以在Tushare额度内并行。
 
 ## processing_dependency
 

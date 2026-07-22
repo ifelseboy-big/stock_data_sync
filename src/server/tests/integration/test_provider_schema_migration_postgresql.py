@@ -98,6 +98,41 @@ def _prepare_old_schema(engine: Engine, database_url: str) -> None:
         )
 
 
+def _assert_runtime_recovery_indexes(engine: Engine) -> None:
+    with engine.connect() as connection:
+        processing_index = connection.scalar(
+            text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'processing_task'
+                  AND indexname = 'idx_processing_active_recovery'
+                """
+            )
+        )
+        collection_claim_index = connection.scalar(
+            text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'collection_batch'
+                  AND indexname = 'idx_collection_batch_active_claim'
+                """
+            )
+        )
+    assert processing_index is not None
+    assert "(output_dataset, business_date)" in processing_index
+    assert "INCLUDE (source_batch_id, queued_at, started_at)" in processing_index
+    assert "WAITING_DEPENDENCY" in processing_index
+    assert "BLOCKED" in processing_index
+    assert collection_claim_index is not None
+    assert "CASE" in collection_claim_index
+    assert "business_date" in collection_claim_index
+    assert "PENDING" in collection_claim_index
+
+
 def test_old_schema_upgrades_without_losing_rows(
     migration_database: tuple[Engine, str],
 ) -> None:
@@ -122,10 +157,11 @@ def test_old_schema_upgrades_without_losing_rows(
         foreign_key["name"]
         for foreign_key in inspector.get_foreign_keys("market_theme_member_daily")
     }
+    _assert_runtime_recovery_indexes(engine)
 
     with engine.begin() as connection:
         assert connection.scalar(text("SELECT COUNT(*) FROM ths_board_moneyflow_daily")) == 1
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260721_0012"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260722_0013"
         connection.execute(
             text(
                 """
@@ -148,6 +184,20 @@ def test_old_schema_upgrades_without_losing_rows(
                 """
             )
         )
+
+
+def test_empty_schema_upgrades_to_current_runtime_structure(
+    migration_database: tuple[Engine, str],
+) -> None:
+    engine, database_url = migration_database
+
+    _alembic(database_url, "upgrade", "head")
+
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "20260722_0013"
+        )
+    _assert_runtime_recovery_indexes(engine)
 
 
 def test_new_primary_key_conflict_aborts_without_deleting_rows(
@@ -223,5 +273,5 @@ def test_already_compatible_v020_schema_is_only_stamped(
     _alembic(database_url, "upgrade", "head")
 
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260721_0012"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260722_0013"
         assert connection.scalar(text("SELECT COUNT(*) FROM ths_board_moneyflow_daily")) == 1

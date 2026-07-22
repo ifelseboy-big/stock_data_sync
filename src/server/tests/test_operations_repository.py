@@ -77,9 +77,13 @@ async def test_unresolved_run_records_apply_recovery_lookup_before_pagination() 
         )
     )
     assert "EXISTS" in page_sql
-    assert "enriched_runs.recovered IS false" in page_sql
+    assert "enriched_runs" not in page_sql
+    assert "IS false" in page_sql
     assert "processing_task.status IN ('FAILED', 'SKIPPED', 'CANCELLED')" in page_sql
     assert "collection_task AS" not in page_sql
+    assert "dataset_release" in page_sql
+    assert "scope_type = CASE" in page_sql
+    assert "scope_key = CASE" in page_sql
     assert "count(*) OVER" in page_sql
     assert session.page_statement._limit_clause.value == 20
 
@@ -127,6 +131,9 @@ async def test_alerts_hide_dependency_blocks_and_expected_duplicate_warnings() -
         )
     )
     assert "processing_task.status = 'FAILED'" in sql
+    assert "dataset_release" in sql
+    assert "scope_type = CASE" in sql
+    assert "scope_key = CASE" in sql
     assert "processing_task.status = 'BLOCKED'" not in sql
     assert "dc_concept_cons" in sql
     assert "business_date IS NOT DISTINCT FROM" in sql

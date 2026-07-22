@@ -184,6 +184,17 @@ CREATE INDEX idx_batch_active_schedule
     ON collection_batch (scheduled_at, batch_id)
     WHERE status IN ('PENDING', 'RUNNING');
 
+CREATE INDEX idx_collection_batch_active_claim
+    ON collection_batch (
+        (CASE WHEN batch_type = 'REPAIR' THEN 50
+              WHEN batch_type IN ('DAILY', 'MASTER', 'HOT', 'DELAYED') THEN 100
+              WHEN batch_type = 'BACKFILL' THEN 400 ELSE 500 END),
+        (CASE WHEN batch_type = 'BACKFILL' THEN business_date ELSE NULL END) DESC NULLS LAST,
+        scheduled_at,
+        batch_id
+    )
+    WHERE status IN ('PENDING', 'RUNNING');
+
 CREATE INDEX idx_task_batch_status
     ON collection_task (batch_id, status);
 
@@ -211,6 +222,11 @@ CREATE INDEX idx_process_queue
 CREATE INDEX idx_processing_retry_due
     ON processing_task (next_retry_at, priority, process_id)
     WHERE status = 'RETRY_WAIT';
+
+CREATE INDEX idx_processing_active_recovery
+    ON processing_task (output_dataset, business_date)
+    INCLUDE (source_batch_id, queued_at, started_at)
+    WHERE status IN ('WAITING_DEPENDENCY', 'QUEUED', 'RUNNING', 'RETRY_WAIT', 'BLOCKED');
 
 CREATE INDEX idx_dependency_asset
     ON processing_dependency (resolved_asset_id)

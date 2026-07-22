@@ -71,9 +71,15 @@ PROCESSING_ACTIVE = (
     ProcessingTaskStatus.RETRY_WAIT.value,
     ProcessingTaskStatus.BLOCKED.value,
 )
-DATE_SCOPED_DATASETS = tuple(
-    spec.dataset_name for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
-)
+DATASETS_BY_RELEASE_SCOPE = {
+    scope: tuple(
+        spec.dataset_name for spec in ALL_DATASET_SPECS if spec.release_scope == scope
+    )
+    for scope in ReleaseScope
+}
+DATE_SCOPED_DATASETS = DATASETS_BY_RELEASE_SCOPE[ReleaseScope.DATE]
+MONTH_SCOPED_DATASETS = DATASETS_BY_RELEASE_SCOPE[ReleaseScope.MONTH]
+ENTITY_SCOPED_DATASETS = DATASETS_BY_RELEASE_SCOPE[ReleaseScope.ENTITY]
 
 
 class OperationsRepository:
@@ -136,12 +142,10 @@ class OperationsRepository:
                 ProcessingTask.status == ProcessingTaskStatus.BLOCKED.value,
                 ~select(literal(1))
                 .where(
-                    recovered_blocked.dataset_name == ProcessingTask.output_dataset,
-                    or_(
-                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
-                        recovered_blocked.business_date.is_not_distinct_from(
-                            ProcessingTask.business_date
-                        ),
+                    _release_matches_processing_scope(
+                        recovered_blocked,
+                        task_name=ProcessingTask.output_dataset,
+                        business_date=ProcessingTask.business_date,
                     ),
                     recovered_blocked.published_at > CollectionBatch.scheduled_at,
                 )
@@ -293,12 +297,10 @@ class OperationsRepository:
             .where(
                 ~select(literal(1))
                 .where(
-                    recovered_release.dataset_name == ProcessingTask.output_dataset,
-                    or_(
-                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
-                        recovered_release.business_date.is_not_distinct_from(
-                            ProcessingTask.business_date
-                        ),
+                    _release_matches_processing_scope(
+                        recovered_release,
+                        task_name=ProcessingTask.output_dataset,
+                        business_date=ProcessingTask.business_date,
                     ),
                     recovered_release.published_at
                     > func.coalesce(
@@ -356,12 +358,10 @@ class OperationsRepository:
                 CollectionBatch.scheduled_at,
                 select(literal(1))
                 .where(
-                    recovered_release.dataset_name == ProcessingTask.output_dataset,
-                    or_(
-                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
-                        recovered_release.business_date.is_not_distinct_from(
-                            ProcessingTask.business_date
-                        ),
+                    _release_matches_processing_scope(
+                        recovered_release,
+                        task_name=ProcessingTask.output_dataset,
+                        business_date=ProcessingTask.business_date,
                     ),
                     recovered_release.published_at > CollectionBatch.scheduled_at,
                 )
@@ -684,15 +684,11 @@ class OperationsRepository:
 
         if unresolved_only:
             candidates = filtered.subquery("candidate_runs")
-            enriched = select(
-                candidates,
-                _run_recovered_expression(candidates, run_type=run_type),
-            ).subquery("enriched_runs")
             unresolved = (
-                select(enriched)
+                select(candidates)
                 .where(
-                    enriched.c.recovered.is_(False),
-                    or_(enriched.c.run_type == "acquisition", enriched.c.attempt > 0),
+                    _run_recovered_expression(candidates, run_type=run_type).is_(False),
+                    or_(candidates.c.run_type == "acquisition", candidates.c.attempt > 0),
                 )
                 .subquery("unresolved_runs")
             )
@@ -802,12 +798,8 @@ class OperationsRepository:
         offset: int,
         limit: int,
     ) -> tuple[list[dict[str, Any]], int]:
-        recovered_collection = aliased(CollectionTask)
         failed_collection_batch = aliased(CollectionBatch)
-        recovered_collection_batch = aliased(CollectionBatch)
-        recovering_collection = aliased(CollectionTask)
-        recovering_collection_batch = aliased(CollectionBatch)
-        recovered_processing = aliased(ProcessingTask)
+        recovered_processing_release = aliased(DatasetRelease)
         recovering_processing = aliased(ProcessingTask)
         recovering_processing_batch = aliased(CollectionBatch)
         recovered_scheduler = aliased(ScheduledJobExecution)
@@ -836,62 +828,22 @@ class OperationsRepository:
             ScheduledJobExecution.started_at,
             ScheduledJobExecution.created_at,
         )
-        collection_recovered = or_(
-            select(literal(1))
-            .select_from(recovered_collection)
-            .join(
-                recovered_collection_batch,
-                recovered_collection_batch.batch_id == recovered_collection.batch_id,
-            )
-            .where(
-                recovered_collection.api_name == CollectionTask.api_name,
-                or_(
-                    recovered_collection.scope_key == CollectionTask.scope_key,
-                    and_(
-                        CollectionTask.api_name == "dc_concept_cons",
-                        recovered_collection_batch.business_date.is_not_distinct_from(
-                            failed_collection_batch.business_date
-                        ),
-                    ),
-                ),
-                recovered_collection.status.in_(COLLECTION_SUCCESS),
-                recovered_collection.finished_at > CollectionTask.finished_at,
-            )
-            .exists(),
-            select(literal(1))
-            .select_from(recovering_collection)
-            .join(
-                recovering_collection_batch,
-                recovering_collection_batch.batch_id == recovering_collection.batch_id,
-            )
-            .where(
-                recovering_collection.api_name == CollectionTask.api_name,
-                or_(
-                    recovering_collection.scope_key == CollectionTask.scope_key,
-                    and_(
-                        CollectionTask.api_name == "dc_concept_cons",
-                        recovering_collection_batch.business_date.is_not_distinct_from(
-                            failed_collection_batch.business_date
-                        ),
-                    ),
-                ),
-                recovering_collection.status.in_(COLLECTION_ACTIVE),
-                recovering_collection_batch.scheduled_at > failed_collection_batch.scheduled_at,
-            )
-            .exists(),
+        collection_recovered = _collection_recovered_expression(
+            task_name=CollectionTask.api_name,
+            scope_key=CollectionTask.scope_key,
+            business_date=failed_collection_batch.business_date,
+            finished_at=CollectionTask.finished_at,
+            sort_time=failed_collection_batch.scheduled_at,
         )
         processing_recovered = or_(
             select(literal(1))
             .where(
-                recovered_processing.output_dataset == ProcessingTask.output_dataset,
-                or_(
-                    ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
-                    recovered_processing.business_date.is_not_distinct_from(
-                        ProcessingTask.business_date
-                    ),
+                _release_matches_processing_scope(
+                    recovered_processing_release,
+                    task_name=ProcessingTask.output_dataset,
+                    business_date=ProcessingTask.business_date,
                 ),
-                recovered_processing.status == ProcessingTaskStatus.SUCCESS.value,
-                recovered_processing.finished_at > processing_occurred_at,
+                recovered_processing_release.published_at > processing_occurred_at,
             )
             .exists(),
             select(literal(1))
@@ -901,12 +853,10 @@ class OperationsRepository:
                 recovering_processing_batch.batch_id == recovering_processing.source_batch_id,
             )
             .where(
-                recovering_processing.output_dataset == ProcessingTask.output_dataset,
-                or_(
-                    ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
-                    recovering_processing.business_date.is_not_distinct_from(
-                        ProcessingTask.business_date
-                    ),
+                _processing_tasks_share_scope(
+                    recovering_processing,
+                    task_name=ProcessingTask.output_dataset,
+                    business_date=ProcessingTask.business_date,
                 ),
                 recovering_processing.status.in_(PROCESSING_ACTIVE),
                 func.coalesce(
@@ -1153,65 +1103,94 @@ def _processing_run_status_values(status: str | None) -> tuple[str, ...] | None:
     }.get(status, ("__NO_MATCH__",))
 
 
+def _collection_recovered_expression(
+    *,
+    task_name: Any,
+    scope_key: Any,
+    business_date: Any,
+    finished_at: Any,
+    sort_time: Any,
+) -> Any:
+    recovered = aliased(CollectionTask)
+    recovered_batch = aliased(CollectionBatch)
+    recovering = aliased(CollectionTask)
+    recovering_batch = aliased(CollectionBatch)
+
+    same_scope_recovered = (
+        select(literal(1))
+        .select_from(recovered)
+        .where(
+            recovered.api_name == task_name,
+            recovered.scope_key == scope_key,
+            recovered.status.in_(COLLECTION_SUCCESS),
+            recovered.finished_at > finished_at,
+        )
+        .exists()
+    )
+    same_date_recovered = and_(
+        task_name == "dc_concept_cons",
+        select(literal(1))
+        .select_from(recovered)
+        .join(recovered_batch, recovered_batch.batch_id == recovered.batch_id)
+        .where(
+            recovered.api_name == task_name,
+            recovered_batch.business_date.is_not_distinct_from(business_date),
+            recovered.status.in_(COLLECTION_SUCCESS),
+            recovered.finished_at > finished_at,
+        )
+        .exists(),
+    )
+    same_scope_recovering = (
+        select(literal(1))
+        .select_from(recovering)
+        .join(recovering_batch, recovering_batch.batch_id == recovering.batch_id)
+        .where(
+            recovering.api_name == task_name,
+            recovering.scope_key == scope_key,
+            recovering.status.in_(COLLECTION_ACTIVE),
+            recovering_batch.scheduled_at > sort_time,
+        )
+        .exists()
+    )
+    same_date_recovering = and_(
+        task_name == "dc_concept_cons",
+        select(literal(1))
+        .select_from(recovering)
+        .join(recovering_batch, recovering_batch.batch_id == recovering.batch_id)
+        .where(
+            recovering.api_name == task_name,
+            recovering_batch.business_date.is_not_distinct_from(business_date),
+            recovering.status.in_(COLLECTION_ACTIVE),
+            recovering_batch.scheduled_at > sort_time,
+        )
+        .exists(),
+    )
+    return or_(
+        same_scope_recovered,
+        same_date_recovered,
+        same_scope_recovering,
+        same_date_recovering,
+    )
+
+
 def _run_recovered_expression(rows: Any, *, run_type: str | None) -> Any:
-    recovered_collection = aliased(CollectionTask)
-    recovered_collection_batch = aliased(CollectionBatch)
-    recovering_collection = aliased(CollectionTask)
-    recovering_collection_batch = aliased(CollectionBatch)
     recovered_release = aliased(DatasetRelease)
     recovering_processing = aliased(ProcessingTask)
     recovering_processing_batch = aliased(CollectionBatch)
-    collection_recovered = or_(
-        select(literal(1))
-        .select_from(recovered_collection)
-        .join(
-            recovered_collection_batch,
-            recovered_collection_batch.batch_id == recovered_collection.batch_id,
-        )
-        .where(
-            recovered_collection.api_name == rows.c.task_name,
-            or_(
-                recovered_collection.scope_key == rows.c.scope_key,
-                and_(
-                    rows.c.task_name == "dc_concept_cons",
-                    recovered_collection_batch.business_date.is_not_distinct_from(
-                        rows.c.business_date
-                    ),
-                ),
-            ),
-            recovered_collection.status.in_(COLLECTION_SUCCESS),
-            recovered_collection.finished_at > rows.c.finished_at,
-        )
-        .exists(),
-        select(literal(1))
-        .select_from(recovering_collection)
-        .join(
-            recovering_collection_batch,
-            recovering_collection_batch.batch_id == recovering_collection.batch_id,
-        )
-        .where(
-            recovering_collection.api_name == rows.c.task_name,
-            or_(
-                recovering_collection.scope_key == rows.c.scope_key,
-                and_(
-                    rows.c.task_name == "dc_concept_cons",
-                    recovering_collection_batch.business_date.is_not_distinct_from(
-                        rows.c.business_date
-                    ),
-                ),
-            ),
-            recovering_collection.status.in_(COLLECTION_ACTIVE),
-            recovering_collection_batch.scheduled_at > rows.c.sort_time,
-        )
-        .exists(),
+    collection_recovered = _collection_recovered_expression(
+        task_name=rows.c.task_name,
+        scope_key=rows.c.scope_key,
+        business_date=rows.c.business_date,
+        finished_at=rows.c.finished_at,
+        sort_time=rows.c.sort_time,
     )
     processing_recovered = or_(
         select(literal(1))
         .where(
-            recovered_release.dataset_name == rows.c.task_name,
-            or_(
-                rows.c.task_name.not_in(DATE_SCOPED_DATASETS),
-                recovered_release.business_date.is_not_distinct_from(rows.c.business_date),
+            _release_matches_processing_scope(
+                recovered_release,
+                task_name=rows.c.task_name,
+                business_date=rows.c.business_date,
             ),
             recovered_release.published_at > rows.c.sort_time,
         )
@@ -1223,10 +1202,10 @@ def _run_recovered_expression(rows: Any, *, run_type: str | None) -> Any:
             recovering_processing_batch.batch_id == recovering_processing.source_batch_id,
         )
         .where(
-            recovering_processing.output_dataset == rows.c.task_name,
-            or_(
-                rows.c.task_name.not_in(DATE_SCOPED_DATASETS),
-                recovering_processing.business_date.is_not_distinct_from(rows.c.business_date),
+            _processing_tasks_share_scope(
+                recovering_processing,
+                task_name=rows.c.task_name,
+                business_date=rows.c.business_date,
             ),
             recovering_processing.status.in_(PROCESSING_ACTIVE),
             func.coalesce(
@@ -1258,6 +1237,61 @@ def _processing_status_values(status: str | None) -> tuple[str, ...] | None:
         "waiting_retry": (ProcessingTaskStatus.RETRY_WAIT.value,),
         "blocked": (ProcessingTaskStatus.BLOCKED.value,),
     }.get(status, ("__NO_MATCH__",))
+
+
+def _processing_scope_type_expression(task_name: Any) -> Any:
+    branches = tuple(
+        (task_name.in_(dataset_names), literal(scope.value))
+        for scope, dataset_names in DATASETS_BY_RELEASE_SCOPE.items()
+        if scope != ReleaseScope.GLOBAL and dataset_names
+    )
+    return case(*branches, else_=literal(ReleaseScope.GLOBAL.value))
+
+
+def _processing_scope_key_expression(task_name: Any, business_date: Any) -> Any:
+    branches: list[tuple[Any, Any]] = []
+    if DATE_SCOPED_DATASETS:
+        branches.append(
+            (task_name.in_(DATE_SCOPED_DATASETS), sql_cast(business_date, String))
+        )
+    if MONTH_SCOPED_DATASETS:
+        branches.append(
+            (task_name.in_(MONTH_SCOPED_DATASETS), func.to_char(business_date, "YYYY-MM"))
+        )
+    if ENTITY_SCOPED_DATASETS:
+        branches.append(
+            (task_name.in_(ENTITY_SCOPED_DATASETS), sql_cast(business_date, String))
+        )
+    return case(*branches, else_=literal("GLOBAL"))
+
+
+def _release_matches_processing_scope(
+    release: Any,
+    *,
+    task_name: Any,
+    business_date: Any,
+) -> Any:
+    return and_(
+        release.dataset_name == task_name,
+        release.scope_type == _processing_scope_type_expression(task_name),
+        release.scope_key == _processing_scope_key_expression(task_name, business_date),
+    )
+
+
+def _processing_tasks_share_scope(
+    candidate: Any,
+    *,
+    task_name: Any,
+    business_date: Any,
+) -> Any:
+    return and_(
+        candidate.output_dataset == task_name,
+        _processing_scope_key_expression(
+            candidate.output_dataset,
+            candidate.business_date,
+        )
+        == _processing_scope_key_expression(task_name, business_date),
+    )
 
 
 def _dependency_status_values(status: str | None) -> tuple[str, ...] | None:

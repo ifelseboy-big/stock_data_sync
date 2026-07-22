@@ -64,6 +64,22 @@ CREATE INDEX idx_collection_task_recovery
 ON collection_task (api_name, scope_key, finished_at)
 WHERE status IN ('SUCCESS', 'EMPTY_VALID');
 
+CREATE INDEX idx_collection_batch_active_claim
+ON collection_batch (
+    (CASE WHEN batch_type = 'REPAIR' THEN 50
+          WHEN batch_type IN ('DAILY', 'MASTER', 'HOT', 'DELAYED') THEN 100
+          WHEN batch_type = 'BACKFILL' THEN 400 ELSE 500 END),
+    (CASE WHEN batch_type = 'BACKFILL' THEN business_date ELSE NULL END) DESC NULLS LAST,
+    scheduled_at,
+    batch_id
+)
+WHERE status IN ('PENDING', 'RUNNING');
+
+CREATE INDEX idx_processing_active_recovery
+ON processing_task (output_dataset, business_date)
+INCLUDE (source_batch_id, queued_at, started_at)
+WHERE status IN ('WAITING_DEPENDENCY', 'QUEUED', 'RUNNING', 'RETRY_WAIT', 'BLOCKED');
+
 CREATE INDEX idx_dependency_waiting
 ON processing_dependency (process_id, dependency_type, status);
 
@@ -80,10 +96,14 @@ WHERE resolved_release_process_id IS NOT NULL;
 | `20260720_0009` | v0.1.18 | 为 `processing_task` 新增可空 `warning_message text` 字段 | 单独记录不阻断成功和发布的数据质量警告，避免与失败原因混用 |
 | `20260720_0010` | v0.1.20 | 为 `collection_task` 新建 `(api_name, scope_key, finished_at)` 成功状态部分索引 | 加速运行记录、告警和未恢复任务查询，避免按 `batch_id` 前导索引执行大量跳跃扫描 |
 | `20260720_0011` | v0.1.21 | 将 `ths_board_moneyflow_daily` 主键改为 `board_type + board_name + trade_date`、允许 `ts_code` 为空并补查询索引；移除 `market_theme_member_daily` 到同日题材排行的外键 | 兼容供应方板块代码为空，以及成员窗口长于题材排行窗口的真实数据；保留所有已有业务行 |
+| `20260721_0012` | v0.1.26 | 为 `collection_task` 新增可空 `warning_message text` 字段 | 记录不阻断成功和发布的采集数据缺口，与失败原因分离 |
+| `20260722_0013` | v0.1.34 | 新建活动加工恢复部分覆盖索引和活动采集批次领取优先级部分索引 | 让未恢复任务、告警聚合和采集抢占在目标规模下按索引完成，避免扫描全部发布、加工或活动批次 |
 
-当前源码的升级顺序固定为 `20260719_0007 -> 20260720_0008 -> 20260720_0009 -> 20260720_0010 -> 20260720_0011`，完成后数据库必须报告 `20260720_0011 (head)`。v0.1.18 的目标是 `0009`，v0.1.20 的目标是 `0010`。生产环境不得把程序回滚与数据库降级混为同一操作。
+当前源码的升级顺序固定为 `20260719_0007 -> 20260720_0008 -> 20260720_0009 -> 20260720_0010 -> 20260720_0011 -> 20260721_0012 -> 20260722_0013`，完成后数据库必须报告 `20260722_0013 (head)`。首次安装从空库执行同一迁移链，结构必须与增量升级到 head 完全一致。生产环境不得把程序回滚与数据库降级混为同一操作。
 
 `0011` 是事务型、保留数据的增量迁移。执行时先锁定板块资金表并检查新主键是否冲突；存在冲突则整笔回滚并保留旧 revision 和全部原始行，不做自动去重。迁移同时兼容 `v0.1.19` 的旧结构和 `v0.1.20` 新装库已经具备的新结构。降级只有在 `ts_code` 无空值、旧主键无冲突且所有题材成员都有同日排行父记录时才允许，否则拒绝破坏性降级。
+
+`0013` 只新增部分索引，不改写业务行。恢复判断必须把数据集目录定义的 `DATE`、`MONTH`、`ENTITY` 和 `GLOBAL` 发布范围转换为精确的 `scope_type + scope_key`，再使用 `dataset_release` 主键查找当前发布；不能仅按 `dataset_name + business_date` 扫描历史发布。采集恢复中的普通 scope 与 `dc_concept_cons` 业务日兼容也必须拆为独立索引查询，避免 `OR` 破坏组合索引选择性。
 
 批次创建使用固定计划时间，不使用实际执行时间。例如16:10阶段即使服务17:00恢复，scheduled_at仍沿用当日DAILY批次的08:45计划时隙，从而命中原批次而不是生成重复批次。output_version由source_batch_id、output_dataset、process_type中的处理器版本和business_date计算确定性UUID；同一批次计划不会重复生成加工任务，规则升级或新的REPAIR批次会得到新版本。
 

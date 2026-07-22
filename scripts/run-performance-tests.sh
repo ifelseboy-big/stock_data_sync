@@ -76,8 +76,10 @@ pg_ctl \
   -o "-p $PERF_PORT -h 127.0.0.1 -c max_connections=50" \
   -w start >/dev/null
 createdb -h 127.0.0.1 -p "$PERF_PORT" -U postgres stock_data_sync_perf
+createdb -h 127.0.0.1 -p "$PERF_PORT" -U postgres stock_data_sync_integration
 
 export DATABASE_URL="postgresql+psycopg://postgres@127.0.0.1:$PERF_PORT/stock_data_sync_perf"
+INTEGRATION_DATABASE_URL="postgresql+psycopg://postgres@127.0.0.1:$PERF_PORT/stock_data_sync_integration"
 export RAW_DATA_DIR="$PERF_ROOT/raw"
 mkdir -p "$RAW_DATA_DIR"
 
@@ -85,6 +87,26 @@ printf '执行数据库迁移...\n'
 (
   cd "$SERVER_DIR"
   UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache uv run alembic upgrade head
+)
+
+printf '执行全新建库和增量迁移回归...\n'
+(
+  cd "$SERVER_DIR"
+  RUN_POSTGRES_INTEGRATION=1 \
+    UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache \
+    uv run pytest tests/integration/test_provider_schema_migration_postgresql.py -q
+)
+
+printf '执行失败恢复与告警查询回归...\n'
+(
+  cd "$SERVER_DIR"
+  DATABASE_URL="$INTEGRATION_DATABASE_URL" \
+    UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache \
+    uv run alembic upgrade head
+  DATABASE_URL="$INTEGRATION_DATABASE_URL" \
+    RUN_POSTGRES_INTEGRATION=1 \
+    UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache \
+    uv run pytest tests/integration/test_operations_api_postgresql.py -q
 )
 
 printf '执行 %s 规模性能测试...\n' "$PERF_PROFILE"
