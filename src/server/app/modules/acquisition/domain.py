@@ -1,7 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.modules.acquisition.models import BatchType, CollectionTaskStatus
 
@@ -36,6 +36,7 @@ class ClaimedCollectionTask:
     request_params: dict[str, Any]
     attempt_count: int
     max_attempts: int
+    execution_token: UUID = field(default_factory=uuid4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,7 @@ class RunningTaskSnapshot:
     attempt_count: int
     max_attempts: int
     started_at: datetime | None
+    execution_token: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

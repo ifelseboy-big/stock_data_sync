@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.modules.processing.models import ProcessingTaskStatus
 
@@ -15,6 +15,7 @@ class ClaimedProcessingTask:
     output_version: UUID
     attempt_count: int
     max_attempts: int
+    execution_token: UUID = field(default_factory=uuid4)
 
 
 @dataclass(frozen=True, slots=True)

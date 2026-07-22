@@ -83,8 +83,7 @@ class ProcessingTask(Base):
             "business_date",
             postgresql_include=("source_batch_id", "queued_at", "started_at"),
             postgresql_where=text(
-                "status IN ('WAITING_DEPENDENCY', 'QUEUED', 'RUNNING', "
-                "'RETRY_WAIT', 'BLOCKED')"
+                "status IN ('WAITING_DEPENDENCY', 'QUEUED', 'RUNNING', 'RETRY_WAIT', 'BLOCKED')"
             ),
         ),
     )
@@ -111,6 +110,7 @@ class ProcessingTask(Base):
         Integer, nullable=False, default=3, server_default="3"
     )
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_token: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

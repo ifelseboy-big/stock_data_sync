@@ -20,10 +20,11 @@ data/raw/
     └── {api_name}/
         └── business_date={YYYY-MM-DD或_GLOBAL}/
             └── batch_id={batch_uuid}/
-                └── task_id={task_uuid}/asset.parquet
+                └── task_id={task_uuid}/
+                    └── execution_token={execution_uuid}/asset.parquet
 ```
 
-**原子封存。**采集器在最终目录同一文件系统内写临时文件，完成flush、文件fsync、行数/schema/哈希检查后原子rename，再fsync父目录，随后在短事务中插入raw_data_asset并更新collection_task。最终路径由task_id确定。reconciler按“临时文件、最终文件、资产记录、任务状态”四项组合恢复：四项一致则确认成功；只有最终文件时验证后补登记或隔离；只有临时文件时清理并重试；资产记录存在但文件缺失时标记失败并告警。孤儿状态由文件与数据库扫描重建，不依赖内存清单。
+**原子封存。**采集器在最终目录同一文件系统内写临时文件，完成flush、文件fsync、行数/schema/哈希检查后原子rename，再fsync父目录，随后在短事务中校验任务的 `execution_token`、插入raw_data_asset并更新collection_task。最终路径由task_id和本次执行 token 共同确定，超时回收后的旧 worker 即使晚到也只能留下可识别的孤儿文件，不能覆盖新尝试的文件或登记资产。reconciler按“临时文件、最终文件、资产记录、任务状态和执行 token”组合恢复：五项一致则确认成功；只有最终文件时验证后补登记或隔离；只有临时文件时清理并重试；资产记录存在但文件缺失时标记失败并告警。孤儿状态由文件与数据库扫描重建，不依赖内存清单。
 
 **存储抽象。**代码通过RawAssetStore接口访问资产，首期实现LocalRawAssetStore并在storage_uri保存file URI。以后迁移S3兼容存储时只增加S3RawAssetStore，不修改采集和加工逻辑。首期不同时保存JSONL副本，避免原始数据双份存储和一致性问题。
 

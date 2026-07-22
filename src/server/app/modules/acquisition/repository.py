@@ -291,6 +291,8 @@ class AcquisitionRepository:
             task.status = CollectionTaskStatus.RUNNING.value
             task.attempt_count += 1
             task.next_retry_at = None
+            execution_token = uuid4()
+            task.execution_token = execution_token
             task.started_at = now
             task.finished_at = None
             task.error_code = None
@@ -311,6 +313,7 @@ class AcquisitionRepository:
                 request_params=dict(task.request_params),
                 attempt_count=task.attempt_count,
                 max_attempts=task.max_attempts,
+                execution_token=execution_token,
             )
 
     def complete_task(
@@ -332,6 +335,15 @@ class AcquisitionRepository:
             )
             if task_model is None:
                 raise RuntimeError(f"unknown collection task: {task.task_id}")
+            if (
+                task_model.status != CollectionTaskStatus.RUNNING.value
+                or task_model.execution_token != task.execution_token
+            ):
+                return TaskTransition(
+                    task.task_id,
+                    CollectionTaskStatus(task_model.status),
+                    task_model.next_retry_at,
+                )
 
             session.execute(
                 insert(RawDataAsset)
@@ -362,6 +374,7 @@ class AcquisitionRepository:
             task_model.request_count += request_count
             task_model.row_count = metadata.row_count
             task_model.next_retry_at = None
+            task_model.execution_token = None
             task_model.finished_at = completed_at
             task_model.error_code = None
             task_model.error_message = None
@@ -370,7 +383,7 @@ class AcquisitionRepository:
 
     def fail_task(
         self,
-        task_id: UUID,
+        task: ClaimedCollectionTask | RunningTaskSnapshot,
         *,
         error_code: str,
         error_message: str,
@@ -380,29 +393,37 @@ class AcquisitionRepository:
         skipped: bool = False,
     ) -> TaskTransition:
         with self._session_factory() as session, session.begin():
-            task = session.scalar(
-                select(CollectionTask).where(CollectionTask.task_id == task_id).with_for_update()
+            task_model = session.scalar(
+                select(CollectionTask)
+                .where(CollectionTask.task_id == task.task_id)
+                .with_for_update()
             )
-            if task is None:
-                raise RuntimeError(f"unknown collection task: {task_id}")
-            if task.status in TERMINAL_TASK_STATUSES:
+            if task_model is None:
+                raise RuntimeError(f"unknown collection task: {task.task_id}")
+            if (
+                task_model.status != CollectionTaskStatus.RUNNING.value
+                or task_model.execution_token != task.execution_token
+            ):
                 return TaskTransition(
-                    task_id, CollectionTaskStatus(task.status), task.next_retry_at
+                    task.task_id,
+                    CollectionTaskStatus(task_model.status),
+                    task_model.next_retry_at,
                 )
 
             if skipped:
                 status = CollectionTaskStatus.SKIPPED
                 retry_at = None
-            elif retry_at is not None and task.attempt_count < task.max_attempts:
+            elif retry_at is not None and task_model.attempt_count < task_model.max_attempts:
                 status = CollectionTaskStatus.RETRY_WAIT
             else:
                 status = CollectionTaskStatus.FAILED
                 retry_at = None
 
-            task.status = status.value
-            task.request_count += request_count
-            task.next_retry_at = retry_at
-            task.finished_at = (
+            task_model.status = status.value
+            task_model.request_count += request_count
+            task_model.next_retry_at = retry_at
+            task_model.execution_token = None
+            task_model.finished_at = (
                 completed_at
                 if status
                 in {
@@ -411,40 +432,69 @@ class AcquisitionRepository:
                 }
                 else None
             )
-            task.error_code = error_code[:64]
-            task.error_message = error_message
-            task.warning_message = None
-            return TaskTransition(task_id, status, retry_at)
+            task_model.error_code = error_code[:64]
+            task_model.error_message = error_message
+            task_model.warning_message = None
+            return TaskTransition(task.task_id, status, retry_at)
 
     def recover_interrupted_task(
         self,
-        task_id: UUID,
+        task: ClaimedCollectionTask | RunningTaskSnapshot,
         *,
         now: datetime,
     ) -> TaskTransition:
         with self._session_factory() as session, session.begin():
-            task = session.scalar(
-                select(CollectionTask).where(CollectionTask.task_id == task_id).with_for_update()
+            task_model = session.scalar(
+                select(CollectionTask)
+                .where(CollectionTask.task_id == task.task_id)
+                .with_for_update()
             )
-            if task is None:
-                raise RuntimeError(f"unknown collection task: {task_id}")
+            if task_model is None:
+                raise RuntimeError(f"unknown collection task: {task.task_id}")
 
-            status = CollectionTaskStatus(task.status)
-            if status != CollectionTaskStatus.RUNNING:
-                return TaskTransition(task_id, status, task.next_retry_at)
+            status = CollectionTaskStatus(task_model.status)
+            if (
+                status != CollectionTaskStatus.RUNNING
+                or task_model.execution_token != task.execution_token
+            ):
+                return TaskTransition(task.task_id, status, task_model.next_retry_at)
 
-            task.status = CollectionTaskStatus.RETRY_WAIT.value
-            task.attempt_count = max(task.attempt_count - 1, 0)
-            task.next_retry_at = now
-            task.started_at = None
-            task.finished_at = None
-            task.error_code = "INTERRUPTED"
-            task.error_message = "scheduler stopped while the collection task was running"
-            return TaskTransition(task_id, CollectionTaskStatus.RETRY_WAIT, now)
+            task_model.status = CollectionTaskStatus.RETRY_WAIT.value
+            task_model.attempt_count = max(task_model.attempt_count - 1, 0)
+            task_model.next_retry_at = now
+            task_model.execution_token = None
+            task_model.started_at = None
+            task_model.finished_at = None
+            task_model.error_code = "INTERRUPTED"
+            task_model.error_message = "scheduler stopped while the collection task was running"
+            return TaskTransition(task.task_id, CollectionTaskStatus.RETRY_WAIT, now)
 
-    def close_ready_batches(self, *, now: datetime) -> tuple[UUID, ...]:
+    def close_ready_batches(
+        self,
+        *,
+        now: datetime,
+        max_batches: int = 100,
+    ) -> tuple[UUID, ...]:
+        if max_batches < 1:
+            raise ValueError("max_batches must be positive")
         closed_ids: list[UUID] = []
         with self._session_factory() as session, session.begin():
+            task_count = (
+                select(func.count())
+                .select_from(CollectionTask)
+                .where(CollectionTask.batch_id == CollectionBatch.batch_id)
+                .correlate(CollectionBatch)
+                .scalar_subquery()
+            )
+            active_task_exists = (
+                select(CollectionTask.task_id)
+                .where(
+                    CollectionTask.batch_id == CollectionBatch.batch_id,
+                    CollectionTask.status.not_in(TERMINAL_TASK_STATUSES),
+                )
+                .correlate(CollectionBatch)
+                .exists()
+            )
             batches = session.scalars(
                 select(CollectionBatch)
                 .where(
@@ -452,26 +502,14 @@ class AcquisitionRepository:
                         (BatchStatus.PENDING.value, BatchStatus.RUNNING.value)
                     ),
                     CollectionBatch.planning_completed_at.is_not(None),
+                    CollectionBatch.expected_task_count == task_count,
+                    ~active_task_exists,
                 )
-                .order_by(CollectionBatch.scheduled_at)
+                .order_by(CollectionBatch.scheduled_at, CollectionBatch.batch_id)
                 .with_for_update(skip_locked=True)
+                .limit(max_batches)
             ).all()
             for batch in batches:
-                total_count = session.scalar(
-                    select(func.count())
-                    .select_from(CollectionTask)
-                    .where(CollectionTask.batch_id == batch.batch_id)
-                )
-                active_count = session.scalar(
-                    select(func.count())
-                    .select_from(CollectionTask)
-                    .where(
-                        CollectionTask.batch_id == batch.batch_id,
-                        CollectionTask.status.not_in(TERMINAL_TASK_STATUSES),
-                    )
-                )
-                if total_count != batch.expected_task_count or active_count != 0:
-                    continue
                 batch.status = BatchStatus.CLOSED.value
                 batch.closed_at = now
                 closed_ids.append(batch.batch_id)
@@ -495,6 +533,7 @@ class AcquisitionRepository:
                     attempt_count=task.attempt_count,
                     max_attempts=task.max_attempts,
                     started_at=task.started_at,
+                    execution_token=task.execution_token,
                 )
                 for task, batch in rows
             )
@@ -534,6 +573,7 @@ class AcquisitionRepository:
                 return
             task.status = CollectionTaskStatus.FAILED.value
             task.next_retry_at = None
+            task.execution_token = None
             task.finished_at = now
             task.error_code = "ASSET_MISSING"
             task.error_message = "raw asset database record exists but file is missing"

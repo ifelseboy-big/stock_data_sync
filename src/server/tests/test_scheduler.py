@@ -1,5 +1,10 @@
-import pytest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
+import pytest
+from pydantic import ValidationError
+
+from app.core.config import Settings, settings
 from app.scheduler.catalog import SCHEDULED_JOB_BY_ID
 from app.scheduler.factory import create_scheduler
 from app.scheduler.jobs import registered_job_functions
@@ -12,6 +17,37 @@ def test_scheduler_registers_dispatch_job() -> None:
 
     assert job is not None
     assert job.name == SCHEDULED_JOB_BY_ID["dispatch-collection-tasks"].name
+
+
+def test_manual_dispatcher_reserves_automatic_worker_capacity() -> None:
+    scheduler = create_scheduler()
+
+    job = scheduler.get_job("dispatch-manual-scheduled-jobs")
+
+    assert job is not None
+    assert job.max_instances == settings.scheduler_max_workers - 1
+
+    release_manual = Event()
+    automatic_called = Event()
+
+    def manual_job() -> None:
+        assert release_manual.wait(timeout=10)
+
+    with ThreadPoolExecutor(max_workers=settings.scheduler_max_workers) as executor:
+        manual_futures = tuple(executor.submit(manual_job) for _ in range(job.max_instances))
+        automatic = executor.submit(automatic_called.set)
+        try:
+            assert automatic_called.wait(timeout=10)
+            assert automatic.result(timeout=10) is None
+        finally:
+            release_manual.set()
+        for future in manual_futures:
+            future.result(timeout=10)
+
+
+def test_scheduler_requires_capacity_for_automatic_jobs() -> None:
+    with pytest.raises(ValidationError):
+        Settings(scheduler_max_workers=1)
 
 
 def test_scheduler_registers_collection_coordination_jobs() -> None:

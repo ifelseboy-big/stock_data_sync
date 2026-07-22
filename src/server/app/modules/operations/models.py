@@ -166,6 +166,18 @@ class ScheduledJobExecution(Base):
             "execution_id",
             postgresql_where=text("status = 'PENDING'"),
         ),
+        Index(
+            "uq_scheduled_job_execution_running",
+            "job_id",
+            unique=True,
+            postgresql_where=text("status = 'RUNNING'"),
+        ),
+        Index(
+            "uq_scheduled_job_execution_pending_job",
+            "job_id",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+        ),
     )
 
     execution_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

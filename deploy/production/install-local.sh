@@ -246,8 +246,10 @@ umask 077
   printf '# 提前创建的月分区数量。[用户可修改]\n'; deploy_write_env_value PARTITION_MONTHS_AHEAD 3
   printf '# 采集任务最大并发数。[用户可修改]\n'; deploy_write_env_value COLLECTION_MAX_WORKERS 4
   printf '# 采集任务运行超时秒数。[用户可修改]\n'; deploy_write_env_value COLLECTION_RUNNING_TIMEOUT_SECONDS 1800
-  printf '# 加工任务最大并发数；同一数据集仍保持串行。[用户可修改]\n'; deploy_write_env_value PROCESSING_MAX_WORKERS 3
+  printf '# 加工任务最大并发数；DATE 数据集按业务日期互斥。[用户可修改]\n'; deploy_write_env_value PROCESSING_MAX_WORKERS 3
   printf '# 加工任务运行超时秒数。[用户可修改]\n'; deploy_write_env_value PROCESSING_RUNNING_TIMEOUT_SECONDS 21600
+  printf '# 每轮最多规划的关闭批次数。[用户可修改]\n'; deploy_write_env_value PROCESSING_PLAN_BATCH_LIMIT 100
+  printf '# 每轮最多关闭的完成批次数。[用户可修改]\n'; deploy_write_env_value COLLECTION_CLOSE_BATCH_LIMIT 100
 } > "$PROGRAM_DIR/config/app.env"
 chown root:wheel "$PROGRAM_DIR/config/app.env"
 chmod 0600 "$PROGRAM_DIR/config/app.env"

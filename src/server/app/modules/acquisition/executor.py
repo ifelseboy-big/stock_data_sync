@@ -54,6 +54,7 @@ class CollectionExecutor:
             business_date=task.business_date,
             batch_id=task.batch_id,
             task_id=task.task_id,
+            execution_token=task.execution_token,
         )
         try:
             expected_uri = self._asset_store.expected_uri(context)
@@ -278,6 +279,7 @@ class CollectionExecutor:
                     business_date=task.business_date,
                     batch_id=task.batch_id,
                     task_id=task.task_id,
+                    execution_token=task.execution_token,
                 ),
                 spec.schema,
                 (),
@@ -292,7 +294,7 @@ class CollectionExecutor:
             )
         if spec.empty_policy == EmptyPolicy.UNSUPPORTED:
             return self._repository.fail_task(
-                task.task_id,
+                task,
                 error_code="UNSUPPORTED",
                 error_message="provider does not support this requested scope",
                 request_count=stats.request_count,
@@ -352,7 +354,7 @@ class CollectionExecutor:
             ):
                 retry_at = candidate
         return self._repository.fail_task(
-            task.task_id,
+            task,
             error_code=error_code,
             error_message=message,
             request_count=request_count,

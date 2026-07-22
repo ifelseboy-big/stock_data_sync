@@ -58,7 +58,10 @@ def dispatch_collection_tasks() -> None:
 
 def close_collection_batches() -> None:
     now = datetime.now(ZoneInfo(settings.scheduler_timezone))
-    closed_ids = get_acquisition_repository().close_ready_batches(now=now)
+    closed_ids = get_acquisition_repository().close_ready_batches(
+        now=now,
+        max_batches=settings.collection_close_batch_limit,
+    )
     if closed_ids:
         structlog.get_logger("scheduler").info(
             "collection_batches_closed",
@@ -75,6 +78,7 @@ def plan_processing_tasks() -> None:
     result = get_processing_repository().plan_closed_batches(
         get_dataset_specs().all(),
         now=now,
+        max_batches=settings.processing_plan_batch_limit,
     )
     if result.created_task_count or result.queued_task_count or result.blocked_task_count:
         structlog.get_logger("scheduler").info(

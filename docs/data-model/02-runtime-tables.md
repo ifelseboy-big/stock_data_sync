@@ -13,12 +13,14 @@ scheduled_at timestamptz not null -- 计划触发时间
 plan_version varchar(64) null -- 最终任务计划的代码版本；计划冻结前为空
 expected_task_count integer null -- 计划冻结后的预期任务总数
 planning_completed_at timestamptz null -- 最终阶段全部任务生成并冻结计划的时间
+processing_plan_version varchar(64) null -- 最近完整解析过的 DatasetSpec 目录指纹
+processing_planned_at timestamptz null -- 最近一次完整生成加工计划的时间
 started_at timestamptz null -- 批次实际开始时间
 closed_at timestamptz null -- 批次关闭时间
 created_at timestamptz not null -- 批次记录创建时间
 ```
 
-一组相同业务周期的采集任务。最终阶段必须在同一事务中写完全部任务并填写plan_version、expected_task_count和planning_completed_at；只有实际任务数与预期相等且全部终态后才能关闭。批次关闭后不可重新打开，补采必须创建新的REPAIR批次。
+一组相同业务周期的采集任务。最终阶段必须在同一事务中写完全部任务并填写plan_version、expected_task_count和planning_completed_at；只有实际任务数与预期相等且全部终态后才能关闭。批次关闭后不可重新打开，补采必须创建新的REPAIR批次。加工规划器只领取 `processing_plan_version` 与当前目录指纹不同的关闭批次，每批次独立提交，完整解析且不存在等待活动上游发布的依赖后才更新水位；升级前的历史关闭批次保留空水位并由限量队列重新验证。`idx_collection_batch_processing_plan (processing_plan_version ASC NULLS FIRST, closed_at DESC NULLS LAST, batch_id) WHERE status = 'CLOSED'` 服务增量领取，空水位和最近关闭批次优先，避免新任务被历史积压阻塞。
 
 ## collection_task
 
@@ -33,6 +35,7 @@ status varchar(20) not null check (status in ('PENDING','RUNNING','SUCCESS','EMP
 attempt_count integer not null default 0 -- 已执行的尝试次数
 max_attempts integer not null -- 允许的最大尝试次数
 next_retry_at timestamptz null -- 下次允许重试的时间
+execution_token uuid null -- 当前 RUNNING 尝试的唯一执行租约；离开 RUNNING 时清空
 request_count integer not null default 0 -- 实际接口请求次数，包含分页请求
 row_count integer null -- 接口返回并合并后的总行数
 started_at timestamptz null -- 本次任务开始时间
@@ -43,7 +46,7 @@ warning_message text null -- 采集结果有效但存在历史范围缺口等可
 unique (batch_id, api_name, scope_key) -- 同一批次内接口和调用范围唯一
 ```
 
-一个任务只对应一个接口和一个确定范围。scope_key用于表达交易日、股票批次、指数代码或概念代码，避免重复调度。`warning_message` 不改变成功状态，数据缺口告警可据此展示并继续保留发布资格。普通运行记录分页不计算恢复状态，只执行基础合并、计数、排序和分页；只有“未恢复失败任务”筛选需要判断失败任务是否已被同接口、同范围的后续成功或活动任务恢复。常规范围与 `dc_concept_cons` 的按业务日兼容查询必须拆为独立 `EXISTS`，不能在索引列上合并为 `OR`。`idx_collection_task_recovery (api_name, scope_key, finished_at) WHERE status IN ('SUCCESS','EMPTY_VALID')` 为常规恢复筛选提供直接访问路径。
+一个任务只对应一个接口和一个确定范围。scope_key用于表达交易日、股票批次、指数代码或概念代码，避免重复调度。每次领取都生成新的 `execution_token`；完成、失败和恢复操作必须在行锁内同时匹配 `RUNNING` 与该 token，旧 worker 在超时回收后返回时只能得到当前状态，不能登记资产或覆盖新执行。原始资产路径包含 execution token，避免两个执行代次写入同一个最终文件。`warning_message` 不改变成功状态，数据缺口告警可据此展示并继续保留发布资格。普通运行记录分页不计算恢复状态，只执行基础合并、计数、排序和分页；只有“未恢复失败任务”筛选需要判断失败任务是否已被同 `provider + api_name + scope_key` 的后续成功或活动任务恢复。接口计划变化时必须重新生成当前范围任务并覆盖，不能用业务日等模糊条件兼容旧任务身份。`idx_collection_task_recovery (api_name, scope_key, finished_at) WHERE status IN ('SUCCESS','EMPTY_VALID')` 为恢复筛选提供直接访问路径。
 
 ## raw_data_asset
 
@@ -79,6 +82,7 @@ priority smallint not null -- 调度优先级；数值越小越优先
 attempt_count integer not null default 0 -- 已执行的尝试次数
 max_attempts integer not null default 3 -- 允许的最大尝试次数，可由DatasetSpec覆盖
 next_retry_at timestamptz null -- 下次允许重试的时间
+execution_token uuid null -- 当前 RUNNING 尝试的唯一执行租约；离开 RUNNING 时清空
 queued_at timestamptz null -- 依赖就绪并进入加工队列的时间
 started_at timestamptz null -- 加工开始时间
 finished_at timestamptz null -- 加工结束时间
@@ -89,7 +93,7 @@ error_message text null -- 加工失败或阻塞的错误说明
 warning_message text null -- 加工成功但存在可接受数据质量问题时的警告说明
 ```
 
-消费一个或多个原始资产并生成正式数据。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。失败是否已经恢复，优先按 `dataset_release` 主键 `(dataset_name, scope_type, scope_key)` 精确查找当前发布；尚未发布时再按同数据集、同发布范围查找活动加工任务。`idx_processing_active_recovery (output_dataset, business_date) INCLUDE (source_batch_id, queued_at, started_at)` 仅覆盖活动状态，为后一个判断提供访问路径。全局加工入口并发数固定为1，但采集任务可以在Tushare额度内并行。
+消费一个或多个原始资产并生成正式数据。每次领取都生成新的 `execution_token`，正式表写入、发布切换和失败回写前必须在行锁内确认 token 仍属于当前 `RUNNING`；超时恢复会清空旧 token，防止旧 worker 在新尝试开始后重复发布或覆盖状态。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。失败是否已经恢复，优先按 `dataset_release` 主键 `(dataset_name, scope_type, scope_key)` 精确查找当前发布；尚未发布时再按同数据集、同发布范围查找活动加工任务。`idx_processing_active_recovery (output_dataset, business_date) INCLUDE (source_batch_id, queued_at, started_at)` 仅覆盖活动状态，为后一个判断提供访问路径。加工入口并发上限由 `PROCESSING_MAX_WORKERS` 控制，默认 3；DATE 数据集同一输出数据集的不同业务日期可以并行，其他发布范围仍按输出数据集互斥。
 
 ## processing_dependency
 
@@ -168,6 +172,8 @@ finished_at timestamptz null
 duration_ms integer null
 error_message varchar(2000) null
 created_at timestamptz not null
+unique (job_id) where status = 'RUNNING'
+unique (job_id) where status = 'PENDING'
 ```
 
-记录可管理调度任务的实际执行结果。人工命令先写入 `PENDING`，由 Scheduler 领取并执行；定时和启动补偿直接创建 `RUNNING` 记录，结束后写入耗时与失败原因。`job_id, created_at` 索引服务最近结果和历史分页，`PENDING` 部分索引服务人工执行队列。终态执行记录默认保留 30 天，由每日维护任务清理；保留天数可配置，`PENDING` 和 `RUNNING` 记录不参与清理。
+记录可管理调度任务的实际执行结果。人工命令先写入 `PENDING`，由 Scheduler 领取并执行；定时和启动补偿直接创建 `RUNNING` 记录，结束后写入耗时与失败原因。同一 `job_id` 的定时、人工和启动补偿共用会话级 advisory lock，数据库唯一部分索引再保证最多一条 `RUNNING` 和一条 `PENDING`。Scheduler 获得单例锁后先完整锁定并把上次进程遗留的 `RUNNING` 收口为 `FAILED`，保留 `PENDING` 等待后续派发。运行时人工派发按顺序尝试全部 `PENDING`，真实忙 Job 因 advisory lock 获取失败而被跳过；一旦取得 Job 锁，先收口该 Job 遗留的 `RUNNING` 再执行新请求，使结果回写失败也能在下一轮自愈。`job_id, created_at` 索引服务最近结果和历史分页，`PENDING` 部分索引服务人工执行队列。终态执行记录默认保留 30 天，由每日维护任务清理；保留天数可配置，`PENDING` 和 `RUNNING` 记录不参与清理。

@@ -1,14 +1,20 @@
+import json
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
-from uuid import UUID, uuid5
+from hashlib import sha256
+from uuid import UUID, uuid4, uuid5
 
 import structlog
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, aliased
 
 from app.catalog import DatasetSpec, DependencyKind, ReleaseScope
-from app.catalog.datasets import STOCK_DAILY_CORE_DATASET, STOCK_DAILY_LIMIT_DATASET
+from app.catalog.datasets import (
+    ALL_DATASET_SPECS,
+    STOCK_DAILY_CORE_DATASET,
+    STOCK_DAILY_LIMIT_DATASET,
+)
 from app.common.errors import (
     UNKNOWN_STOCKS_ERROR_PREFIX,
     ProcessingError,
@@ -54,6 +60,9 @@ PROCESSING_TERMINAL_STATUSES = frozenset(
     }
 )
 STOCK_DAILY_CONFLICT_DATASETS = frozenset({"stock_daily.core", "stock_daily.limit"})
+DATE_SCOPED_DATASETS = frozenset(
+    spec.dataset_name for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
+)
 STOCK_DAILY_BLOCKING_CORE_STATUSES = (
     ProcessingTaskStatus.QUEUED.value,
     ProcessingTaskStatus.RUNNING.value,
@@ -77,91 +86,175 @@ class ProcessingRepository:
         *,
         now: datetime,
         source_batch_ids: Sequence[UUID] | None = None,
+        max_batches: int = 100,
     ) -> ProcessingPlanResult:
+        if max_batches < 1:
+            raise ValueError("max_batches must be positive")
+        if source_batch_ids is not None and not source_batch_ids:
+            return ProcessingPlanResult(0, 0, 0, 0)
+
+        plan_version = _processing_plan_version(dataset_specs)
         scanned_batch_count = 0
         created_task_count = 0
         queued_task_count = 0
         blocked_task_count = 0
-        with self._session_factory() as session, session.begin():
-            specs_by_dataset = {spec.dataset_name: spec for spec in dataset_specs}
-            batch_statement = select(CollectionBatch).where(
-                CollectionBatch.status == BatchStatus.CLOSED.value
-            )
-            if source_batch_ids is not None:
-                if not source_batch_ids:
-                    return ProcessingPlanResult(0, 0, 0, 0)
-                batch_statement = batch_statement.where(
-                    CollectionBatch.batch_id.in_(source_batch_ids)
+        specs_by_dataset = {spec.dataset_name: spec for spec in dataset_specs}
+        requested_batch_ids = (
+            tuple(dict.fromkeys(source_batch_ids)) if source_batch_ids is not None else None
+        )
+        attempted_batch_ids: set[UUID] = set()
+        iterations = len(requested_batch_ids) if requested_batch_ids is not None else max_batches
+        for index in range(iterations):
+            with self._session_factory() as session, session.begin():
+                batch_statement = select(CollectionBatch).where(
+                    CollectionBatch.status == BatchStatus.CLOSED.value
                 )
-            batches = session.scalars(
-                batch_statement.order_by(CollectionBatch.closed_at, CollectionBatch.batch_id)
-            ).all()
-            for batch in batches:
+                if requested_batch_ids is not None:
+                    batch_statement = batch_statement.where(
+                        CollectionBatch.batch_id == requested_batch_ids[index]
+                    )
+                else:
+                    batch_statement = batch_statement.where(
+                        or_(
+                            CollectionBatch.processing_plan_version.is_(None),
+                            CollectionBatch.processing_plan_version < plan_version,
+                            CollectionBatch.processing_plan_version > plan_version,
+                        )
+                    )
+                    if attempted_batch_ids:
+                        batch_statement = batch_statement.where(
+                            CollectionBatch.batch_id.not_in(attempted_batch_ids)
+                        )
+                batch = session.scalar(
+                    batch_statement.order_by(
+                        CollectionBatch.processing_plan_version.asc().nullsfirst(),
+                        CollectionBatch.closed_at.desc().nullslast(),
+                        CollectionBatch.batch_id,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(1)
+                )
+                if batch is None:
+                    if requested_batch_ids is None:
+                        break
+                    continue
                 scanned_batch_count += 1
-                batch_api_names = set(
-                    session.scalars(
-                        select(CollectionTask.api_name)
-                        .where(CollectionTask.batch_id == batch.batch_id)
-                        .distinct()
-                    )
+                attempted_batch_ids.add(batch.batch_id)
+                created, queued, blocked, complete = self._plan_closed_batch(
+                    session,
+                    batch=batch,
+                    dataset_specs=dataset_specs,
+                    specs_by_dataset=specs_by_dataset,
+                    now=now,
                 )
-                eligible_specs = _affected_dataset_specs(dataset_specs, batch_api_names)
-                planned_tasks: list[tuple[DatasetSpec, UUID]] = []
-                created_for_batch = False
-                for spec in eligible_specs:
-                    if not (
-                        _raw_dependency_names(spec) & batch_api_names
-                    ) and not self._has_all_raw_dependencies(
-                        session,
-                        source_batch=batch,
-                        spec=spec,
-                    ):
-                        continue
-                    process_id, created = self._upsert_processing_task(
-                        session,
-                        batch=batch,
-                        spec=spec,
-                    )
-                    created_task_count += int(created)
-                    created_for_batch = created_for_batch or created
-                    planned_tasks.append((spec, process_id))
-
-                if created_for_batch and batch.business_date is not None:
-                    ensure_monthly_partitions(
-                        session.connection(),
-                        reference_date=batch.business_date,
-                        months_ahead=0,
-                    )
-
-                for spec, process_id in planned_tasks:
-                    task = session.scalar(
-                        select(ProcessingTask)
-                        .where(ProcessingTask.process_id == process_id)
-                        .with_for_update()
-                    )
-                    if task is None or task.status in PROCESSING_TERMINAL_STATUSES:
-                        continue
-                    if task.status in {
-                        ProcessingTaskStatus.RUNNING.value,
-                        ProcessingTaskStatus.RETRY_WAIT.value,
-                    }:
-                        continue
-                    self._resolve_dependencies(
-                        session,
-                        task=task,
-                        spec=spec,
-                        source_batch=batch,
-                        specs_by_dataset=specs_by_dataset,
-                    )
-                    status = self._refresh_task_readiness(session, task, now=now)
-                    queued_task_count += int(status == ProcessingTaskStatus.QUEUED)
-                    blocked_task_count += int(status == ProcessingTaskStatus.BLOCKED)
+                created_task_count += created
+                queued_task_count += queued
+                blocked_task_count += blocked
+                if complete and requested_batch_ids is None:
+                    batch.processing_plan_version = plan_version
+                    batch.processing_planned_at = now
 
         return ProcessingPlanResult(
             scanned_batch_count=scanned_batch_count,
             created_task_count=created_task_count,
             queued_task_count=queued_task_count,
             blocked_task_count=blocked_task_count,
+        )
+
+    def _plan_closed_batch(
+        self,
+        session: Session,
+        *,
+        batch: CollectionBatch,
+        dataset_specs: Sequence[DatasetSpec],
+        specs_by_dataset: dict[str, DatasetSpec],
+        now: datetime,
+    ) -> tuple[int, int, int, bool]:
+        batch_api_names = set(
+            session.scalars(
+                select(CollectionTask.api_name)
+                .where(CollectionTask.batch_id == batch.batch_id)
+                .distinct()
+            )
+        )
+        planned_specs: dict[UUID, DatasetSpec] = {}
+        created_task_count = 0
+        for spec in _affected_dataset_specs(dataset_specs, batch_api_names):
+            if not (_raw_dependency_names(spec) & batch_api_names) and not (
+                self._has_all_raw_dependencies(session, source_batch=batch, spec=spec)
+            ):
+                continue
+            process_id, created = self._upsert_processing_task(
+                session,
+                batch=batch,
+                spec=spec,
+            )
+            created_task_count += int(created)
+            planned_specs[process_id] = spec
+
+        if created_task_count and batch.business_date is not None:
+            ensure_monthly_partitions(
+                session.connection(),
+                reference_date=batch.business_date,
+                months_ahead=0,
+            )
+        if not planned_specs:
+            return created_task_count, 0, 0, True
+
+        replannable = (
+            ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+            ProcessingTaskStatus.BLOCKED.value,
+        )
+        candidate_ids = tuple(
+            session.scalars(
+                select(ProcessingTask.process_id).where(
+                    ProcessingTask.process_id.in_(tuple(planned_specs)),
+                    ProcessingTask.status.in_(replannable),
+                )
+            )
+        )
+        tasks = tuple(
+            session.scalars(
+                select(ProcessingTask)
+                .where(
+                    ProcessingTask.process_id.in_(candidate_ids),
+                    ProcessingTask.status.in_(replannable),
+                )
+                .order_by(ProcessingTask.process_id)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        queued_task_count = 0
+        blocked_task_count = 0
+        for task in tasks:
+            self._resolve_dependencies(
+                session,
+                task=task,
+                spec=planned_specs[task.process_id],
+                source_batch=batch,
+                specs_by_dataset=specs_by_dataset,
+            )
+            status = self._refresh_task_readiness(session, task, now=now)
+            queued_task_count += int(status == ProcessingTaskStatus.QUEUED)
+            blocked_task_count += int(status == ProcessingTaskStatus.BLOCKED)
+        locked_task_ids = tuple(task.process_id for task in tasks)
+        waiting_dataset_dependency = bool(
+            locked_task_ids
+            and session.scalar(
+                select(func.count())
+                .select_from(ProcessingDependency)
+                .where(
+                    ProcessingDependency.process_id.in_(locked_task_ids),
+                    ProcessingDependency.dependency_type == DependencyType.DATASET_RELEASE.value,
+                    ProcessingDependency.status == DependencyStatus.WAITING.value,
+                )
+            )
+        )
+        return (
+            created_task_count,
+            queued_task_count,
+            blocked_task_count,
+            len(tasks) == len(candidate_ids) and not waiting_dataset_dependency,
         )
 
     def _has_all_raw_dependencies(
@@ -211,8 +304,20 @@ class ProcessingRepository:
             )
             if int(running_count or 0) >= max_running_tasks:
                 return None
-            running_datasets = select(ProcessingTask.output_dataset).where(
-                ProcessingTask.status == ProcessingTaskStatus.RUNNING.value
+            active_running = aliased(ProcessingTask)
+            running_scope_conflict = (
+                select(active_running.process_id)
+                .where(
+                    active_running.status == ProcessingTaskStatus.RUNNING.value,
+                    active_running.output_dataset == ProcessingTask.output_dataset,
+                    or_(
+                        ProcessingTask.output_dataset.not_in(DATE_SCOPED_DATASETS),
+                        active_running.business_date.is_not_distinct_from(
+                            ProcessingTask.business_date
+                        ),
+                    ),
+                )
+                .exists()
             )
             active_core = aliased(ProcessingTask)
             active_core_dates = select(active_core.business_date).where(
@@ -233,7 +338,7 @@ class ProcessingRepository:
                     & (ProcessingTask.next_retry_at.is_not(None))
                     & (ProcessingTask.next_retry_at <= now),
                 ),
-                ProcessingTask.output_dataset.not_in(running_datasets),
+                ~running_scope_conflict,
                 or_(
                     ProcessingTask.output_dataset != "stock_daily.limit",
                     ProcessingTask.business_date.not_in(active_core_dates),
@@ -260,6 +365,8 @@ class ProcessingRepository:
             task.status = ProcessingTaskStatus.RUNNING.value
             task.attempt_count += 1
             task.next_retry_at = None
+            execution_token = uuid4()
+            task.execution_token = execution_token
             task.started_at = now
             task.finished_at = None
             task.error_message = None
@@ -273,6 +380,7 @@ class ProcessingRepository:
                 output_version=task.output_version,
                 attempt_count=task.attempt_count,
                 max_attempts=task.max_attempts,
+                execution_token=execution_token,
             )
 
     def raw_dependencies(self, process_id: UUID) -> tuple[RawDependencyAsset, ...]:
@@ -327,8 +435,17 @@ class ProcessingRepository:
                 .where(ProcessingTask.process_id == task.process_id)
                 .with_for_update()
             )
-            if process is None or process.status != ProcessingTaskStatus.RUNNING.value:
-                raise RuntimeError("processing task is not in RUNNING state")
+            if process is None:
+                raise RuntimeError("unknown processing task")
+            if (
+                process.status != ProcessingTaskStatus.RUNNING.value
+                or process.execution_token != task.execution_token
+            ):
+                return ProcessingTransition(
+                    task.process_id,
+                    ProcessingTaskStatus(process.status),
+                    process.next_retry_at,
+                )
             expected_process_type = f"{spec.processor}@{spec.processor_version}"
             if (
                 spec.dataset_name in STOCK_DAILY_CONFLICT_DATASETS
@@ -384,6 +501,7 @@ class ProcessingRepository:
             process.status = ProcessingTaskStatus.SUCCESS.value
             process.finished_at = published_at
             process.next_retry_at = None
+            process.execution_token = None
             process.rows_read = rows_read
             process.rows_rejected = rows_rejected + publication.rows_rejected
             process.rows_written = rows_written
@@ -690,6 +808,7 @@ class ProcessingRepository:
                 ProcessingTask.process_id != keep_process_id,
                 ProcessingTask.status.not_in(PROCESSING_TERMINAL_STATUSES),
             )
+            .order_by(ProcessingTask.process_id)
             .with_for_update()
         ).all()
         for task in tasks:
@@ -872,7 +991,7 @@ class ProcessingRepository:
                 ProcessingTask.error_message.like(f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"),
                 ProcessingTask.finished_at >= now - timedelta(days=30),
             )
-            .order_by(ProcessingTask.finished_at, ProcessingTask.process_id)
+            .order_by(ProcessingTask.process_id)
             .with_for_update(skip_locked=True)
         ).all()
         parsed = {
@@ -890,6 +1009,12 @@ class ProcessingRepository:
         dependencies = session.scalars(
             select(ProcessingDependency)
             .where(ProcessingDependency.process_id.in_(tuple(parsed)))
+            .order_by(
+                ProcessingDependency.process_id,
+                ProcessingDependency.dependency_type,
+                ProcessingDependency.dependency_name,
+                ProcessingDependency.dependency_scope_key,
+            )
             .with_for_update()
         ).all()
         dependencies_by_process: dict[UUID, list[ProcessingDependency]] = {}
@@ -922,6 +1047,7 @@ class ProcessingRepository:
             task.status = ProcessingTaskStatus.QUEUED.value
             task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
             task.next_retry_at = None
+            task.execution_token = None
             task.queued_at = now
             task.started_at = None
             task.finished_at = None
@@ -1001,6 +1127,15 @@ class ProcessingRepository:
             )
             if process is None:
                 raise RuntimeError("unknown processing task")
+            if (
+                process.status != ProcessingTaskStatus.RUNNING.value
+                or process.execution_token != task.execution_token
+            ):
+                return ProcessingTransition(
+                    task.process_id,
+                    ProcessingTaskStatus(process.status),
+                    process.next_retry_at,
+                )
             retry_at = None
             if retryable and process.attempt_count < process.max_attempts:
                 retry_at = now + timedelta(seconds=min(30 * 2 ** (process.attempt_count - 1), 900))
@@ -1009,6 +1144,7 @@ class ProcessingRepository:
                 status = ProcessingTaskStatus.FAILED
             process.status = status.value
             process.next_retry_at = retry_at
+            process.execution_token = None
             process.finished_at = now if status == ProcessingTaskStatus.FAILED else None
             process.error_message = message
             if status == ProcessingTaskStatus.FAILED:
@@ -1030,11 +1166,14 @@ class ProcessingRepository:
                     ProcessingTask.started_at.is_not(None),
                     ProcessingTask.started_at < started_before,
                 )
-            tasks = session.scalars(statement.with_for_update(skip_locked=True)).all()
+            tasks = session.scalars(
+                statement.order_by(ProcessingTask.process_id).with_for_update(skip_locked=True)
+            ).all()
             for task in tasks:
                 task.status = ProcessingTaskStatus.RETRY_WAIT.value
                 task.attempt_count = max(task.attempt_count - 1, 0)
                 task.next_retry_at = now
+                task.execution_token = None
                 task.started_at = None
                 task.finished_at = None
                 task.error_message = "scheduler stopped while processing task was running"
@@ -1335,15 +1474,18 @@ class ProcessingRepository:
         )
         if statuses and all(item == DependencyStatus.READY.value for item in statuses):
             task.status = ProcessingTaskStatus.QUEUED.value
+            task.execution_token = None
             task.queued_at = task.queued_at or now
             task.error_message = None
             return ProcessingTaskStatus.QUEUED
         unavailable = {DependencyStatus.MISSING.value, DependencyStatus.FAILED.value}
         if any(item in unavailable for item in statuses):
             task.status = ProcessingTaskStatus.BLOCKED.value
+            task.execution_token = None
             task.error_message = "one or more required dependencies are unavailable"
             return ProcessingTaskStatus.BLOCKED
         task.status = ProcessingTaskStatus.WAITING_DEPENDENCY.value
+        task.execution_token = None
         return ProcessingTaskStatus.WAITING_DEPENDENCY
 
     def _resolve_downstream_after_success(
@@ -1352,23 +1494,47 @@ class ProcessingRepository:
         process_id: UUID,
         now: datetime,
     ) -> None:
-        dependencies = session.scalars(
-            select(ProcessingDependency)
-            .where(ProcessingDependency.resolved_release_process_id == process_id)
-            .with_for_update()
-        ).all()
-        dependent_ids = set()
+        dependent_ids = tuple(
+            session.scalars(
+                select(ProcessingDependency.process_id)
+                .where(ProcessingDependency.resolved_release_process_id == process_id)
+                .distinct()
+                .order_by(ProcessingDependency.process_id)
+            )
+        )
+        if not dependent_ids:
+            return
+        tasks = tuple(
+            session.scalars(
+                select(ProcessingTask)
+                .where(ProcessingTask.process_id.in_(dependent_ids))
+                .order_by(ProcessingTask.process_id)
+                .with_for_update()
+            )
+        )
+        dependencies = tuple(
+            session.scalars(
+                select(ProcessingDependency)
+                .where(
+                    ProcessingDependency.resolved_release_process_id == process_id,
+                    ProcessingDependency.process_id.in_(dependent_ids),
+                )
+                .order_by(
+                    ProcessingDependency.process_id,
+                    ProcessingDependency.dependency_type,
+                    ProcessingDependency.dependency_name,
+                    ProcessingDependency.dependency_scope_key,
+                )
+                .with_for_update()
+            )
+        )
         for dependency in dependencies:
             dependency.status = DependencyStatus.READY.value
             dependency.blocked_reason = None
-            dependent_ids.add(dependency.process_id)
         session.flush()
-        for dependent_id in dependent_ids:
-            task = session.get(ProcessingTask, dependent_id)
-            if (
-                task is not None
-                and task.status not in PROCESSING_TERMINAL_STATUSES
-                and task.status != ProcessingTaskStatus.RUNNING.value
+        for task in tasks:
+            if task.status not in PROCESSING_TERMINAL_STATUSES and (
+                task.status != ProcessingTaskStatus.RUNNING.value
             ):
                 self._refresh_task_readiness(session, task, now=now)
 
@@ -1378,25 +1544,48 @@ class ProcessingRepository:
         process_id: UUID,
         message: str,
     ) -> None:
-        dependencies = session.scalars(
-            select(ProcessingDependency)
-            .where(ProcessingDependency.resolved_release_process_id == process_id)
-            .with_for_update()
-        ).all()
+        dependent_ids = tuple(
+            session.scalars(
+                select(ProcessingDependency.process_id)
+                .where(ProcessingDependency.resolved_release_process_id == process_id)
+                .distinct()
+                .order_by(ProcessingDependency.process_id)
+            )
+        )
+        if not dependent_ids:
+            return
+        tasks = tuple(
+            session.scalars(
+                select(ProcessingTask)
+                .where(ProcessingTask.process_id.in_(dependent_ids))
+                .order_by(ProcessingTask.process_id)
+                .with_for_update()
+            )
+        )
+        dependencies = tuple(
+            session.scalars(
+                select(ProcessingDependency)
+                .where(
+                    ProcessingDependency.resolved_release_process_id == process_id,
+                    ProcessingDependency.process_id.in_(dependent_ids),
+                )
+                .order_by(
+                    ProcessingDependency.process_id,
+                    ProcessingDependency.dependency_type,
+                    ProcessingDependency.dependency_name,
+                    ProcessingDependency.dependency_scope_key,
+                )
+                .with_for_update()
+            )
+        )
         for dependency in dependencies:
             dependency.status = DependencyStatus.FAILED.value
             dependency.blocked_reason = message
-            session.execute(
-                update(ProcessingTask)
-                .where(
-                    ProcessingTask.process_id == dependency.process_id,
-                    ProcessingTask.status.not_in(PROCESSING_TERMINAL_STATUSES),
-                )
-                .values(
-                    status=ProcessingTaskStatus.BLOCKED.value,
-                    error_message=f"upstream processing failed: {message}",
-                )
-            )
+        for task in tasks:
+            if task.status not in PROCESSING_TERMINAL_STATUSES:
+                task.status = ProcessingTaskStatus.BLOCKED.value
+                task.execution_token = None
+                task.error_message = f"upstream processing failed: {message}"
 
 
 def _lock_publication_scope(
@@ -1412,6 +1601,45 @@ def _lock_publication_scope(
         {"lock_key": f"stock_daily:{business_date.isoformat()}"},
     )
     return True
+
+
+def _processing_plan_version(dataset_specs: Sequence[DatasetSpec]) -> str:
+    payload = [
+        {
+            "dataset_name": spec.dataset_name,
+            "processor": spec.processor,
+            "processor_version": spec.processor_version,
+            "dependencies": [
+                {
+                    "kind": dependency.kind.value,
+                    "name": dependency.name,
+                    "scope": dependency.scope.value,
+                    "triggers_recompute": dependency.triggers_recompute,
+                    "merge_previous_scopes": dependency.merge_previous_scopes,
+                }
+                for dependency in spec.dependencies
+            ],
+            "write_strategy": spec.write_strategy.value,
+            "release_scope": spec.release_scope.value,
+            "quality_rules": [
+                {
+                    "name": rule.name,
+                    "parameters": dict(rule.parameters),
+                }
+                for rule in spec.quality_rules
+            ],
+            "max_attempts": spec.max_attempts,
+        }
+        for spec in sorted(dataset_specs, key=lambda item: item.dataset_name)
+    ]
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode()
+    return sha256(encoded).hexdigest()
 
 
 def _processing_identity(batch: CollectionBatch, spec: DatasetSpec) -> tuple[UUID, UUID]:
@@ -1502,6 +1730,7 @@ def _processing_task_generation_key(task: ProcessingTask) -> tuple[str, int, str
 def _cancel_superseded_processing_task(task: ProcessingTask, *, now: datetime) -> None:
     task.status = ProcessingTaskStatus.CANCELLED.value
     task.next_retry_at = None
+    task.execution_token = None
     task.finished_at = now
     task.error_message = "superseded by a newer stock_daily.core publication"
 

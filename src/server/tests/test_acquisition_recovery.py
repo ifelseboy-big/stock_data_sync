@@ -41,13 +41,13 @@ class FakeRepository:
         self.completed = True
         return TaskTransition(task.task_id, CollectionTaskStatus.SUCCESS, None)
 
-    def fail_task(self, task_id: Any, **values: Any) -> TaskTransition:
+    def fail_task(self, task: Any, **values: Any) -> TaskTransition:
         self.failed = True
-        return TaskTransition(task_id, CollectionTaskStatus.RETRY_WAIT, values["retry_at"])
+        return TaskTransition(task.task_id, CollectionTaskStatus.RETRY_WAIT, values["retry_at"])
 
-    def recover_interrupted_task(self, task_id: Any, **values: Any) -> TaskTransition:
+    def recover_interrupted_task(self, task: Any, **values: Any) -> TaskTransition:
         self.recovered = True
-        return TaskTransition(task_id, CollectionTaskStatus.RETRY_WAIT, values["now"])
+        return TaskTransition(task.task_id, CollectionTaskStatus.RETRY_WAIT, values["now"])
 
     def mark_asset_missing(self, task_id: Any, **values: Any) -> None:
         raise AssertionError("no registered asset should be checked in this test")
@@ -81,6 +81,7 @@ def _task() -> RunningTaskSnapshot:
         attempt_count=1,
         max_attempts=3,
         started_at=datetime(2026, 7, 17, 9, 0, tzinfo=TIMEZONE),
+        execution_token=uuid4(),
     )
 
 
@@ -95,6 +96,7 @@ def test_startup_recovery_registers_sealed_orphan_without_refetch(tmp_path: Path
             business_date=task.business_date,
             batch_id=task.batch_id,
             task_id=task.task_id,
+            execution_token=task.execution_token,
         ),
         SCHEMA,
         (),
@@ -129,6 +131,7 @@ def test_startup_recovery_requeues_an_interrupted_final_attempt(tmp_path: Path) 
         attempt_count=task.max_attempts,
         max_attempts=task.max_attempts,
         started_at=task.started_at,
+        execution_token=task.execution_token,
     )
     repository = FakeRepository(task)
     registry = SpecRegistry[ApiSpec](lambda item: item.api_name)

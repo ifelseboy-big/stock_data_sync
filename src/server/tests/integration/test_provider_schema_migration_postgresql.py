@@ -26,9 +26,7 @@ def migration_database() -> Iterator[tuple[Engine, str]]:
     with admin_engine.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
 
-    url = make_url(settings.database_url).update_query_dict(
-        {"options": f"-csearch_path={schema}"}
-    )
+    url = make_url(settings.database_url).update_query_dict({"options": f"-csearch_path={schema}"})
     database_url = url.render_as_string(hide_password=False).replace("%3D", "=")
     migration_engine = create_engine(database_url)
     try:
@@ -122,6 +120,39 @@ def _assert_runtime_recovery_indexes(engine: Engine) -> None:
                 """
             )
         )
+        processing_plan_index = connection.scalar(
+            text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'collection_batch'
+                  AND indexname = 'idx_collection_batch_processing_plan'
+                """
+            )
+        )
+        scheduler_running_index = connection.scalar(
+            text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'scheduled_job_execution'
+                  AND indexname = 'uq_scheduled_job_execution_running'
+                """
+            )
+        )
+        scheduler_pending_index = connection.scalar(
+            text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'scheduled_job_execution'
+                  AND indexname = 'uq_scheduled_job_execution_pending_job'
+                """
+            )
+        )
     assert processing_index is not None
     assert "(output_dataset, business_date)" in processing_index
     assert "INCLUDE (source_batch_id, queued_at, started_at)" in processing_index
@@ -131,6 +162,25 @@ def _assert_runtime_recovery_indexes(engine: Engine) -> None:
     assert "CASE" in collection_claim_index
     assert "business_date" in collection_claim_index
     assert "PENDING" in collection_claim_index
+    assert processing_plan_index is not None
+    assert "processing_plan_version" in processing_plan_index
+    assert "CLOSED" in processing_plan_index
+    assert scheduler_running_index is not None
+    assert "UNIQUE INDEX" in scheduler_running_index
+    assert "RUNNING" in scheduler_running_index
+    assert scheduler_pending_index is not None
+    assert "UNIQUE INDEX" in scheduler_pending_index
+    assert "PENDING" in scheduler_pending_index
+    collection_columns = {
+        column["name"] for column in inspect(engine).get_columns("collection_batch")
+    }
+    assert {"processing_plan_version", "processing_planned_at"} <= collection_columns
+    assert "execution_token" in {
+        column["name"] for column in inspect(engine).get_columns("collection_task")
+    }
+    assert "execution_token" in {
+        column["name"] for column in inspect(engine).get_columns("processing_task")
+    }
 
 
 def test_old_schema_upgrades_without_losing_rows(
@@ -142,9 +192,11 @@ def test_old_schema_upgrades_without_losing_rows(
     _alembic(database_url, "upgrade", "head")
 
     inspector = inspect(engine)
-    assert inspector.get_pk_constraint("ths_board_moneyflow_daily")[
-        "constrained_columns"
-    ] == ["board_type", "board_name", "trade_date"]
+    assert inspector.get_pk_constraint("ths_board_moneyflow_daily")["constrained_columns"] == [
+        "board_type",
+        "board_name",
+        "trade_date",
+    ]
     assert next(
         column
         for column in inspector.get_columns("ths_board_moneyflow_daily")
@@ -161,7 +213,7 @@ def test_old_schema_upgrades_without_losing_rows(
 
     with engine.begin() as connection:
         assert connection.scalar(text("SELECT COUNT(*) FROM ths_board_moneyflow_daily")) == 1
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260722_0013"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260722_0014"
         connection.execute(
             text(
                 """
@@ -195,7 +247,7 @@ def test_empty_schema_upgrades_to_current_runtime_structure(
 
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "20260722_0013"
+            "20260722_0014"
         )
     _assert_runtime_recovery_indexes(engine)
 
@@ -273,5 +325,138 @@ def test_already_compatible_v020_schema_is_only_stamped(
     _alembic(database_url, "upgrade", "head")
 
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260722_0013"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260722_0014"
         assert connection.scalar(text("SELECT COUNT(*) FROM ths_board_moneyflow_daily")) == 1
+
+
+def test_scheduler_upgrade_recovers_interrupted_execution(
+    migration_database: tuple[Engine, str],
+) -> None:
+    engine, database_url = migration_database
+    _alembic(database_url, "upgrade", "20260722_0013")
+    execution_id = uuid4()
+    duplicate_running_id = uuid4()
+    pending_ids = (uuid4(), uuid4())
+    batch_id = uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO scheduled_job_execution (
+                    execution_id, job_id, trigger_type, status,
+                    scheduled_at, started_at, created_at
+                ) VALUES (
+                    :execution_id, 'plan-processing-tasks', 'SCHEDULED', 'RUNNING',
+                    now() - INTERVAL '2 minutes', now() - INTERVAL '2 minutes',
+                    now() - INTERVAL '2 minutes'
+                )
+                """
+            ),
+            {"execution_id": execution_id},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO scheduled_job_execution (
+                    execution_id, job_id, trigger_type, status,
+                    scheduled_at, started_at, created_at
+                ) VALUES (
+                    :execution_id, 'plan-processing-tasks', 'STARTUP_CATCHUP', 'RUNNING',
+                    now() - INTERVAL '1 minute', now() - INTERVAL '1 minute',
+                    now() - INTERVAL '1 minute'
+                )
+                """
+            ),
+            {"execution_id": duplicate_running_id},
+        )
+        for index, pending_id in enumerate(pending_ids):
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO scheduled_job_execution (
+                        execution_id, job_id, trigger_type, status,
+                        scheduled_at, created_at
+                    ) VALUES (
+                        :execution_id, 'close-collection-batches', 'MANUAL', 'PENDING',
+                        now(), now() + :offset * INTERVAL '1 second'
+                    )
+                    """
+                ),
+                {"execution_id": pending_id, "offset": index},
+            )
+        connection.execute(
+            text(
+                """
+                INSERT INTO collection_batch (
+                    batch_id, batch_type, business_date, status,
+                    scheduled_at, closed_at, created_at
+                ) VALUES (
+                    :batch_id, 'REPAIR', DATE '2099-01-04', 'CLOSED',
+                    now() - INTERVAL '11 minutes', now() - INTERVAL '10 minutes', now()
+                )
+                """
+            ),
+            {"batch_id": batch_id},
+        )
+
+    _alembic(database_url, "upgrade", "head")
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                """
+                SELECT status, finished_at, duration_ms, error_message
+                FROM scheduled_job_execution
+                WHERE execution_id = :execution_id
+                """
+            ),
+            {"execution_id": execution_id},
+        ).one()
+    assert row.status == "FAILED"
+    assert row.finished_at is not None
+    assert row.duration_ms >= 120_000
+    assert "stopped" in row.error_message
+    with engine.connect() as connection:
+        running_statuses = (
+            connection.execute(
+                text(
+                    """
+                SELECT status FROM scheduled_job_execution
+                WHERE execution_id IN (:first_id, :second_id)
+                ORDER BY execution_id
+                """
+                ),
+                {"first_id": execution_id, "second_id": duplicate_running_id},
+            )
+            .scalars()
+            .all()
+        )
+        pending_statuses = (
+            connection.execute(
+                text(
+                    """
+                SELECT status FROM scheduled_job_execution
+                WHERE execution_id IN (:first_id, :second_id)
+                ORDER BY created_at
+                """
+                ),
+                {"first_id": pending_ids[0], "second_id": pending_ids[1]},
+            )
+            .scalars()
+            .all()
+        )
+    assert running_statuses == ["FAILED", "FAILED"]
+    assert pending_statuses == ["PENDING", "FAILED"]
+    with engine.connect() as connection:
+        plan_row = connection.execute(
+            text(
+                """
+                SELECT processing_plan_version, processing_planned_at
+                FROM collection_batch
+                WHERE batch_id = :batch_id
+                """
+            ),
+            {"batch_id": batch_id},
+        ).one()
+    assert plan_row.processing_plan_version is None
+    assert plan_row.processing_planned_at is None

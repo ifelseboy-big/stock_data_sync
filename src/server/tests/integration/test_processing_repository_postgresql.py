@@ -44,6 +44,7 @@ from app.modules.processing.repository import (
     ProcessingRepository,
     _lock_publication_scope,
     _processing_output_version,
+    _processing_plan_version,
 )
 from app.modules.stocks.models import Stock
 from app.storage import RawAssetMetadata
@@ -149,6 +150,72 @@ def test_processing_claim_respects_worker_limit_and_dataset_mutex() -> None:
         session.execute(
             update(ProcessingTask)
             .where(ProcessingTask.process_id.in_((independent_id, shared_second_id)))
+            .values(status=ProcessingTaskStatus.SUCCESS.value, finished_at=now)
+        )
+
+
+def test_date_scoped_processing_uses_workers_across_business_dates() -> None:
+    now = datetime(2037, 2, 10, 8, tzinfo=TIMEZONE)
+    process_ids = tuple(uuid4() for _ in range(3))
+    batch_ids = tuple(uuid4() for _ in range(3))
+    dates = (now.date(), now.date() + timedelta(days=1), now.date())
+    with SyncSessionFactory() as session, session.begin():
+        session.add_all(
+            CollectionBatch(
+                batch_id=batch_id,
+                batch_type=BatchType.BACKFILL.value,
+                business_date=business_date,
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=now + timedelta(seconds=index),
+                closed_at=now,
+            )
+            for index, (batch_id, business_date) in enumerate(zip(batch_ids, dates, strict=True))
+        )
+        session.add_all(
+            ProcessingTask(
+                process_id=process_id,
+                source_batch_id=batch_id,
+                process_type="stock_technical_daily@1",
+                business_date=business_date,
+                output_dataset="stock_technical_daily",
+                output_version=uuid4(),
+                status=ProcessingTaskStatus.QUEUED.value,
+                priority=100 + index,
+                queued_at=now,
+            )
+            for index, (process_id, batch_id, business_date) in enumerate(
+                zip(process_ids, batch_ids, dates, strict=True)
+            )
+        )
+
+    repository = ProcessingRepository(SyncSessionFactory)
+    first = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_904,
+        max_running_tasks=3,
+        source_batch_ids=batch_ids,
+    )
+    second = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_904,
+        max_running_tasks=3,
+        source_batch_ids=batch_ids,
+    )
+    blocked_same_date = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_904,
+        max_running_tasks=3,
+        source_batch_ids=batch_ids,
+    )
+
+    assert first is not None and first.process_id == process_ids[0]
+    assert second is not None and second.process_id == process_ids[1]
+    assert blocked_same_date is None
+
+    with SyncSessionFactory() as session, session.begin():
+        session.execute(
+            update(ProcessingTask)
+            .where(ProcessingTask.process_id.in_(process_ids))
             .values(status=ProcessingTaskStatus.SUCCESS.value, finished_at=now)
         )
 
@@ -1499,6 +1566,345 @@ def test_unknown_stock_reconciliation_requests_only_one_newer_master_refresh() -
 
     assert after_newer_refresh.missing_codes == ("699998.SH",)
     assert after_newer_refresh.master_refresh_required is False
+
+
+def test_processing_planner_uses_bounded_catalog_watermark() -> None:
+    now = datetime(2042, 4, 1, 20, tzinfo=TIMEZONE)
+    suffix = uuid4().hex[:8]
+    raw_name = f"bounded_raw_{suffix}"
+    spec = _dataset(f"bounded_dataset_{suffix}", raw_name)
+    plan_version = _processing_plan_version((spec,))
+    batch_ids = (uuid4(), uuid4())
+    task_ids = (uuid4(), uuid4())
+    with SyncSessionFactory() as session, session.begin():
+        session.execute(
+            update(CollectionBatch)
+            .where(CollectionBatch.status == BatchStatus.CLOSED.value)
+            .values(processing_plan_version=plan_version, processing_planned_at=now)
+        )
+        for index, (batch_id, task_id) in enumerate(zip(batch_ids, task_ids, strict=True)):
+            business_date = now.date() + timedelta(days=index)
+            closed_at = now + timedelta(minutes=index)
+            session.add(
+                CollectionBatch(
+                    batch_id=batch_id,
+                    batch_type=BatchType.REPAIR.value,
+                    business_date=business_date,
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=closed_at - timedelta(minutes=1),
+                    closed_at=closed_at,
+                )
+            )
+            session.add(
+                CollectionTask(
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name=raw_name,
+                    scope_key=business_date.isoformat(),
+                    request_params={"trade_date": business_date.isoformat()},
+                    status=CollectionTaskStatus.SUCCESS.value,
+                    max_attempts=1,
+                    finished_at=closed_at,
+                )
+            )
+            session.add(
+                RawDataAsset(
+                    task_id=task_id,
+                    provider="TUSHARE",
+                    api_name=raw_name,
+                    business_date=business_date,
+                    request_params={"trade_date": business_date.isoformat()},
+                    storage_uri=f"file:///tmp/{task_id}.parquet",
+                    content_hash=f"{index + 1}" * 64,
+                    schema_fingerprint="a" * 64,
+                    row_count=1,
+                    is_complete=True,
+                    fetched_at=closed_at,
+                    sealed_at=closed_at,
+                )
+            )
+
+    repository = ProcessingRepository(SyncSessionFactory)
+    first = repository.plan_closed_batches((spec,), now=now, max_batches=1)
+    second = repository.plan_closed_batches((spec,), now=now + timedelta(minutes=1), max_batches=1)
+    complete = repository.plan_closed_batches(
+        (spec,), now=now + timedelta(minutes=2), max_batches=1
+    )
+
+    assert (first.scanned_batch_count, first.created_task_count) == (1, 1)
+    assert (second.scanned_batch_count, second.created_task_count) == (1, 1)
+    assert complete.scanned_batch_count == 0
+    with SyncSessionFactory() as session:
+        batches = tuple(
+            session.scalars(
+                select(CollectionBatch)
+                .where(CollectionBatch.batch_id.in_(batch_ids))
+                .order_by(CollectionBatch.batch_id)
+            )
+        )
+    assert all(batch.processing_plan_version == plan_version for batch in batches)
+    assert all(batch.processing_planned_at is not None for batch in batches)
+
+    with SyncSessionFactory() as session, session.begin():
+        session.execute(
+            update(CollectionBatch)
+            .where(CollectionBatch.batch_id.in_(batch_ids))
+            .values(processing_plan_version=None, processing_planned_at=None)
+        )
+        session.execute(
+            update(ProcessingTask)
+            .where(ProcessingTask.source_batch_id.in_(batch_ids))
+            .values(status=ProcessingTaskStatus.BLOCKED.value)
+        )
+        locked_process_id = session.scalar(
+            select(ProcessingTask.process_id).where(ProcessingTask.source_batch_id == batch_ids[1])
+        )
+    assert locked_process_id is not None
+    lock_ready = Event()
+    release_lock = Event()
+
+    def hold_newest_task_lock() -> None:
+        with SyncSessionFactory() as session, session.begin():
+            locked_task = session.scalar(
+                select(ProcessingTask)
+                .where(ProcessingTask.process_id == locked_process_id)
+                .with_for_update()
+            )
+            assert locked_task is not None
+            lock_ready.set()
+            assert release_lock.wait(timeout=10)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(hold_newest_task_lock)
+        assert lock_ready.wait(timeout=10)
+        try:
+            contended = repository.plan_closed_batches(
+                (spec,),
+                now=now + timedelta(minutes=3),
+                max_batches=2,
+            )
+        finally:
+            release_lock.set()
+        future.result(timeout=10)
+
+    assert contended.scanned_batch_count == 2
+    with SyncSessionFactory() as session:
+        watermarks = {
+            batch.batch_id: batch.processing_plan_version
+            for batch in session.scalars(
+                select(CollectionBatch).where(CollectionBatch.batch_id.in_(batch_ids))
+            )
+        }
+    assert watermarks[batch_ids[0]] == plan_version
+    assert watermarks[batch_ids[1]] is None
+
+
+def test_processing_watermark_waits_for_active_upstream_and_reconciles_missed_publish() -> None:
+    now = datetime(2042, 5, 1, 20, tzinfo=TIMEZONE)
+    suffix = uuid4().hex[:8]
+    upstream_raw = f"watermark_up_raw_{suffix}"
+    downstream_raw = f"watermark_down_raw_{suffix}"
+    upstream = _dataset(f"watermark_up_{suffix}", upstream_raw)
+    downstream = _dataset(
+        f"watermark_down_{suffix}",
+        downstream_raw,
+        DatasetDependencySpec(
+            DependencyKind.DATASET_RELEASE,
+            upstream.dataset_name,
+            ReleaseScope.DATE,
+        ),
+    )
+    specs = (downstream, upstream)
+    batch_id = uuid4()
+    task_ids = (uuid4(), uuid4())
+    with SyncSessionFactory() as session, session.begin():
+        session.add(
+            CollectionBatch(
+                batch_id=batch_id,
+                batch_type=BatchType.REPAIR.value,
+                business_date=now.date(),
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=now - timedelta(minutes=1),
+                closed_at=now,
+            )
+        )
+        for index, (task_id, api_name) in enumerate(
+            zip(task_ids, (upstream_raw, downstream_raw), strict=True)
+        ):
+            session.add(
+                CollectionTask(
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name=api_name,
+                    scope_key=now.date().isoformat(),
+                    request_params={"trade_date": now.date().isoformat()},
+                    status=CollectionTaskStatus.SUCCESS.value,
+                    max_attempts=1,
+                    finished_at=now,
+                )
+            )
+            session.add(
+                RawDataAsset(
+                    task_id=task_id,
+                    provider="TUSHARE",
+                    api_name=api_name,
+                    business_date=now.date(),
+                    request_params={"trade_date": now.date().isoformat()},
+                    storage_uri=f"file:///tmp/{task_id}.parquet",
+                    content_hash=f"{index + 3}" * 64,
+                    schema_fingerprint="b" * 64,
+                    row_count=1,
+                    is_complete=True,
+                    fetched_at=now,
+                    sealed_at=now,
+                )
+            )
+
+    repository = ProcessingRepository(SyncSessionFactory)
+    repository.plan_closed_batches(
+        specs,
+        now=now,
+        source_batch_ids=(batch_id,),
+    )
+    with SyncSessionFactory() as session, session.begin():
+        upstream_task = session.scalar(
+            select(ProcessingTask).where(
+                ProcessingTask.source_batch_id == batch_id,
+                ProcessingTask.output_dataset == upstream.dataset_name,
+            )
+        )
+        assert upstream_task is not None
+        upstream_task.status = ProcessingTaskStatus.RUNNING.value
+        upstream_process_id = upstream_task.process_id
+
+    waiting_plan = repository.plan_closed_batches(specs, now=now, max_batches=1)
+    assert waiting_plan.scanned_batch_count == 1
+    with SyncSessionFactory() as session:
+        waiting_batch = session.get(CollectionBatch, batch_id)
+        waiting_downstream = session.scalar(
+            select(ProcessingTask).where(
+                ProcessingTask.source_batch_id == batch_id,
+                ProcessingTask.output_dataset == downstream.dataset_name,
+            )
+        )
+    assert waiting_batch is not None
+    assert waiting_batch.processing_plan_version is None
+    assert waiting_downstream is not None
+    assert waiting_downstream.status == ProcessingTaskStatus.WAITING_DEPENDENCY.value
+
+    with SyncSessionFactory() as session, session.begin():
+        upstream_task = session.get(ProcessingTask, upstream_process_id)
+        assert upstream_task is not None
+        upstream_task.status = ProcessingTaskStatus.SUCCESS.value
+        upstream_task.finished_at = now + timedelta(minutes=1)
+
+    completed_plan = repository.plan_closed_batches(
+        specs,
+        now=now + timedelta(minutes=1),
+        max_batches=1,
+    )
+    assert completed_plan.scanned_batch_count == 1
+    with SyncSessionFactory() as session:
+        completed_batch = session.get(CollectionBatch, batch_id)
+        completed_downstream = session.scalar(
+            select(ProcessingTask).where(
+                ProcessingTask.source_batch_id == batch_id,
+                ProcessingTask.output_dataset == downstream.dataset_name,
+            )
+        )
+    assert completed_batch is not None
+    assert completed_batch.processing_plan_version == _processing_plan_version(specs)
+    assert completed_downstream is not None
+    assert completed_downstream.status == ProcessingTaskStatus.QUEUED.value
+
+
+def test_stale_processing_execution_cannot_publish_or_fail_reclaimed_attempt() -> None:
+    now = datetime(2040, 1, 3, 9, 0, tzinfo=TIMEZONE)
+    batch_id = uuid4()
+    process_id = uuid4()
+    dataset_name = f"lease_fence_{uuid4().hex[:12]}"
+    with SyncSessionFactory() as session, session.begin():
+        session.add(
+            CollectionBatch(
+                batch_id=batch_id,
+                batch_type=BatchType.REPAIR.value,
+                business_date=now.date(),
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=now,
+                closed_at=now,
+            )
+        )
+        session.add(
+            ProcessingTask(
+                process_id=process_id,
+                source_batch_id=batch_id,
+                process_type="noop@1",
+                business_date=now.date(),
+                output_dataset=dataset_name,
+                output_version=uuid4(),
+                status=ProcessingTaskStatus.QUEUED.value,
+                priority=50,
+                max_attempts=2,
+                queued_at=now,
+            )
+        )
+
+    repository = ProcessingRepository(SyncSessionFactory)
+    stale = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_907,
+        source_batch_ids=(batch_id,),
+    )
+    assert stale is not None
+    assert repository.recover_running_tasks(now=now + timedelta(seconds=1)) >= 1
+    current = repository.claim_next(
+        now=now + timedelta(seconds=1),
+        advisory_lock_id=731_599_907,
+        source_batch_ids=(batch_id,),
+    )
+    assert current is not None
+    assert current.process_id == stale.process_id
+    assert current.execution_token != stale.execution_token
+
+    stale_failure = repository.fail_task(
+        stale,
+        message="old worker returned late",
+        retryable=False,
+        now=now + timedelta(seconds=2),
+    )
+    spec = _dataset(dataset_name, "lease_fence_raw")
+    stale_success = repository.publish_success(
+        stale,
+        spec,
+        prepared=PreparedDataset(None, 1),
+        processor=NoopProcessor(),
+        published_at=now + timedelta(seconds=2),
+        rows_read=1,
+        rows_rejected=0,
+    )
+
+    with SyncSessionFactory() as session:
+        persisted = session.get(ProcessingTask, process_id)
+        release = session.get(
+            DatasetRelease,
+            (dataset_name, ReleaseScope.DATE.value, now.date().isoformat()),
+        )
+    assert stale_failure.status == ProcessingTaskStatus.RUNNING
+    assert stale_success.status == ProcessingTaskStatus.RUNNING
+    assert persisted is not None
+    assert persisted.status == ProcessingTaskStatus.RUNNING.value
+    assert persisted.execution_token == current.execution_token
+    assert release is None
+
+    terminal = repository.fail_task(
+        current,
+        message="current worker owns the lease",
+        retryable=False,
+        now=now + timedelta(seconds=3),
+    )
+    assert terminal.status == ProcessingTaskStatus.FAILED
 
 
 def _dataset(

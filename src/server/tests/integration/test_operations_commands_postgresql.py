@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
@@ -37,6 +38,166 @@ pytestmark = pytest.mark.skipif(
 )
 
 ADMIN_TOKEN = "integration-admin-token"
+
+
+def _seed_failed_collection_batch(*, scope_key: str) -> tuple[UUID, UUID, datetime]:
+    now = datetime.now(UTC)
+    batch_id = uuid4()
+    task_id = uuid4()
+    scheduled_at = now - timedelta(hours=2)
+    with SyncSessionFactory() as session, session.begin():
+        session.add(
+            CollectionBatch(
+                batch_id=batch_id,
+                batch_type=BatchType.DAILY.value,
+                business_date=date(2026, 7, 15),
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=scheduled_at,
+                plan_version=uuid4().hex,
+                expected_task_count=1,
+                planning_completed_at=scheduled_at,
+                closed_at=now - timedelta(hours=1),
+            )
+        )
+        session.flush()
+        session.add(
+            CollectionTask(
+                task_id=task_id,
+                batch_id=batch_id,
+                provider="TUSHARE",
+                api_name="daily",
+                scope_key=scope_key,
+                request_params={"trade_date": "20260715"},
+                status=CollectionTaskStatus.FAILED.value,
+                attempt_count=5,
+                max_attempts=5,
+                finished_at=now - timedelta(hours=1),
+                error_code="TEST_RETRY_RACE",
+                error_message="retry race fixture",
+            )
+        )
+    return batch_id, task_id, scheduled_at
+
+
+def _count_newer_collection_tasks(*, scope_key: str, scheduled_at: datetime) -> int:
+    with SyncSessionFactory() as session:
+        count = session.scalar(
+            select(func.count())
+            .select_from(CollectionTask)
+            .join(CollectionBatch, CollectionBatch.batch_id == CollectionTask.batch_id)
+            .where(
+                CollectionTask.provider == "TUSHARE",
+                CollectionTask.api_name == "daily",
+                CollectionTask.scope_key == scope_key,
+                CollectionBatch.scheduled_at > scheduled_at,
+            )
+        )
+    return int(count or 0)
+
+
+@pytest.mark.asyncio
+async def test_collection_retry_requires_exact_scope_for_every_api() -> None:
+    now = datetime.now(UTC)
+    business_date = date(2036, 7, 15)
+    failed_batch_id = uuid4()
+    successful_batch_id = uuid4()
+    failed_task_id = uuid4()
+    failed_scope = "trade_date=20360715;legacy_scope=DC001"
+    successful_scope = "trade_date=20360715"
+
+    with SyncSessionFactory() as session, session.begin():
+        session.add_all(
+            (
+                CollectionBatch(
+                    batch_id=failed_batch_id,
+                    batch_type=BatchType.BACKFILL.value,
+                    business_date=business_date,
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now - timedelta(hours=2),
+                    plan_version="1" * 64,
+                    expected_task_count=1,
+                    planning_completed_at=now - timedelta(hours=2),
+                    closed_at=now - timedelta(hours=1),
+                ),
+                CollectionBatch(
+                    batch_id=successful_batch_id,
+                    batch_type=BatchType.REPAIR.value,
+                    business_date=business_date,
+                    status=BatchStatus.CLOSED.value,
+                    scheduled_at=now - timedelta(minutes=30),
+                    plan_version="2" * 64,
+                    expected_task_count=1,
+                    planning_completed_at=now - timedelta(minutes=30),
+                    closed_at=now - timedelta(minutes=10),
+                ),
+            )
+        )
+        session.flush()
+        session.add_all(
+            (
+                CollectionTask(
+                    task_id=failed_task_id,
+                    batch_id=failed_batch_id,
+                    provider="TUSHARE",
+                    api_name="dc_concept_cons",
+                    scope_key=failed_scope,
+                    request_params={"trade_date": "20360715", "legacy_scope": "DC001"},
+                    status=CollectionTaskStatus.FAILED.value,
+                    attempt_count=3,
+                    max_attempts=3,
+                    finished_at=now - timedelta(hours=1),
+                    error_message="old scope failed",
+                ),
+                CollectionTask(
+                    batch_id=successful_batch_id,
+                    provider="TUSHARE",
+                    api_name="dc_concept_cons",
+                    scope_key=successful_scope,
+                    request_params={"trade_date": "20360715"},
+                    status=CollectionTaskStatus.SUCCESS.value,
+                    attempt_count=1,
+                    max_attempts=3,
+                    finished_at=now - timedelta(minutes=10),
+                    row_count=1,
+                ),
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/operations/commands/collection-tasks/{failed_task_id}/retry",
+            headers={
+                "Authorization": f"Bearer {ADMIN_TOKEN}",
+                "Idempotency-Key": "exact-scope-collection-retry",
+            },
+            json={"reason": "按原任务范围重新采集"},
+        )
+
+    assert response.status_code == 202, response.text
+    repair_batch_id = UUID(response.json()["result"]["batchId"])
+    with SyncSessionFactory() as session:
+        repair_task = session.scalar(
+            select(CollectionTask).where(CollectionTask.batch_id == repair_batch_id)
+        )
+    assert repair_task is not None
+    assert repair_task.scope_key == failed_scope
+    assert repair_task.request_params == {
+        "trade_date": "20360715",
+        "legacy_scope": "DC001",
+    }
+
+    with SyncSessionFactory() as session, session.begin():
+        failed_task = session.get(CollectionTask, failed_task_id)
+        assert failed_task is not None
+        failed_task.status = CollectionTaskStatus.CANCELLED.value
+        retry_tasks = tuple(
+            session.scalars(
+                select(CollectionTask).where(CollectionTask.batch_id == repair_batch_id)
+            )
+        )
+        for retry_task in retry_tasks:
+            retry_task.status = CollectionTaskStatus.CANCELLED.value
 
 
 @pytest.mark.asyncio
@@ -875,4 +1036,103 @@ async def test_release_gap_recovery_plans_only_missing_dataset_apis() -> None:
     assert {task.api_name for task in recovery_tasks} == expected_api_names
     assert {"daily", "daily_basic", "adj_factor", "top_list"}.isdisjoint(
         {task.api_name for task in recovery_tasks}
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_and_batch_collection_retry_share_one_concurrency_domain() -> None:
+    scope_key = f"retry-race-single-batch={uuid4().hex}"
+    batch_id, task_id, scheduled_at = _seed_failed_collection_batch(scope_key=scope_key)
+    transport = httpx.ASGITransport(app=app)
+
+    with SyncSessionFactory() as blocker, blocker.begin():
+        locked_task = blocker.scalar(
+            select(CollectionTask).where(CollectionTask.task_id == task_id).with_for_update()
+        )
+        assert locked_task is not None
+        async with (
+            httpx.AsyncClient(transport=transport, base_url="http://test") as first_client,
+            httpx.AsyncClient(transport=transport, base_url="http://test") as second_client,
+        ):
+            batch_request = asyncio.create_task(
+                first_client.post(
+                    f"/api/v1/operations/commands/acquisition-batches/{batch_id}"
+                    "/retry-failed-tasks",
+                    headers={
+                        "Authorization": f"Bearer {ADMIN_TOKEN}",
+                        "Idempotency-Key": f"retry-race-batch-{uuid4().hex}",
+                    },
+                    json={"reason": "并发批次重试"},
+                )
+            )
+            single_request = asyncio.create_task(
+                second_client.post(
+                    f"/api/v1/operations/commands/collection-tasks/{task_id}/retry",
+                    headers={
+                        "Authorization": f"Bearer {ADMIN_TOKEN}",
+                        "Idempotency-Key": f"retry-race-single-{uuid4().hex}",
+                    },
+                    json={"reason": "并发单任务重试"},
+                )
+            )
+            await asyncio.sleep(0.2)
+
+    responses = await asyncio.gather(batch_request, single_request)
+    assert sorted(response.status_code for response in responses) == [202, 409]
+    assert (
+        _count_newer_collection_tasks(
+            scope_key=scope_key,
+            scheduled_at=scheduled_at,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_and_batch_collection_retry_share_one_concurrency_domain() -> None:
+    scope_key = f"retry-race-bulk-batch={uuid4().hex}"
+    batch_id, task_id, scheduled_at = _seed_failed_collection_batch(scope_key=scope_key)
+    transport = httpx.ASGITransport(app=app)
+
+    with SyncSessionFactory() as blocker, blocker.begin():
+        locked_task = blocker.scalar(
+            select(CollectionTask).where(CollectionTask.task_id == task_id).with_for_update()
+        )
+        assert locked_task is not None
+        async with (
+            httpx.AsyncClient(transport=transport, base_url="http://test") as first_client,
+            httpx.AsyncClient(transport=transport, base_url="http://test") as second_client,
+        ):
+            batch_request = asyncio.create_task(
+                first_client.post(
+                    f"/api/v1/operations/commands/acquisition-batches/{batch_id}"
+                    "/retry-failed-tasks",
+                    headers={
+                        "Authorization": f"Bearer {ADMIN_TOKEN}",
+                        "Idempotency-Key": f"retry-race-batch-{uuid4().hex}",
+                    },
+                    json={"reason": "并发批次重试"},
+                )
+            )
+            bulk_request = asyncio.create_task(
+                second_client.post(
+                    "/api/v1/operations/commands/collection-tasks/retry-all-failed",
+                    headers={
+                        "Authorization": f"Bearer {ADMIN_TOKEN}",
+                        "Idempotency-Key": f"retry-race-bulk-{uuid4().hex}",
+                    },
+                    json={"reason": "并发全部重试"},
+                )
+            )
+            await asyncio.sleep(0.2)
+
+    responses = await asyncio.gather(batch_request, bulk_request)
+    assert any(response.status_code == 202 for response in responses)
+    assert all(response.status_code in {202, 409} for response in responses)
+    assert (
+        _count_newer_collection_tasks(
+            scope_key=scope_key,
+            scheduled_at=scheduled_at,
+        )
+        == 1
     )

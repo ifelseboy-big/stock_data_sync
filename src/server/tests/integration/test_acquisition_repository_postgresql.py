@@ -4,11 +4,17 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import select
 
 from app.common.errors import ClosedBatchPlanMismatchError
 from app.db.sync_session import SyncSessionFactory
 from app.modules.acquisition.domain import TaskBlueprint
-from app.modules.acquisition.models import BatchType, CollectionTaskStatus
+from app.modules.acquisition.models import (
+    BatchType,
+    CollectionTask,
+    CollectionTaskStatus,
+    RawDataAsset,
+)
 from app.modules.acquisition.repository import AcquisitionRepository
 from app.storage import RawAssetMetadata
 
@@ -46,7 +52,7 @@ def test_collection_repository_state_machine_roundtrip() -> None:
     assert first_task is not None and first_task.attempt_count == 1
     retry_at = now + timedelta(minutes=1)
     transition = repository.fail_task(
-        first_task.task_id,
+        first_task,
         error_code="NETWORK_ERROR",
         error_message="temporary",
         request_count=1,
@@ -57,7 +63,7 @@ def test_collection_repository_state_machine_roundtrip() -> None:
     remaining_task = repository.claim_next(allowed_batch_types=set(BatchType), now=now)
     assert remaining_task is not None
     repository.fail_task(
-        remaining_task.task_id,
+        remaining_task,
         error_code="UNSUPPORTED",
         error_message="unsupported scope",
         request_count=1,
@@ -127,7 +133,7 @@ def test_backfill_claims_the_most_recent_business_date_first() -> None:
     assert first is not None
     assert first.business_date == recent_date
     repository.fail_task(
-        first.task_id,
+        first,
         error_code="TEST_COMPLETE",
         error_message="test terminal transition",
         request_count=0,
@@ -144,7 +150,7 @@ def test_backfill_claims_the_most_recent_business_date_first() -> None:
     assert second is not None
     assert second.business_date == older_date
     repository.fail_task(
-        second.task_id,
+        second,
         error_code="TEST_COMPLETE",
         error_message="test terminal transition",
         request_count=0,
@@ -173,7 +179,7 @@ def test_interrupted_final_collection_attempt_is_retried_without_spending_an_att
     assert interrupted is not None
     assert interrupted.attempt_count == interrupted.max_attempts == 1
 
-    transition = repository.recover_interrupted_task(interrupted.task_id, now=now)
+    transition = repository.recover_interrupted_task(interrupted, now=now)
     assert transition.status == CollectionTaskStatus.RETRY_WAIT
 
     resumed = repository.claim_next(allowed_batch_types={BatchType.REPAIR}, now=now)
@@ -182,11 +188,79 @@ def test_interrupted_final_collection_attempt_is_retried_without_spending_an_att
     assert resumed.attempt_count == resumed.max_attempts == 1
 
     terminal = repository.fail_task(
-        resumed.task_id,
+        resumed,
         error_code="TEST_COMPLETE",
         error_message="real failure still spends the final attempt",
         request_count=0,
         retry_at=now,
         completed_at=now,
+    )
+    assert terminal.status == CollectionTaskStatus.FAILED
+
+
+def test_stale_collection_execution_cannot_overwrite_reclaimed_attempt() -> None:
+    repository = AcquisitionRepository(SyncSessionFactory)
+    now = datetime(2040, 1, 2, 9, 0, tzinfo=TIMEZONE)
+    batch_id = repository.create_or_get_batch(
+        batch_type=BatchType.REPAIR,
+        business_date=now.date(),
+        scheduled_at=now,
+    )
+    repository.append_tasks(
+        batch_id,
+        (TaskBlueprint("TUSHARE", "lease_fence", "full-market", {}, 2),),
+        finalize=True,
+        now=now,
+    )
+    stale = repository.claim_next(allowed_batch_types={BatchType.REPAIR}, now=now)
+    assert stale is not None
+    repository.recover_interrupted_task(stale, now=now + timedelta(seconds=1))
+    current = repository.claim_next(
+        allowed_batch_types={BatchType.REPAIR},
+        now=now + timedelta(seconds=1),
+    )
+    assert current is not None
+    assert current.task_id == stale.task_id
+    assert current.execution_token != stale.execution_token
+
+    stale_failure = repository.fail_task(
+        stale,
+        error_code="STALE_FAILURE",
+        error_message="old worker returned late",
+        request_count=1,
+        retry_at=None,
+        completed_at=now + timedelta(seconds=2),
+    )
+    stale_success = repository.complete_task(
+        stale,
+        RawAssetMetadata(
+            storage_uri=f"file:///tmp/{uuid4()}.parquet",
+            content_hash="a" * 64,
+            schema_fingerprint="b" * 64,
+            row_count=1,
+            size_bytes=1,
+        ),
+        request_count=1,
+        empty=False,
+        completed_at=now + timedelta(seconds=2),
+    )
+
+    with SyncSessionFactory() as session:
+        persisted = session.get(CollectionTask, current.task_id)
+        asset = session.scalar(select(RawDataAsset).where(RawDataAsset.task_id == current.task_id))
+    assert stale_failure.status == CollectionTaskStatus.RUNNING
+    assert stale_success.status == CollectionTaskStatus.RUNNING
+    assert persisted is not None
+    assert persisted.status == CollectionTaskStatus.RUNNING.value
+    assert persisted.execution_token == current.execution_token
+    assert asset is None
+
+    terminal = repository.fail_task(
+        current,
+        error_code="TEST_COMPLETE",
+        error_message="current worker owns the lease",
+        request_count=0,
+        retry_at=None,
+        completed_at=now + timedelta(seconds=3),
     )
     assert terminal.status == CollectionTaskStatus.FAILED

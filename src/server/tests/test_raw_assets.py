@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -82,6 +83,22 @@ def test_sealed_asset_cannot_be_overwritten(tmp_path: Path) -> None:
 
     with pytest.raises(RawAssetAlreadyExistsError):
         store.seal(context, _schema(), ())
+
+
+def test_execution_tokens_use_isolated_asset_paths(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    context = _context()
+    first = replace(context, execution_token=uuid4())
+    second = replace(context, execution_token=uuid4())
+
+    first_metadata = store.seal(first, _schema(), ())
+    second_metadata = store.seal(second, _schema(), ())
+
+    assert first_metadata.storage_uri != second_metadata.storage_uri
+    assert f"execution_token={first.execution_token}" in str(_uri_path(first_metadata.storage_uri))
+    assert f"execution_token={second.execution_token}" in str(
+        _uri_path(second_metadata.storage_uri)
+    )
 
 
 def test_failed_write_leaves_no_ready_or_temporary_file(tmp_path: Path) -> None:

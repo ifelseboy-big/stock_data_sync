@@ -135,8 +135,7 @@ async def test_alerts_hide_dependency_blocks_and_expected_duplicate_warnings() -
     assert "scope_type = CASE" in sql
     assert "scope_key = CASE" in sql
     assert "processing_task.status = 'BLOCKED'" not in sql
-    assert "dc_concept_cons" in sql
-    assert "business_date IS NOT DISTINCT FROM" in sql
+    assert "scope_key" in sql
     assert "完全重复记录" in sql
     assert "证券历史代码映射为现行代码" in sql
     assert "名称或数值精度差异" in sql

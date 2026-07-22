@@ -199,6 +199,7 @@ def create_scheduler() -> BlockingScheduler:
         trigger=IntervalTrigger(seconds=5),
         id="dispatch-manual-scheduled-jobs",
         name="派发人工调度请求",
+        max_instances=settings.scheduler_max_workers - 1,
         replace_existing=True,
     )
     return scheduler

@@ -7,7 +7,7 @@ from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, literal, or_, select, update
+from sqlalchemy import and_, func, literal, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -96,6 +96,7 @@ PROCESS_TYPE_BY_DATASET = {
     spec.dataset_name: f"{spec.processor}@{spec.processor_version}" for spec in ALL_DATASET_SPECS
 }
 DATASET_SPEC_BY_NAME = {spec.dataset_name: spec for spec in ALL_DATASET_SPECS}
+COLLECTION_RETRY_LOCK_KEY = "collection-retry-commands"
 
 
 class OperationCommandError(Exception):
@@ -434,6 +435,10 @@ class OperationCommandService:
             raise OperationCommandError("该任务不允许人工执行", status_code=422)
 
         async def apply(now: datetime) -> dict[str, object]:
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"scheduled-job-request:{job_id}"},
+            )
             active_count = await self._session.scalar(
                 select(func.count())
                 .select_from(ScheduledJobExecution)
@@ -478,6 +483,7 @@ class OperationCommandService:
         context: "CommandContext",
     ) -> OperationCommandResult:
         async def apply(now: datetime) -> dict[str, object]:
+            await self._lock_collection_retry_commands()
             task = await self._session.scalar(
                 select(CollectionTask).where(CollectionTask.task_id == task_id).with_for_update()
             )
@@ -488,6 +494,8 @@ class OperationCommandService:
             source_batch = await self._session.get(CollectionBatch, task.batch_id)
             if source_batch is None:
                 raise OperationCommandError("采集任务所属批次不存在", status_code=404)
+            if await self._has_newer_collection_result_or_active_task(task, source_batch):
+                raise OperationCommandError("该采集任务已有进行中的修复或已由较新任务恢复")
             batch_id = await self._create_batch_from_task(task, source_batch, now=now)
             return {"batchId": str(batch_id), "sourceTaskId": str(task_id)}
 
@@ -508,16 +516,15 @@ class OperationCommandService:
         context: "CommandContext",
     ) -> OperationCommandResult:
         async def apply(now: datetime) -> dict[str, object]:
-            source_batch = await self._session.scalar(
-                select(CollectionBatch)
-                .where(CollectionBatch.batch_id == batch_id)
-                .with_for_update()
-            )
+            await self._lock_collection_retry_commands()
+            source_batch = await self._session.get(CollectionBatch, batch_id)
             if source_batch is None:
                 raise OperationCommandError("采集批次不存在", status_code=404)
 
             recovered_task = aliased(CollectionTask)
             recovered_batch = aliased(CollectionBatch)
+            active_task = aliased(CollectionTask)
+            active_batch = aliased(CollectionBatch)
             recovered = (
                 select(literal(1))
                 .select_from(recovered_task)
@@ -526,14 +533,9 @@ class OperationCommandService:
                     recovered_batch.batch_id == recovered_task.batch_id,
                 )
                 .where(
+                    recovered_task.provider == CollectionTask.provider,
                     recovered_task.api_name == CollectionTask.api_name,
-                    or_(
-                        recovered_task.scope_key == CollectionTask.scope_key,
-                        (CollectionTask.api_name == "dc_concept_cons")
-                        & recovered_batch.business_date.is_not_distinct_from(
-                            source_batch.business_date
-                        ),
-                    ),
+                    recovered_task.scope_key == CollectionTask.scope_key,
                     recovered_task.status.in_(
                         (
                             CollectionTaskStatus.SUCCESS.value,
@@ -544,6 +546,25 @@ class OperationCommandService:
                 )
                 .exists()
             )
+            active = (
+                select(literal(1))
+                .select_from(active_task)
+                .join(active_batch, active_batch.batch_id == active_task.batch_id)
+                .where(
+                    active_task.provider == CollectionTask.provider,
+                    active_task.api_name == CollectionTask.api_name,
+                    active_task.scope_key == CollectionTask.scope_key,
+                    active_task.status.in_(
+                        (
+                            CollectionTaskStatus.PENDING.value,
+                            CollectionTaskStatus.RUNNING.value,
+                            CollectionTaskStatus.RETRY_WAIT.value,
+                        )
+                    ),
+                    active_batch.scheduled_at > source_batch.scheduled_at,
+                )
+                .exists()
+            )
             tasks = tuple(
                 await self._session.scalars(
                     select(CollectionTask)
@@ -551,13 +572,21 @@ class OperationCommandService:
                         CollectionTask.batch_id == batch_id,
                         CollectionTask.status == CollectionTaskStatus.FAILED.value,
                         ~recovered,
+                        ~active,
                     )
-                    .order_by(CollectionTask.api_name, CollectionTask.scope_key)
+                    .order_by(CollectionTask.task_id)
                     .with_for_update(of=CollectionTask)
                 )
             )
             if not tasks:
                 raise OperationCommandError("该批次没有尚未恢复的失败采集任务")
+            source_batch = await self._session.scalar(
+                select(CollectionBatch)
+                .where(CollectionBatch.batch_id == batch_id)
+                .with_for_update()
+            )
+            if source_batch is None:
+                raise OperationCommandError("采集批次不存在", status_code=404)
             repair_batch_id = await self._create_batch_from_tasks(
                 tasks,
                 source_batch,
@@ -585,6 +614,7 @@ class OperationCommandService:
         context: "CommandContext",
     ) -> OperationCommandResult:
         async def apply(now: datetime) -> dict[str, object]:
+            await self._lock_collection_retry_commands()
             source_batch = aliased(CollectionBatch)
             recovered_task = aliased(CollectionTask)
             recovered_batch = aliased(CollectionBatch)
@@ -597,13 +627,7 @@ class OperationCommandService:
                 .where(
                     recovered_task.provider == CollectionTask.provider,
                     recovered_task.api_name == CollectionTask.api_name,
-                    or_(
-                        recovered_task.scope_key == CollectionTask.scope_key,
-                        (CollectionTask.api_name == "dc_concept_cons")
-                        & recovered_batch.business_date.is_not_distinct_from(
-                            source_batch.business_date
-                        ),
-                    ),
+                    recovered_task.scope_key == CollectionTask.scope_key,
                     recovered_task.status.in_(
                         (
                             CollectionTaskStatus.SUCCESS.value,
@@ -621,13 +645,7 @@ class OperationCommandService:
                 .where(
                     active_task.provider == CollectionTask.provider,
                     active_task.api_name == CollectionTask.api_name,
-                    or_(
-                        active_task.scope_key == CollectionTask.scope_key,
-                        (CollectionTask.api_name == "dc_concept_cons")
-                        & active_batch.business_date.is_not_distinct_from(
-                            source_batch.business_date
-                        ),
-                    ),
+                    active_task.scope_key == CollectionTask.scope_key,
                     active_task.status.in_(
                         (
                             CollectionTaskStatus.PENDING.value,
@@ -655,7 +673,6 @@ class OperationCommandService:
                             CollectionTask.finished_at.desc().nullslast(),
                             CollectionTask.task_id,
                         )
-                        .with_for_update(of=CollectionTask)
                     )
                 ).all()
             )
@@ -669,8 +686,25 @@ class OperationCommandService:
                     (task, batch),
                 )
 
+            selected_batches = {task.task_id: batch for task, batch in logical_tasks.values()}
+            selected_ids = tuple(sorted(selected_batches))
+            locked_tasks = tuple(
+                await self._session.scalars(
+                    select(CollectionTask)
+                    .where(
+                        CollectionTask.task_id.in_(selected_ids),
+                        CollectionTask.status == CollectionTaskStatus.FAILED.value,
+                    )
+                    .order_by(CollectionTask.task_id)
+                    .with_for_update()
+                )
+            )
+            if not locked_tasks:
+                raise OperationCommandError("失败采集任务状态已变化，请刷新后重试")
+
             grouped: dict[date | None, list[tuple[CollectionTask, CollectionBatch]]] = {}
-            for task, batch in logical_tasks.values():
+            for task in locked_tasks:
+                batch = selected_batches[task.task_id]
                 grouped.setdefault(batch.business_date, []).append((task, batch))
 
             batch_ids: list[str] = []
@@ -857,7 +891,6 @@ class OperationCommandService:
                             ProcessingTask.finished_at.desc().nullslast(),
                             ProcessingTask.process_id,
                         )
-                        .with_for_update(of=ProcessingTask)
                     )
                 ).all()
             )
@@ -871,6 +904,26 @@ class OperationCommandService:
             candidates = tuple(task for task, active in logical_tasks.values() if not active)
             if not candidates:
                 raise OperationCommandError("全部失败加工范围已有较新的活动任务，无需重复重试")
+            candidate_ids = tuple(sorted(task.process_id for task in candidates))
+            locked_candidates = {
+                task.process_id: task
+                for task in await self._session.scalars(
+                    select(ProcessingTask)
+                    .where(
+                        ProcessingTask.process_id.in_(candidate_ids),
+                        ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
+                    )
+                    .order_by(ProcessingTask.process_id)
+                    .with_for_update()
+                )
+            }
+            candidates = tuple(
+                locked_candidates[process_id]
+                for process_id in candidate_ids
+                if process_id in locked_candidates
+            )
+            if not candidates:
+                raise OperationCommandError("失败加工任务状态已变化，请刷新后重试")
 
             unavailable_ids = set(
                 await self._session.scalars(
@@ -992,6 +1045,14 @@ class OperationCommandService:
         context: "CommandContext",
     ) -> OperationCommandResult:
         async def apply(now: datetime) -> dict[str, object]:
+            tasks = tuple(
+                await self._session.scalars(
+                    select(CollectionTask)
+                    .where(CollectionTask.batch_id == batch_id)
+                    .order_by(CollectionTask.task_id)
+                    .with_for_update()
+                )
+            )
             batch = await self._session.scalar(
                 select(CollectionBatch)
                 .where(CollectionBatch.batch_id == batch_id)
@@ -1001,48 +1062,35 @@ class OperationCommandService:
                 raise OperationCommandError("采集批次不存在", status_code=404)
             if batch.status not in {BatchStatus.PENDING.value, BatchStatus.RUNNING.value}:
                 raise OperationCommandError(f"状态 {batch.status} 不允许取消")
-            running = await self._session.scalar(
+            current_task_count = await self._session.scalar(
                 select(func.count())
                 .select_from(CollectionTask)
-                .where(
-                    CollectionTask.batch_id == batch_id,
-                    CollectionTask.status == CollectionTaskStatus.RUNNING.value,
-                )
+                .where(CollectionTask.batch_id == batch_id)
             )
-            if running:
+            if int(current_task_count or 0) != len(tasks):
+                raise OperationCommandError("批次计划刚刚发生变化，请重试取消操作")
+            if any(task.status == CollectionTaskStatus.RUNNING.value for task in tasks):
                 raise OperationCommandError("批次仍有正在执行的采集任务，不能取消")
             cancellable = (
                 CollectionTaskStatus.PENDING.value,
                 CollectionTaskStatus.RETRY_WAIT.value,
             )
-            cancelled_task_count = await self._session.scalar(
-                select(func.count())
-                .select_from(CollectionTask)
-                .where(
-                    CollectionTask.batch_id == batch_id,
-                    CollectionTask.status.in_(cancellable),
-                )
-            )
-            await self._session.execute(
-                update(CollectionTask)
-                .where(
-                    CollectionTask.batch_id == batch_id,
-                    CollectionTask.status.in_(cancellable),
-                )
-                .values(
-                    status=CollectionTaskStatus.CANCELLED.value,
-                    next_retry_at=None,
-                    finished_at=now,
-                    error_code="MANUAL_CANCELLED",
-                    error_message=reason,
-                )
-            )
+            cancelled_task_count = 0
+            for task in tasks:
+                if task.status not in cancellable:
+                    continue
+                task.status = CollectionTaskStatus.CANCELLED.value
+                task.next_retry_at = None
+                task.finished_at = now
+                task.error_code = "MANUAL_CANCELLED"
+                task.error_message = reason
+                cancelled_task_count += 1
             batch.status = BatchStatus.CANCELLED.value
             batch.closed_at = now
             return {
                 "batchId": str(batch_id),
                 "status": batch.status,
-                "cancelledTaskCount": int(cancelled_task_count or 0),
+                "cancelledTaskCount": cancelled_task_count,
             }
 
         return await self._execute_task_command(
@@ -1356,6 +1404,65 @@ class OperationCommandService:
     ) -> UUID:
         return await self._create_batch_from_tasks((task,), source_batch, now=now)
 
+    async def _lock_collection_retry_commands(self) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": COLLECTION_RETRY_LOCK_KEY},
+        )
+
+    async def _has_newer_collection_result_or_active_task(
+        self,
+        task: CollectionTask,
+        source_batch: CollectionBatch,
+    ) -> bool:
+        candidate_task = aliased(CollectionTask)
+        candidate_batch = aliased(CollectionBatch)
+        if task.finished_at is None:
+            newer_success = and_(
+                candidate_task.status.in_(
+                    (
+                        CollectionTaskStatus.SUCCESS.value,
+                        CollectionTaskStatus.EMPTY_VALID.value,
+                    )
+                ),
+                candidate_batch.scheduled_at > source_batch.scheduled_at,
+            )
+        else:
+            newer_success = and_(
+                candidate_task.status.in_(
+                    (
+                        CollectionTaskStatus.SUCCESS.value,
+                        CollectionTaskStatus.EMPTY_VALID.value,
+                    )
+                ),
+                candidate_task.finished_at > task.finished_at,
+            )
+        successor = await self._session.scalar(
+            select(literal(True))
+            .select_from(candidate_task)
+            .join(candidate_batch, candidate_batch.batch_id == candidate_task.batch_id)
+            .where(
+                candidate_task.provider == task.provider,
+                candidate_task.api_name == task.api_name,
+                candidate_task.scope_key == task.scope_key,
+                or_(
+                    and_(
+                        candidate_task.status.in_(
+                            (
+                                CollectionTaskStatus.PENDING.value,
+                                CollectionTaskStatus.RUNNING.value,
+                                CollectionTaskStatus.RETRY_WAIT.value,
+                            )
+                        ),
+                        candidate_batch.scheduled_at > source_batch.scheduled_at,
+                    ),
+                    newer_success,
+                ),
+            )
+            .limit(1)
+        )
+        return bool(successor)
+
     async def _create_batch_from_tasks(
         self,
         tasks: Sequence[CollectionTask],
@@ -1516,27 +1623,47 @@ class OperationCommandService:
         return codes - available
 
     async def _block_processing_downstream(self, process_id: UUID, reason: str) -> None:
+        dependent_ids = tuple(
+            await self._session.scalars(
+                select(ProcessingDependency.process_id)
+                .where(ProcessingDependency.resolved_release_process_id == process_id)
+                .distinct()
+                .order_by(ProcessingDependency.process_id)
+            )
+        )
+        if not dependent_ids:
+            return
+        tasks = tuple(
+            await self._session.scalars(
+                select(ProcessingTask)
+                .where(ProcessingTask.process_id.in_(dependent_ids))
+                .order_by(ProcessingTask.process_id)
+                .with_for_update()
+            )
+        )
         dependencies = tuple(
             await self._session.scalars(
                 select(ProcessingDependency)
-                .where(ProcessingDependency.resolved_release_process_id == process_id)
+                .where(
+                    ProcessingDependency.resolved_release_process_id == process_id,
+                    ProcessingDependency.process_id.in_(dependent_ids),
+                )
+                .order_by(
+                    ProcessingDependency.process_id,
+                    ProcessingDependency.dependency_type,
+                    ProcessingDependency.dependency_name,
+                    ProcessingDependency.dependency_scope_key,
+                )
                 .with_for_update()
             )
         )
         for dependency in dependencies:
             dependency.status = DependencyStatus.FAILED.value
             dependency.blocked_reason = reason
-            await self._session.execute(
-                update(ProcessingTask)
-                .where(
-                    ProcessingTask.process_id == dependency.process_id,
-                    ProcessingTask.status.in_(PROCESSING_MUTABLE),
-                )
-                .values(
-                    status=ProcessingTaskStatus.BLOCKED.value,
-                    error_message=f"上游加工被人工终止：{reason}",
-                )
-            )
+        for task in tasks:
+            if task.status in PROCESSING_MUTABLE:
+                task.status = ProcessingTaskStatus.BLOCKED.value
+                task.error_message = f"上游加工被人工终止：{reason}"
 
 
 def _is_unchanged_deterministic_failure(task: ProcessingTask) -> bool:

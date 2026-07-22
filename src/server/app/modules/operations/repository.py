@@ -831,7 +831,6 @@ class OperationsRepository:
         collection_recovered = _collection_recovered_expression(
             task_name=CollectionTask.api_name,
             scope_key=CollectionTask.scope_key,
-            business_date=failed_collection_batch.business_date,
             finished_at=CollectionTask.finished_at,
             sort_time=failed_collection_batch.scheduled_at,
         )
@@ -1107,12 +1106,10 @@ def _collection_recovered_expression(
     *,
     task_name: Any,
     scope_key: Any,
-    business_date: Any,
     finished_at: Any,
     sort_time: Any,
 ) -> Any:
     recovered = aliased(CollectionTask)
-    recovered_batch = aliased(CollectionBatch)
     recovering = aliased(CollectionTask)
     recovering_batch = aliased(CollectionBatch)
 
@@ -1127,19 +1124,6 @@ def _collection_recovered_expression(
         )
         .exists()
     )
-    same_date_recovered = and_(
-        task_name == "dc_concept_cons",
-        select(literal(1))
-        .select_from(recovered)
-        .join(recovered_batch, recovered_batch.batch_id == recovered.batch_id)
-        .where(
-            recovered.api_name == task_name,
-            recovered_batch.business_date.is_not_distinct_from(business_date),
-            recovered.status.in_(COLLECTION_SUCCESS),
-            recovered.finished_at > finished_at,
-        )
-        .exists(),
-    )
     same_scope_recovering = (
         select(literal(1))
         .select_from(recovering)
@@ -1152,25 +1136,7 @@ def _collection_recovered_expression(
         )
         .exists()
     )
-    same_date_recovering = and_(
-        task_name == "dc_concept_cons",
-        select(literal(1))
-        .select_from(recovering)
-        .join(recovering_batch, recovering_batch.batch_id == recovering.batch_id)
-        .where(
-            recovering.api_name == task_name,
-            recovering_batch.business_date.is_not_distinct_from(business_date),
-            recovering.status.in_(COLLECTION_ACTIVE),
-            recovering_batch.scheduled_at > sort_time,
-        )
-        .exists(),
-    )
-    return or_(
-        same_scope_recovered,
-        same_date_recovered,
-        same_scope_recovering,
-        same_date_recovering,
-    )
+    return or_(same_scope_recovered, same_scope_recovering)
 
 
 def _run_recovered_expression(rows: Any, *, run_type: str | None) -> Any:
@@ -1180,7 +1146,6 @@ def _run_recovered_expression(rows: Any, *, run_type: str | None) -> Any:
     collection_recovered = _collection_recovered_expression(
         task_name=rows.c.task_name,
         scope_key=rows.c.scope_key,
-        business_date=rows.c.business_date,
         finished_at=rows.c.finished_at,
         sort_time=rows.c.sort_time,
     )

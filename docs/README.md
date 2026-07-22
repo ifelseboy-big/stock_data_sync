@@ -6,7 +6,7 @@
 
 - 后端采用 Python 3.12、uv、FastAPI、SQLAlchemy、Alembic、APScheduler 和 PostgreSQL 18；前端采用 Vue 3、TypeScript、Vite 和 Element Plus。
 - 采集任务只负责调用 Tushare 并封存不可变 Parquet；加工任务依赖一个或多个已封存资产，负责清洗、聚合、校验和正式入库。
-- 采集批次关闭后统一生成加工计划；全部加工任务共用一个受控并发入口，默认最多 3 个任务并行，同一输出数据集保持串行。
+- 采集批次关闭后按目录水位限量生成加工计划；全部加工任务共用一个受控并发入口，默认最多 3 个任务并行，DATE 数据集按业务日期互斥，其他范围按输出数据集互斥。
 - Tushare 账户限制为 500 次/分钟，应用预算为 480 次/分钟；所有采集来源共享同一额度。
 - PostgreSQL 是任务状态、队列、依赖和发布的唯一事实来源，不引入 Redis、Kafka、Celery 或 Airflow。
 - 生产环境为 Mac mini 原生进程，由 `launchd` 管理。首次安装必须由用户分别指定主程序目录和数据目录；正式标签源码在目标 Mac 本地构建，普通升级只切换程序。

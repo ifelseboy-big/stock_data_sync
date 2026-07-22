@@ -83,7 +83,7 @@ class AcquisitionRecovery:
                 spec = self._api_specs.get(task.api_name)
                 if metadata.schema_fingerprint != schema_fingerprint(spec.schema):
                     self._repository.fail_task(
-                        task.task_id,
+                        task,
                         error_code="SCHEMA_CHANGED",
                         error_message="orphan raw asset schema does not match ApiSpec",
                         request_count=0,
@@ -103,7 +103,7 @@ class AcquisitionRecovery:
 
             if is_stale:
                 transition = self._repository.recover_interrupted_task(
-                    task.task_id,
+                    task,
                     now=now,
                 )
                 retried_tasks += int(transition.next_retry_at is not None)
@@ -138,6 +138,7 @@ def _raw_asset_context(task: RunningTaskSnapshot) -> RawAssetContext:
         business_date=task.business_date,
         batch_id=task.batch_id,
         task_id=task.task_id,
+        execution_token=task.execution_token,
     )
 
 

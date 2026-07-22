@@ -31,6 +31,7 @@ class RawAssetContext:
     business_date: date | None
     batch_id: UUID
     task_id: UUID
+    execution_token: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,8 +211,10 @@ class LocalRawAssetStore:
             / f"business_date={business_date}"
             / f"batch_id={context.batch_id}"
             / f"task_id={context.task_id}"
-            / FINAL_FILE_NAME
         )
+        if context.execution_token is not None:
+            path /= f"execution_token={context.execution_token}"
+        path /= FINAL_FILE_NAME
         self._assert_within_root(path)
         return path
 

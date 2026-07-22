@@ -90,6 +90,13 @@ class CollectionBatch(Base):
             "batch_id",
             postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
         ),
+        Index(
+            "idx_collection_batch_processing_plan",
+            text("processing_plan_version ASC NULLS FIRST"),
+            text("closed_at DESC NULLS LAST"),
+            "batch_id",
+            postgresql_where=text("status = 'CLOSED'"),
+        ),
     )
 
     batch_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -105,6 +112,10 @@ class CollectionBatch(Base):
     plan_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expected_task_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     planning_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    processing_plan_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processing_planned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -165,6 +176,7 @@ class CollectionTask(Base):
     )
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_token: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     request_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )

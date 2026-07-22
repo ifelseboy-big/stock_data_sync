@@ -57,7 +57,7 @@ class FakeRepository:
         )
         return TaskTransition(task.task_id, status, None)
 
-    def fail_task(self, task_id: Any, **values: Any) -> TaskTransition:
+    def fail_task(self, task: Any, **values: Any) -> TaskTransition:
         self.failures.append(values)
         retry_at = values["retry_at"]
         status = (
@@ -67,7 +67,7 @@ class FakeRepository:
             if retry_at is not None
             else CollectionTaskStatus.FAILED
         )
-        return TaskTransition(task_id, status, retry_at)
+        return TaskTransition(task.task_id, status, retry_at)
 
 
 def _table(rows: list[tuple[str, str, float]]) -> pa.Table:
@@ -296,6 +296,7 @@ def test_existing_orphan_asset_is_registered_without_provider_call(tmp_path: Pat
             business_date=task.business_date,
             batch_id=task.batch_id,
             task_id=task.task_id,
+            execution_token=task.execution_token,
         ),
         SCHEMA,
         (_table([("000001.SZ", "20260717", 10.0)]),),

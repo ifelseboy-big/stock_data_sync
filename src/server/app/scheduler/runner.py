@@ -14,7 +14,11 @@ from app.scheduler.jobs import (
     reconcile_processing_runtime,
 )
 from app.scheduler.lock import scheduler_singleton_lock
-from app.scheduler.management import ensure_scheduled_job_controls, execute_scheduled_job
+from app.scheduler.management import (
+    ensure_scheduled_job_controls,
+    execute_scheduled_job,
+    recover_interrupted_scheduled_job_executions,
+)
 
 
 def _run_startup_job(job_id: str) -> None:
@@ -39,6 +43,12 @@ def main() -> None:
     with scheduler_singleton_lock():
         try:
             ensure_scheduled_job_controls()
+            recovered_execution_count = recover_interrupted_scheduled_job_executions()
+            if recovered_execution_count:
+                logger.warning(
+                    "interrupted_scheduled_jobs_recovered",
+                    execution_count=recovered_execution_count,
+                )
             execute_scheduled_job("ensure-future-partitions", "STARTUP_CATCHUP")
             reconcile_collection_runtime(recover_all_running=True)
             reconcile_processing_runtime(recover_all_running=True)

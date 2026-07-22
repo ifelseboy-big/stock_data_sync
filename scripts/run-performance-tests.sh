@@ -109,9 +109,18 @@ printf '执行失败恢复与告警查询回归...\n'
     UV_CACHE_DIR=/tmp/stock-data-sync-uv-cache \
     uv run pytest \
       tests/integration/test_operations_api_postgresql.py \
+      tests/integration/test_operations_commands_postgresql.py::test_collection_retry_requires_exact_scope_for_every_api \
       tests/integration/test_operations_commands_postgresql.py::test_bulk_retry_queues_unresolved_collection_and_processing_tasks \
+      tests/integration/test_operations_commands_postgresql.py::test_single_and_batch_collection_retry_share_one_concurrency_domain \
+      tests/integration/test_operations_commands_postgresql.py::test_bulk_and_batch_collection_retry_share_one_concurrency_domain \
+      tests/integration/test_acquisition_repository_postgresql.py::test_stale_collection_execution_cannot_overwrite_reclaimed_attempt \
+      tests/integration/test_scheduler_management_postgresql.py \
+      tests/integration/test_processing_repository_postgresql.py::test_processing_planner_uses_bounded_catalog_watermark \
+      tests/integration/test_processing_repository_postgresql.py::test_processing_watermark_waits_for_active_upstream_and_reconciles_missed_publish \
+      tests/integration/test_processing_repository_postgresql.py::test_date_scoped_processing_uses_workers_across_business_dates \
       tests/integration/test_processing_repository_postgresql.py::test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task \
       tests/integration/test_processing_repository_postgresql.py::test_stock_daily_invalidation_locks_task_before_dependency \
+      tests/integration/test_processing_repository_postgresql.py::test_stale_processing_execution_cannot_publish_or_fail_reclaimed_attempt \
       -q
 )
 

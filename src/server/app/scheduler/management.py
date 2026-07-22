@@ -3,12 +3,20 @@ from time import monotonic
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.pool import NullPool
 
+from app.core.config import settings
 from app.db.sync_session import SyncSessionFactory
 from app.modules.operations.models import ScheduledJobControl, ScheduledJobExecution
 from app.scheduler.catalog import SCHEDULED_JOB_BY_ID, SCHEDULED_JOB_DEFINITIONS
+
+scheduler_job_lock_engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    poolclass=NullPool,
+)
 
 
 def ensure_scheduled_job_controls() -> None:
@@ -22,6 +30,22 @@ def ensure_scheduled_job_controls() -> None:
             )
 
 
+def recover_interrupted_scheduled_job_executions() -> int:
+    now = datetime.now(UTC)
+    with SyncSessionFactory() as session, session.begin():
+        executions = tuple(
+            session.scalars(
+                select(ScheduledJobExecution)
+                .where(ScheduledJobExecution.status == "RUNNING")
+                .order_by(ScheduledJobExecution.job_id, ScheduledJobExecution.execution_id)
+                .with_for_update()
+            )
+        )
+        for execution in executions:
+            _mark_interrupted_execution(execution, now=now)
+        return len(executions)
+
+
 def execute_scheduled_job(
     job_id: str,
     trigger_type: str = "SCHEDULED",
@@ -33,66 +57,107 @@ def execute_scheduled_job(
         structlog.get_logger("scheduler").info("scheduled_job_disabled", job_id=job_id)
         return False
 
-    identifier = UUID(execution_id) if execution_id else uuid4()
-    started_at = datetime.now(UTC)
-    with SyncSessionFactory() as session, session.begin():
-        execution = session.get(ScheduledJobExecution, identifier)
-        if execution is None:
-            execution = ScheduledJobExecution(
-                execution_id=identifier,
+    with scheduler_job_lock_engine.connect() as lock_connection:
+        acquired = lock_connection.scalar(
+            text("SELECT pg_try_advisory_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": f"scheduled-job:{job_id}"},
+        )
+        lock_connection.commit()
+        if not acquired:
+            structlog.get_logger("scheduler").info(
+                "scheduled_job_already_running",
                 job_id=job_id,
                 trigger_type=trigger_type,
-                status="RUNNING",
-                scheduled_at=started_at,
-                started_at=started_at,
-                created_at=started_at,
             )
-            session.add(execution)
-        else:
-            execution.status = "RUNNING"
-            execution.started_at = started_at
-            execution.error_message = None
+            return False
 
-    clock_started = monotonic()
-    try:
-        from app.scheduler.jobs import registered_job_functions
+        identifier = UUID(execution_id) if execution_id else uuid4()
+        started_at = datetime.now(UTC)
+        try:
+            with SyncSessionFactory() as session, session.begin():
+                interrupted = tuple(
+                    session.scalars(
+                        select(ScheduledJobExecution)
+                        .where(
+                            ScheduledJobExecution.job_id == job_id,
+                            ScheduledJobExecution.status == "RUNNING",
+                        )
+                        .order_by(ScheduledJobExecution.execution_id)
+                        .with_for_update()
+                    )
+                )
+                for stale_execution in interrupted:
+                    _mark_interrupted_execution(stale_execution, now=started_at)
+                if interrupted:
+                    session.flush()
+                execution = session.get(ScheduledJobExecution, identifier)
+                if execution is None:
+                    execution = ScheduledJobExecution(
+                        execution_id=identifier,
+                        job_id=job_id,
+                        trigger_type=trigger_type,
+                        status="RUNNING",
+                        scheduled_at=started_at,
+                        started_at=started_at,
+                        created_at=started_at,
+                    )
+                    session.add(execution)
+                elif execution.status != "PENDING":
+                    return False
+                else:
+                    execution.status = "RUNNING"
+                    execution.started_at = started_at
+                    execution.error_message = None
 
-        registered_job_functions()[job_id]()
-    except Exception as exc:
-        _finish_execution(
-            identifier,
-            status="FAILED",
-            duration_ms=round((monotonic() - clock_started) * 1000),
-            error_message=str(exc)[:2000],
-        )
-        raise
+            clock_started = monotonic()
+            try:
+                from app.scheduler.jobs import registered_job_functions
 
-    _finish_execution(
-        identifier,
-        status="SUCCESS",
-        duration_ms=round((monotonic() - clock_started) * 1000),
-        error_message=None,
-    )
-    return True
+                registered_job_functions()[job_id]()
+            except Exception as exc:
+                _finish_execution(
+                    identifier,
+                    status="FAILED",
+                    duration_ms=round((monotonic() - clock_started) * 1000),
+                    error_message=str(exc)[:2000],
+                )
+                raise
+
+            _finish_execution(
+                identifier,
+                status="SUCCESS",
+                duration_ms=round((monotonic() - clock_started) * 1000),
+                error_message=None,
+            )
+            return True
+        finally:
+            lock_connection.execute(
+                text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"scheduled-job:{job_id}"},
+            )
+            lock_connection.commit()
 
 
 def dispatch_manual_scheduled_job() -> None:
     with SyncSessionFactory() as session, session.begin():
-        execution = session.scalar(
-            select(ScheduledJobExecution)
-            .where(ScheduledJobExecution.status == "PENDING")
-            .order_by(ScheduledJobExecution.created_at, ScheduledJobExecution.execution_id)
-            .with_for_update(skip_locked=True)
-            .limit(1)
+        executions = tuple(
+            session.scalars(
+                select(ScheduledJobExecution)
+                .where(
+                    ScheduledJobExecution.status == "PENDING",
+                    ScheduledJobExecution.job_id.in_(tuple(SCHEDULED_JOB_BY_ID)),
+                )
+                .order_by(ScheduledJobExecution.created_at, ScheduledJobExecution.execution_id)
+                .with_for_update(skip_locked=True)
+            )
         )
-        if execution is None:
-            return
-        execution.status = "RUNNING"
-        execution.started_at = datetime.now(UTC)
-        execution_id = str(execution.execution_id)
-        job_id = execution.job_id
+        candidates = tuple(
+            (execution.job_id, str(execution.execution_id)) for execution in executions
+        )
 
-    execute_scheduled_job(job_id, "MANUAL", execution_id)
+    for job_id, execution_id in candidates:
+        if execute_scheduled_job(job_id, "MANUAL", execution_id):
+            return
 
 
 def _job_enabled(job_id: str) -> bool:
@@ -118,3 +183,18 @@ def _finish_execution(
         execution.finished_at = datetime.now(UTC)
         execution.duration_ms = duration_ms
         execution.error_message = error_message
+
+
+def _mark_interrupted_execution(
+    execution: ScheduledJobExecution,
+    *,
+    now: datetime,
+) -> None:
+    started_at = execution.started_at or execution.created_at
+    execution.status = "FAILED"
+    execution.finished_at = now
+    execution.duration_ms = max(
+        0,
+        min(round((now - started_at).total_seconds() * 1000), 2_147_483_647),
+    )
+    execution.error_message = "scheduler process stopped before execution completed"

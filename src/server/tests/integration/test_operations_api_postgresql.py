@@ -505,11 +505,16 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         item["id"] != f"processing:{ignored_merge_warning_process_id}"
         for item in alerts.json()["items"]
     )
-    assert all(
-        item["id"] != f"acquisition:{legacy_collection_failure_id}"
+    assert any(
+        item["id"] == f"acquisition:{legacy_collection_failure_id}"
         for item in alerts.json()["items"]
     )
     assert all(item["id"] != f"scheduler:{scheduler_failure_id}" for item in alerts.json()["items"])
     assert any(item["apiName"] == "daily" for item in command_options.json()["acquisitionApis"])
     assert resources.json()["database"]["status"] == "ok"
     assert resources.json()["storage"]["totalBytes"] > 0
+
+    with SyncSessionFactory() as session, session.begin():
+        legacy_failure = session.get(CollectionTask, legacy_collection_failure_id)
+        assert legacy_failure is not None
+        legacy_failure.status = CollectionTaskStatus.CANCELLED.value

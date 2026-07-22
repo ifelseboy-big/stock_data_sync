@@ -14,22 +14,34 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, text, update
+from sqlalchemy import create_engine, delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.catalog import WriteStrategy
+from app.catalog import (
+    DatasetDependencySpec,
+    DatasetSpec,
+    DependencyKind,
+    QualityRuleSpec,
+    ReleaseScope,
+    WriteStrategy,
+)
 from app.core.config import settings
 from app.modules.acquisition.models import (
     BatchType,
+    CollectionBatch,
     CollectionTask,
     CollectionTaskStatus,
 )
 from app.modules.acquisition.repository import AcquisitionRepository
 from app.modules.operations.repository import OperationsRepository
 from app.modules.partitions.service import ensure_monthly_partitions, month_start
-from app.modules.processing.models import ProcessingTask, ProcessingTaskStatus
-from app.modules.processing.repository import ProcessingRepository
+from app.modules.processing.models import (
+    ProcessingDependency,
+    ProcessingTask,
+    ProcessingTaskStatus,
+)
+from app.modules.processing.repository import ProcessingRepository, _processing_plan_version
 from app.modules.processing.staging import PostgresStagingPublisher
 from app.modules.stocks.models import StockDaily
 
@@ -101,6 +113,22 @@ PROFILES = {
         repetitions=10,
     ),
 }
+
+PERF_DATASET_SPEC = DatasetSpec(
+    dataset_name="performance_dataset",
+    processor="performance_processor",
+    processor_version="1",
+    dependencies=(
+        DatasetDependencySpec(
+            DependencyKind.RAW_ASSET,
+            "endpoint_0",
+            ReleaseScope.DATE,
+        ),
+    ),
+    write_strategy=WriteStrategy.UPSERT_KEY,
+    release_scope=ReleaseScope.DATE,
+    quality_rules=(QualityRuleSpec("performance_fixture"),),
+)
 
 
 def _run_step[T](name: str, action: Callable[[], T]) -> tuple[T, float]:
@@ -746,6 +774,38 @@ def _benchmark_sync_queries(
             threshold_ms=100,
         )
     )
+    close_page_size = max(
+        1,
+        min(100, profile.active_batch_count // (profile.repetitions + 1)),
+    )
+    with session_factory() as session, session.begin():
+        closable_batch_ids = tuple(
+            session.scalars(
+                select(CollectionBatch.batch_id)
+                .where(CollectionBatch.status.in_(("PENDING", "RUNNING")))
+                .order_by(CollectionBatch.scheduled_at, CollectionBatch.batch_id)
+                .limit(close_page_size * (profile.repetitions + 1))
+            )
+        )
+        session.execute(
+            update(CollectionTask)
+            .where(CollectionTask.batch_id.in_(closable_batch_ids))
+            .values(
+                status=CollectionTaskStatus.SUCCESS.value,
+                finished_at=datetime.now(UTC),
+            )
+        )
+    results.append(
+        _measure(
+            "collection_close_candidates",
+            lambda: acquisition.close_ready_batches(
+                now=datetime.now(UTC),
+                max_batches=close_page_size,
+            ),
+            repetitions=profile.repetitions,
+            threshold_ms=250,
+        )
+    )
 
     processing = ProcessingRepository(session_factory)
 
@@ -772,6 +832,53 @@ def _benchmark_sync_queries(
             threshold_ms=100,
         )
     )
+    results.append(
+        _measure(
+            "processing_plan_incremental_100_batches",
+            lambda: processing.plan_closed_batches(
+                (PERF_DATASET_SPEC,),
+                now=datetime.now(UTC),
+                max_batches=100,
+            ),
+            repetitions=profile.repetitions,
+            threshold_ms=1_000,
+        )
+    )
+    with session_factory() as session, session.begin():
+        session.execute(
+            update(CollectionBatch)
+            .where(CollectionBatch.status == "CLOSED")
+            .values(
+                processing_plan_version=_processing_plan_version((PERF_DATASET_SPEC,)),
+                processing_planned_at=datetime.now(UTC),
+            )
+        )
+    results.append(
+        _measure(
+            "processing_plan_noop_20000_batches",
+            lambda: processing.plan_closed_batches(
+                (PERF_DATASET_SPEC,),
+                now=datetime.now(UTC),
+                max_batches=100,
+            ),
+            repetitions=profile.repetitions,
+            threshold_ms=100,
+        )
+    )
+    performance_process_ids = select(ProcessingTask.process_id).where(
+        ProcessingTask.output_dataset == PERF_DATASET_SPEC.dataset_name
+    )
+    with session_factory() as session, session.begin():
+        session.execute(
+            delete(ProcessingDependency).where(
+                ProcessingDependency.process_id.in_(performance_process_ids)
+            )
+        )
+        session.execute(
+            delete(ProcessingTask).where(
+                ProcessingTask.output_dataset == PERF_DATASET_SPEC.dataset_name
+            )
+        )
     return results
 
 
