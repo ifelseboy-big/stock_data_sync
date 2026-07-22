@@ -42,18 +42,7 @@ async def test_run_records_skips_recovery_lookup_for_regular_page() -> None:
 
     assert rows == []
     assert total == 0
-    count_sql = str(
-        session.count_statement.compile(
-            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "EXISTS" not in count_sql
-
-    page_from = session.page_statement.get_final_froms()[0]
-    assert page_from.name == "page_runs"
-    assert "recovered" not in page_from.c
-    assert page_from.element._limit_clause.value == 20
+    assert session.count_statement is None
     page_sql = str(
         session.page_statement.compile(
             dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
@@ -61,6 +50,8 @@ async def test_run_records_skips_recovery_lookup_for_regular_page() -> None:
         )
     )
     assert "EXISTS" not in page_sql
+    assert "count(*) OVER" in page_sql
+    assert session.page_statement._limit_clause.value == 20
 
 
 @pytest.mark.asyncio
@@ -78,17 +69,19 @@ async def test_unresolved_run_records_apply_recovery_lookup_before_pagination() 
         limit=20,
     )
 
-    count_sql = str(
-        session.count_statement.compile(
+    assert session.count_statement is None
+    page_sql = str(
+        session.page_statement.compile(
             dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
             compile_kwargs={"literal_binds": True},
         )
     )
-    assert "EXISTS" in count_sql
-    assert "enriched_runs.recovered IS false" in count_sql
-    page_from = session.page_statement.get_final_froms()[0]
-    assert page_from.name == "page_runs"
-    assert page_from.element._limit_clause.value == 20
+    assert "EXISTS" in page_sql
+    assert "enriched_runs.recovered IS false" in page_sql
+    assert "processing_task.status IN ('FAILED', 'SKIPPED', 'CANCELLED')" in page_sql
+    assert "collection_task AS" not in page_sql
+    assert "count(*) OVER" in page_sql
+    assert session.page_statement._limit_clause.value == 20
 
 
 @pytest.mark.asyncio
@@ -140,3 +133,79 @@ async def test_alerts_hide_dependency_blocks_and_expected_duplicate_warnings() -
     assert "完全重复记录" in sql
     assert "证券历史代码映射为现行代码" in sql
     assert "名称或数值精度差异" in sql
+    assert "count(*) OVER" in sql
+    assert session.count_statement is None
+
+
+@pytest.mark.asyncio
+async def test_action_alerts_do_not_scan_warning_branches() -> None:
+    session = _StatementCapture()
+    repository = OperationsRepository(session)  # type: ignore[arg-type]
+
+    await repository.alert_rows(
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        category="action_required",
+        source=None,
+        offset=0,
+        limit=20,
+    )
+
+    sql = str(
+        session.page_statement.compile(
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "DATA_GAP_WARNING" not in sql
+    assert "DATA_QUALITY_WARNING" not in sql
+    assert "warning:" not in sql
+    assert "processing_task.warning_message" not in sql
+
+
+@pytest.mark.asyncio
+async def test_data_gap_alerts_only_scan_collection_warnings() -> None:
+    session = _StatementCapture()
+    repository = OperationsRepository(session)  # type: ignore[arg-type]
+
+    await repository.alert_rows(
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        category="data_gap",
+        source=None,
+        offset=0,
+        limit=20,
+    )
+
+    sql = str(
+        session.page_statement.compile(
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "collection_task" in sql
+    assert "processing_task" not in sql
+    assert "scheduled_job_execution" not in sql
+    assert "EXISTS" not in sql
+
+
+@pytest.mark.asyncio
+async def test_dependencies_filter_terminal_tasks_before_aggregation() -> None:
+    session = _StatementCapture()
+    repository = OperationsRepository(session)  # type: ignore[arg-type]
+
+    await repository.dependencies(
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        readiness="attention",
+        query=None,
+        offset=0,
+        limit=20,
+    )
+
+    sql = str(
+        session.page_statement.compile(
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "processing_task.status NOT IN ('SUCCESS', 'SKIPPED', 'CANCELLED')" in sql
+    assert "count(*) OVER" in sql
+    assert session.count_statement is None

@@ -40,6 +40,7 @@ class ScaleProfile:
     stock_count: int
     trading_day_count: int
     batch_count: int
+    active_batch_count: int
     collection_task_count: int
     processing_task_count: int
     provider_request_count: int
@@ -68,17 +69,31 @@ PROFILES = {
         stock_count=100,
         trading_day_count=60,
         batch_count=100,
+        active_batch_count=50,
         collection_task_count=2_500,
         processing_task_count=500,
         provider_request_count=5_000,
         release_count=250,
         repetitions=3,
     ),
+    "operations": ScaleProfile(
+        name="operations",
+        stock_count=100,
+        trading_day_count=60,
+        batch_count=5_000,
+        active_batch_count=5,
+        collection_task_count=150_000,
+        processing_task_count=30_000,
+        provider_request_count=10_000,
+        release_count=15_000,
+        repetitions=5,
+    ),
     "target": ScaleProfile(
         name="target",
         stock_count=5_500,
         trading_day_count=1_820,
         batch_count=20_000,
+        active_batch_count=2_000,
         collection_task_count=500_000,
         processing_task_count=100_000,
         provider_request_count=1_000_000,
@@ -344,7 +359,7 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                 """
             ),
             {
-                "active_batch_count": min(2_000, profile.batch_count // 2),
+                "active_batch_count": profile.active_batch_count,
                 "batch_count": profile.batch_count,
                 "tasks_per_batch": tasks_per_batch,
             },
@@ -362,7 +377,7 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                     task_id, batch_id, provider, api_name, scope_key,
                     request_params, status, attempt_count, max_attempts,
                     request_count, row_count, started_at, finished_at,
-                    error_code, error_message
+                    error_code, error_message, warning_message
                 )
                 SELECT
                     md5('collection-task-' || i::text)::uuid,
@@ -374,6 +389,7 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                     CASE
                         WHEN batch_number <= :active_batch_count THEN 'PENDING'
                         WHEN i % 100 = 0 THEN 'FAILED'
+                        WHEN i % 30 = 0 THEN 'EMPTY_VALID'
                         ELSE 'SUCCESS'
                     END,
                     CASE WHEN batch_number <= :active_batch_count THEN 0 ELSE 1 END,
@@ -386,12 +402,14 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                         THEN now() - batch_number * INTERVAL '10 minutes'
                             + INTERVAL '4 minutes' END,
                     CASE WHEN i % 100 = 0 THEN 'PERF_FAILURE' END,
-                    CASE WHEN i % 100 = 0 THEN 'performance fixture failure' END
+                    CASE WHEN i % 100 = 0 THEN 'performance fixture failure' END,
+                    CASE WHEN i % 30 = 0 AND i % 100 <> 0
+                        THEN 'performance fixture data gap' END
                 FROM generated
                 """
             ),
             {
-                "active_batch_count": min(2_000, profile.batch_count // 2),
+                "active_batch_count": profile.active_batch_count,
                 "task_count": profile.collection_task_count,
                 "tasks_per_batch": tasks_per_batch,
             },
@@ -410,7 +428,7 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                     output_dataset, output_version, status, priority,
                     attempt_count, max_attempts, queued_at, started_at,
                     finished_at, rows_read, rows_rejected, rows_written,
-                    error_message
+                    error_message, warning_message
                 )
                 SELECT
                     md5('processing-task-' || i::text)::uuid,
@@ -422,6 +440,7 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                     CASE
                         WHEN i > :queued_start THEN 'QUEUED'
                         WHEN i > :blocked_start THEN 'BLOCKED'
+                        WHEN i > :release_count AND i % 100 = 0 THEN 'FAILED'
                         ELSE 'SUCCESS'
                     END,
                     CASE WHEN i % 20 = 0 THEN 50 ELSE 400 END,
@@ -436,8 +455,16 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                     CASE WHEN i <= :blocked_start THEN 15000 END,
                     CASE WHEN i <= :blocked_start THEN 0 END,
                     CASE WHEN i <= :blocked_start THEN 5500 END,
-                    CASE WHEN i > :blocked_start AND i <= :queued_start
-                        THEN 'performance fixture blocked' END
+                    CASE
+                        WHEN i > :blocked_start AND i <= :queued_start
+                            THEN 'performance fixture blocked'
+                        WHEN i > :release_count AND i % 100 = 0
+                            THEN 'performance fixture failure'
+                    END,
+                    CASE WHEN i <= :blocked_start
+                            AND NOT (i > :release_count AND i % 100 = 0)
+                            AND i % 5 = 0
+                        THEN 'performance fixture quality warning' END
                 FROM generated
                 """
             ),
@@ -446,6 +473,7 @@ def _seed_runtime_rows(engine: Any, profile: ScaleProfile) -> None:
                 "process_count": profile.processing_task_count,
                 "processes_per_batch": processes_per_batch,
                 "queued_start": profile.processing_task_count * 9 // 10,
+                "release_count": profile.release_count,
             },
         )
         connection.execute(
@@ -778,10 +806,10 @@ async def _benchmark_operations(profile: ScaleProfile) -> list[BenchmarkResult]:
                 ),
             ),
             (
-                "operations_dependencies",
+                "operations_dependencies_attention",
                 lambda: repository.dependencies(
                     since=since,
-                    readiness="all",
+                    readiness="attention",
                     query=None,
                     offset=0,
                     limit=50,
@@ -808,7 +836,29 @@ async def _benchmark_operations(profile: ScaleProfile) -> list[BenchmarkResult]:
                 ),
             ),
             (
-                "operations_alerts",
+                "operations_unresolved_processing_runs",
+                lambda: repository.run_records(
+                    since=since,
+                    run_type="processing",
+                    status="failed",
+                    batch_id=None,
+                    unresolved_only=True,
+                    offset=0,
+                    limit=50,
+                ),
+            ),
+            (
+                "operations_action_alerts",
+                lambda: repository.alert_rows(
+                    since=since,
+                    category="action_required",
+                    source=None,
+                    offset=0,
+                    limit=50,
+                ),
+            ),
+            (
+                "operations_all_alerts",
                 lambda: repository.alert_rows(
                     since=since,
                     category="all",

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
@@ -78,6 +79,42 @@ DATE_SCOPED_DATASETS = tuple(
 class OperationsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def _windowed_page(
+        self,
+        statement: Any,
+        *,
+        name: str,
+        order_by: Callable[[Any], tuple[Any, ...]],
+        offset: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        page_source = statement.subquery(name)
+        total_column = "_page_total_count"
+        page_statement = (
+            select(
+                page_source,
+                func.count().over().label(total_column),
+            )
+            .order_by(*order_by(page_source))
+            .offset(offset)
+            .limit(limit)
+        )
+        rows = [
+            dict(row)
+            for row in (await self._session.execute(page_statement)).mappings()
+        ]
+        if rows:
+            total = int(rows[0][total_column])
+            for row in rows:
+                row.pop(total_column, None)
+            return rows, total
+        if not offset:
+            return [], 0
+        fallback_total = await self._session.scalar(
+            select(func.count()).select_from(page_source)
+        )
+        return [], int(fallback_total or 0)
 
     async def overview_counts(self, *, day_start: datetime) -> dict[str, Any]:
         collecting = await self._session.scalar(
@@ -201,13 +238,13 @@ class OperationsRepository:
         status_condition = _batch_status_condition(batch_rows, status)
         if status_condition is not None:
             filtered = filtered.where(status_condition)
-        total = await self._session.scalar(select(func.count()).select_from(filtered.subquery()))
-        rows = (
-            await self._session.execute(
-                filtered.order_by(batch_rows.c.scheduled_at.desc()).offset(offset).limit(limit)
-            )
-        ).mappings()
-        return [dict(row) for row in rows], int(total or 0)
+        return await self._windowed_page(
+            filtered,
+            name="filtered_acquisition_batches",
+            order_by=lambda rows: (rows.c.scheduled_at.desc(), rows.c.batch_id),
+            offset=offset,
+            limit=limit,
+        )
 
     async def processing_queue(
         self,
@@ -280,26 +317,22 @@ class OperationsRepository:
         status_values = _processing_status_values(status)
         if status_values is not None:
             statement = statement.where(ProcessingTask.status.in_(status_values))
-        queue_rows = statement.subquery()
-        total = await self._session.scalar(select(func.count()).select_from(queue_rows))
-        rows = (
-            await self._session.execute(
-                select(queue_rows)
-                .order_by(
-                    case(
-                        (queue_rows.c.status == ProcessingTaskStatus.RUNNING.value, 0),
-                        else_=1,
-                    ),
-                    queue_rows.c.priority,
-                    queue_rows.c.business_date.asc().nullsfirst(),
-                    queue_rows.c.queued_at.asc().nullsfirst(),
-                    queue_rows.c.process_id,
-                )
-                .offset(offset)
-                .limit(limit)
-            )
-        ).mappings()
-        return [dict(row) for row in rows], int(total or 0)
+        return await self._windowed_page(
+            statement,
+            name="filtered_processing_queue",
+            order_by=lambda rows: (
+                case(
+                    (rows.c.status == ProcessingTaskStatus.RUNNING.value, 0),
+                    else_=1,
+                ),
+                rows.c.priority,
+                rows.c.business_date.asc().nullsfirst(),
+                rows.c.queued_at.asc().nullsfirst(),
+                rows.c.process_id,
+            ),
+            offset=offset,
+            limit=limit,
+        )
 
     async def dependencies(
         self,
@@ -364,6 +397,16 @@ class OperationsRepository:
                 CollectionBatch.batch_id,
             )
         )
+        if readiness in {"attention", "waiting", "blocked"}:
+            statement = statement.where(
+                ProcessingTask.status.not_in(
+                    (
+                        ProcessingTaskStatus.SUCCESS.value,
+                        ProcessingTaskStatus.SKIPPED.value,
+                        ProcessingTaskStatus.CANCELLED.value,
+                    )
+                )
+            )
         if query:
             pattern = f"%{query}%"
             statement = statement.where(
@@ -416,21 +459,19 @@ class OperationsRepository:
                 summary.c.dependency_count > 0,
                 summary.c.ready_dependency_count == summary.c.dependency_count,
             )
-        total = await self._session.scalar(select(func.count()).select_from(filtered.subquery()))
-        rows = (
-            await self._session.execute(
-                filtered.order_by(
-                    case((summary.c.blocked_dependency_count > 0, 0), else_=1),
-                    case((summary.c.waiting_dependency_count > 0, 0), else_=1),
-                    summary.c.scheduled_at.desc(),
-                    summary.c.output_dataset,
-                    summary.c.process_id,
-                )
-                .offset(offset)
-                .limit(limit)
-            )
-        ).mappings()
-        return [dict(row) for row in rows], int(total or 0)
+        return await self._windowed_page(
+            filtered,
+            name="filtered_dependencies",
+            order_by=lambda rows: (
+                case((rows.c.blocked_dependency_count > 0, 0), else_=1),
+                case((rows.c.waiting_dependency_count > 0, 0), else_=1),
+                rows.c.scheduled_at.desc(),
+                rows.c.output_dataset,
+                rows.c.process_id,
+            ),
+            offset=offset,
+            limit=limit,
+        )
 
     async def dependency_source_summaries(
         self,
@@ -496,13 +537,17 @@ class OperationsRepository:
         ).join(ProcessingTask, ProcessingTask.process_id == DatasetRelease.process_id)
         if dataset_name:
             statement = statement.where(DatasetRelease.dataset_name == dataset_name)
-        total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))
-        rows = (
-            await self._session.execute(
-                statement.order_by(DatasetRelease.published_at.desc()).offset(offset).limit(limit)
-            )
-        ).mappings()
-        return [dict(row) for row in rows], int(total or 0)
+        return await self._windowed_page(
+            statement,
+            name="filtered_releases",
+            order_by=lambda rows: (
+                rows.c.published_at.desc(),
+                rows.c.dataset_name,
+                rows.c.scope_key,
+            ),
+            offset=offset,
+            limit=limit,
+        )
 
     async def release_coverage(
         self,
@@ -617,22 +662,31 @@ class OperationsRepository:
         ).join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
         statements = []
         if run_type in (None, "acquisition"):
-            statements.append(collection.where(CollectionBatch.scheduled_at >= since))
+            collection_statement = collection.where(CollectionBatch.scheduled_at >= since)
+            collection_statuses = _collection_run_status_values(status)
+            if collection_statuses is not None:
+                collection_statement = collection_statement.where(
+                    CollectionTask.status.in_(collection_statuses)
+                )
+            statements.append(collection_statement)
         if run_type in (None, "processing"):
-            statements.append(processing.where(CollectionBatch.scheduled_at >= since))
+            processing_statement = processing.where(CollectionBatch.scheduled_at >= since)
+            processing_statuses = _processing_run_status_values(status)
+            if processing_statuses is not None:
+                processing_statement = processing_statement.where(
+                    ProcessingTask.status.in_(processing_statuses)
+                )
+            statements.append(processing_statement)
         combined = union_all(*statements).subquery("combined_runs")
         filtered = select(combined)
         if batch_id is not None:
             filtered = filtered.where(combined.c.batch_id == batch_id)
-        status_condition = _run_status_condition(combined, status)
-        if status_condition is not None:
-            filtered = filtered.where(status_condition)
 
         if unresolved_only:
             candidates = filtered.subquery("candidate_runs")
             enriched = select(
                 candidates,
-                _run_recovered_expression(candidates),
+                _run_recovered_expression(candidates, run_type=run_type),
             ).subquery("enriched_runs")
             unresolved = (
                 select(enriched)
@@ -671,24 +725,13 @@ class OperationsRepository:
             ).subquery("ranked_unresolved_runs")
             filtered = select(ranked_unresolved).where(ranked_unresolved.c.logical_rank == 1)
 
-        filtered_rows = filtered.subquery("filtered_runs")
-        total = await self._session.scalar(select(func.count()).select_from(filtered_rows))
-        page_rows = (
-            select(filtered_rows)
-            .order_by(filtered_rows.c.sort_time.desc(), filtered_rows.c.id)
-            .offset(offset)
-            .limit(limit)
-            .subquery("page_runs")
+        return await self._windowed_page(
+            filtered,
+            name="filtered_runs",
+            order_by=lambda rows: (rows.c.sort_time.desc(), rows.c.id),
+            offset=offset,
+            limit=limit,
         )
-        rows = (
-            await self._session.execute(
-                select(page_rows).order_by(
-                    page_rows.c.sort_time.desc(),
-                    page_rows.c.id,
-                )
-            )
-        ).mappings()
-        return [dict(row) for row in rows], int(total or 0)
 
     async def scheduled_job_controls(self) -> dict[str, bool]:
         rows = (
@@ -742,33 +785,13 @@ class OperationsRepository:
             statement = statement.where(ScheduledJobExecution.job_id == job_id)
         if status:
             statement = statement.where(ScheduledJobExecution.status == status.upper())
-        total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))
-        rows = (
-            await self._session.execute(
-                statement.order_by(
-                    ScheduledJobExecution.created_at.desc(),
-                    ScheduledJobExecution.execution_id,
-                )
-                .offset(offset)
-                .limit(limit)
-            )
-        ).scalars()
-        return [
-            {
-                "execution_id": row.execution_id,
-                "job_id": row.job_id,
-                "trigger_type": row.trigger_type,
-                "status": row.status,
-                "requested_by": row.requested_by,
-                "reason": row.reason,
-                "scheduled_at": row.scheduled_at,
-                "started_at": row.started_at,
-                "finished_at": row.finished_at,
-                "duration_ms": row.duration_ms,
-                "error_message": row.error_message,
-            }
-            for row in rows
-        ], int(total or 0)
+        return await self._windowed_page(
+            statement,
+            name="filtered_scheduled_job_executions",
+            order_by=lambda rows: (rows.c.created_at.desc(), rows.c.execution_id),
+            offset=offset,
+            limit=limit,
+        )
 
     async def alert_rows(
         self,
@@ -895,38 +918,23 @@ class OperationsRepository:
             )
             .exists(),
         )
-        collection = (
+        collection_failure = (
             select(
                 CollectionTask.task_id.label("id"),
                 literal("acquisition").label("source"),
-                case(
-                    (collection_warning, "data_gap"),
-                    else_="action_required",
-                ).label("category"),
+                literal("action_required").label("category"),
                 CollectionTask.api_name.label("task_name"),
                 CollectionTask.status.label("status"),
-                case(
-                    (collection_warning, "DATA_GAP_WARNING"),
-                    else_=CollectionTask.error_code,
-                ).label("error_code"),
-                case(
-                    (collection_warning, CollectionTask.warning_message),
-                    else_=CollectionTask.error_message,
-                ).label("error_message"),
+                CollectionTask.error_code.label("error_code"),
+                CollectionTask.error_message.label("error_message"),
                 CollectionTask.finished_at.label("occurred_at"),
-                case(
-                    (
-                        collection_warning,
-                        literal("warning:") + CollectionTask.api_name,
-                    ),
-                    else_=(
-                        literal("failure:")
-                        + CollectionTask.provider
-                        + literal(":")
-                        + CollectionTask.api_name
-                        + literal(":")
-                        + CollectionTask.scope_key
-                    ),
+                (
+                    literal("failure:")
+                    + CollectionTask.provider
+                    + literal(":")
+                    + CollectionTask.api_name
+                    + literal(":")
+                    + CollectionTask.scope_key
                 ).label("group_key"),
             )
             .join(
@@ -935,67 +943,83 @@ class OperationsRepository:
             )
             .where(
                 CollectionTask.finished_at >= since,
-                or_(
-                    collection_warning,
-                    and_(
-                        CollectionTask.status == CollectionTaskStatus.FAILED.value,
-                        ~collection_recovered,
-                    ),
-                ),
+                CollectionTask.status == CollectionTaskStatus.FAILED.value,
+                ~collection_recovered,
             )
         )
-        processing = (
+        collection_gap = (
+            select(
+                CollectionTask.task_id.label("id"),
+                literal("acquisition").label("source"),
+                literal("data_gap").label("category"),
+                CollectionTask.api_name.label("task_name"),
+                CollectionTask.status.label("status"),
+                literal("DATA_GAP_WARNING").label("error_code"),
+                CollectionTask.warning_message.label("error_message"),
+                CollectionTask.finished_at.label("occurred_at"),
+                (literal("warning:") + CollectionTask.api_name).label("group_key"),
+            )
+            .join(
+                failed_collection_batch,
+                failed_collection_batch.batch_id == CollectionTask.batch_id,
+            )
+            .where(
+                CollectionTask.finished_at >= since,
+                collection_warning,
+            )
+        )
+        processing_failure = (
             select(
                 ProcessingTask.process_id.label("id"),
                 literal("processing").label("source"),
-                case(
-                    (processing_warning, "quality"),
-                    else_="action_required",
-                ).label("category"),
+                literal("action_required").label("category"),
                 ProcessingTask.output_dataset.label("task_name"),
                 ProcessingTask.status.label("status"),
-                case(
-                    (processing_warning, "DATA_QUALITY_WARNING"),
-                    else_=None,
-                ).label("error_code"),
-                case(
-                    (processing_warning, ProcessingTask.warning_message),
-                    else_=ProcessingTask.error_message,
-                ).label("error_message"),
+                literal(None).cast(String).label("error_code"),
+                ProcessingTask.error_message.label("error_message"),
                 processing_occurred_at.label("occurred_at"),
-                case(
-                    (
-                        processing_warning,
-                        literal("warning:") + ProcessingTask.output_dataset,
-                    ),
-                    else_=(
-                        literal("failure:")
-                        + ProcessingTask.output_dataset
-                        + literal(":")
-                        + func.coalesce(
-                            sql_cast(ProcessingTask.business_date, String),
-                            literal("global"),
-                        )
-                    ),
+                (
+                    literal("failure:")
+                    + ProcessingTask.output_dataset
+                    + literal(":")
+                    + func.coalesce(
+                        sql_cast(ProcessingTask.business_date, String),
+                        literal("global"),
+                    )
                 ).label("group_key"),
             )
             .join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
             .where(
-                or_(
-                    processing_warning,
-                    (ProcessingTask.status == ProcessingTaskStatus.FAILED.value)
-                    & ~processing_recovered,
-                ),
+                ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
+                ~processing_recovered,
                 processing_occurred_at >= since,
             )
         )
-        scheduler = select(
+        processing_quality = (
+            select(
+                ProcessingTask.process_id.label("id"),
+                literal("processing").label("source"),
+                literal("quality").label("category"),
+                ProcessingTask.output_dataset.label("task_name"),
+                ProcessingTask.status.label("status"),
+                literal("DATA_QUALITY_WARNING").label("error_code"),
+                ProcessingTask.warning_message.label("error_message"),
+                processing_occurred_at.label("occurred_at"),
+                (literal("warning:") + ProcessingTask.output_dataset).label("group_key"),
+            )
+            .join(CollectionBatch, CollectionBatch.batch_id == ProcessingTask.source_batch_id)
+            .where(
+                processing_warning,
+                processing_occurred_at >= since,
+            )
+        )
+        scheduler_failure = select(
             ScheduledJobExecution.execution_id.label("id"),
             literal("scheduler").label("source"),
             literal("action_required").label("category"),
             ScheduledJobExecution.job_id.label("task_name"),
             ScheduledJobExecution.status.label("status"),
-            literal(None).label("error_code"),
+            literal(None).cast(String).label("error_code"),
             ScheduledJobExecution.error_message.label("error_message"),
             scheduler_occurred_at.label("occurred_at"),
             (literal("scheduler:") + ScheduledJobExecution.job_id).label("group_key"),
@@ -1010,7 +1034,25 @@ class OperationsRepository:
             )
             .exists(),
         )
-        combined = union_all(collection, processing, scheduler).subquery()
+
+        branches: list[Any] = []
+        if source in {None, "acquisition"}:
+            if category in {"action_required", "all"}:
+                branches.append(collection_failure)
+            if category in {"data_gap", "all"}:
+                branches.append(collection_gap)
+        if source in {None, "processing"}:
+            if category in {"action_required", "all"}:
+                branches.append(processing_failure)
+            if category in {"quality", "all"}:
+                branches.append(processing_quality)
+        if source in {None, "scheduler"} and category in {"action_required", "all"}:
+            branches.append(scheduler_failure)
+        if not branches:
+            return [], 0
+
+        combined_query = branches[0] if len(branches) == 1 else union_all(*branches)
+        combined = combined_query.subquery("alert_candidates")
         ranked = select(
             combined,
             func.count()
@@ -1054,19 +1096,13 @@ class OperationsRepository:
             ).label("error_message"),
             ranked.c.occurred_at,
         ).where(ranked.c.alert_rank == 1)
-        if category != "all":
-            statement = statement.where(ranked.c.category == category)
-        if source:
-            statement = statement.where(ranked.c.source == source)
-        total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))
-        rows = (
-            await self._session.execute(
-                statement.order_by(ranked.c.occurred_at.desc().nullslast())
-                .offset(offset)
-                .limit(limit)
-            )
-        ).mappings()
-        return [dict(row) for row in rows], int(total or 0)
+        return await self._windowed_page(
+            statement,
+            name="filtered_alerts",
+            order_by=lambda rows: (rows.c.occurred_at.desc().nullslast(), rows.c.id),
+            offset=offset,
+            limit=limit,
+        )
 
 
 def _batch_status_condition(batch_rows: Any, status: str | None) -> Any:
@@ -1091,31 +1127,33 @@ def _batch_status_condition(batch_rows: Any, status: str | None) -> Any:
     return literal(False)
 
 
-def _run_status_condition(rows: Any, status: str | None) -> Any:
+def _collection_run_status_values(status: str | None) -> tuple[str, ...] | None:
     if status is None:
         return None
-    values = {
-        "pending": (
-            CollectionTaskStatus.PENDING.value,
-            ProcessingTaskStatus.QUEUED.value,
-        ),
+    return {
+        "pending": (CollectionTaskStatus.PENDING.value,),
+        "running": (CollectionTaskStatus.RUNNING.value,),
+        "waiting_retry": (CollectionTaskStatus.RETRY_WAIT.value,),
+        "succeeded": COLLECTION_SUCCESS,
+        "failed": COLLECTION_FAILED,
+    }.get(status, ("__NO_MATCH__",))
+
+
+def _processing_run_status_values(status: str | None) -> tuple[str, ...] | None:
+    if status is None:
+        return None
+    return {
+        "pending": (ProcessingTaskStatus.QUEUED.value,),
         "waiting_dependency": (ProcessingTaskStatus.WAITING_DEPENDENCY.value,),
-        "running": (
-            CollectionTaskStatus.RUNNING.value,
-            ProcessingTaskStatus.RUNNING.value,
-        ),
-        "waiting_retry": (
-            CollectionTaskStatus.RETRY_WAIT.value,
-            ProcessingTaskStatus.RETRY_WAIT.value,
-        ),
-        "succeeded": (*COLLECTION_SUCCESS, *PROCESSING_SUCCESS),
-        "failed": (*COLLECTION_FAILED, *PROCESSING_FAILED),
+        "running": (ProcessingTaskStatus.RUNNING.value,),
+        "waiting_retry": (ProcessingTaskStatus.RETRY_WAIT.value,),
+        "succeeded": PROCESSING_SUCCESS,
+        "failed": PROCESSING_FAILED,
         "blocked": (ProcessingTaskStatus.BLOCKED.value,),
-    }.get(status)
-    return rows.c.raw_status.in_(values) if values else literal(False)
+    }.get(status, ("__NO_MATCH__",))
 
 
-def _run_recovered_expression(rows: Any) -> Any:
+def _run_recovered_expression(rows: Any, *, run_type: str | None) -> Any:
     recovered_collection = aliased(CollectionTask)
     recovered_collection_batch = aliased(CollectionBatch)
     recovering_collection = aliased(CollectionTask)
@@ -1200,6 +1238,10 @@ def _run_recovered_expression(rows: Any) -> Any:
         )
         .exists(),
     )
+    if run_type == "acquisition":
+        return collection_recovered.label("recovered")
+    if run_type == "processing":
+        return processing_recovered.label("recovered")
     return case(
         (rows.c.run_type == "acquisition", collection_recovered),
         else_=processing_recovered,
