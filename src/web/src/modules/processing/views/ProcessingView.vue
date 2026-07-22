@@ -98,6 +98,7 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     const retried = Number(command.result.retryCount ?? 0)
     const skipped = Number(command.result.skippedDependencyCount ?? 0)
     const skippedRootCause = Number(command.result.skippedRootCauseCount ?? 0)
+    const skippedUnchanged = Number(command.result.skippedUnchangedCount ?? 0)
     const deduplicated = Number(command.result.deduplicatedCount ?? 0)
     const skippedActive = Number(command.result.skippedActiveCount ?? 0)
     const notes: string[] = []
@@ -105,6 +106,7 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     if (skippedRootCause) {
       notes.push(`${skippedRootCause} 个因股票主数据未补齐等待自动修复`)
     }
+    if (skippedUnchanged) notes.push(`${skippedUnchanged} 个因输入和加工规则未变化跳过`)
     if (deduplicated) notes.push(`去除 ${deduplicated} 个重复失败`)
     if (skippedActive) notes.push(`跳过 ${skippedActive} 个已有活动任务的范围`)
     ElMessage.success(
@@ -154,7 +156,7 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
         <div class="panel-card__header">
           <div>
             <h3>需要人工处理的失败任务</h3>
-            <p>自动重试次数已经用完；重试只读取现有原始数据，不会再次请求 Tushare。</p>
+            <p>自动重试已结束或错误不可自动恢复；重试只读取现有原始数据，不会再次请求 Tushare。</p>
           </div>
           <div class="failed-panel__actions">
             <el-button
@@ -331,7 +333,7 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
     <AdminCommandDialog
       v-model="retryAllOpen"
       title="重试全部失败加工任务"
-      :description="`将重试近 30 天仍未恢复的 ${failedData?.total ?? 0} 个失败记录。系统会按数据集和业务日期去重；依赖未就绪或已有活动任务的范围会跳过并提示。`"
+      :description="`将检查近 30 天仍未恢复的 ${failedData?.total ?? 0} 个失败记录。系统会按数据集和业务日期去重；依赖未就绪、已有活动任务，或输入和加工规则均未变化的范围会跳过并提示。`"
       confirm-text="确认全部重试"
       :loading="retryAllLoading"
       @submit="submitRetryAll"

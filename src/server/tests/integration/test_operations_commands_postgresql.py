@@ -634,6 +634,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
         "retryCount": 1,
         "skippedDependencyCount": 1,
         "skippedRootCauseCount": 1,
+        "skippedUnchangedCount": 0,
         "deduplicatedCount": 1,
         "skippedActiveCount": 1,
     }

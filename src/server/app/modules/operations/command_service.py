@@ -91,6 +91,9 @@ MAX_BACKFILL_DAYS = 3660
 DATE_SCOPED_DATASETS = tuple(
     spec.dataset_name for spec in ALL_DATASET_SPECS if spec.release_scope == ReleaseScope.DATE
 )
+PROCESS_TYPE_BY_DATASET = {
+    spec.dataset_name: f"{spec.processor}@{spec.processor_version}" for spec in ALL_DATASET_SPECS
+}
 
 
 class OperationCommandError(Exception):
@@ -748,12 +751,15 @@ class OperationCommandService:
                 raise OperationCommandError("加工任务不存在", status_code=404)
             if task.status not in PROCESSING_RETRYABLE:
                 raise OperationCommandError(f"状态 {task.status} 不允许人工重试")
-            missing_stock_codes = await self._missing_unknown_stock_codes(
-                task.error_message
-            )
+            missing_stock_codes = await self._missing_unknown_stock_codes(task.error_message)
             if missing_stock_codes:
                 raise OperationCommandError(
                     "股票主数据尚未补齐，任务正在等待自动修复，不能重复重试"
+                )
+            if _is_unchanged_deterministic_failure(task):
+                raise OperationCommandError(
+                    "原始输入和加工规则均未变化，重复重试不会改变结果；"
+                    "请先修复加工规则或重新采集"
                 )
             unavailable = await self._session.scalar(
                 select(func.count())
@@ -882,9 +888,11 @@ class OperationCommandService:
                 for task in candidates
                 if (codes := parse_unknown_stock_codes(task.error_message))
             }
-            all_unknown_codes = set().union(*unknown_codes_by_process.values()) if (
-                unknown_codes_by_process
-            ) else set()
+            all_unknown_codes = (
+                set().union(*unknown_codes_by_process.values())
+                if (unknown_codes_by_process)
+                else set()
+            )
             available_stock_codes = set(
                 await self._session.scalars(
                     select(Stock.ts_code).where(Stock.ts_code.in_(all_unknown_codes))
@@ -895,16 +903,22 @@ class OperationCommandService:
                 for process_id, codes in unknown_codes_by_process.items()
                 if not codes.issubset(available_stock_codes)
             }
+            unchanged_failure_ids = {
+                task.process_id for task in candidates if _is_unchanged_deterministic_failure(task)
+            }
             retried = tuple(
                 task
                 for task in candidates
                 if task.process_id not in unavailable_ids
                 and task.process_id not in unresolved_root_cause_ids
+                and task.process_id not in unchanged_failure_ids
             )
             if not retried:
                 if unresolved_root_cause_ids:
+                    raise OperationCommandError("失败任务的股票主数据尚未补齐，正在等待自动修复")
+                if unchanged_failure_ids:
                     raise OperationCommandError(
-                        "失败任务的股票主数据尚未补齐，正在等待自动修复"
+                        "失败任务的原始输入和加工规则均未变化，重复重试不会改变结果"
                     )
                 raise OperationCommandError("全部失败加工任务仍有未就绪依赖，暂不能重试")
             for task in retried:
@@ -916,6 +930,7 @@ class OperationCommandService:
                     - unresolved_root_cause_ids
                 ),
                 "skippedRootCauseCount": len(unresolved_root_cause_ids),
+                "skippedUnchangedCount": len(unchanged_failure_ids),
                 "deduplicatedCount": len(task_rows) - len(logical_tasks),
                 "skippedActiveCount": len(logical_tasks) - len(candidates),
             }
@@ -1386,6 +1401,9 @@ class OperationCommandService:
 
     @staticmethod
     def _queue_processing_task(task: ProcessingTask, now: datetime) -> None:
+        current_process_type = PROCESS_TYPE_BY_DATASET.get(task.output_dataset)
+        if current_process_type is not None:
+            task.process_type = current_process_type
         task.status = ProcessingTaskStatus.QUEUED.value
         task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
         task.next_retry_at = None
@@ -1399,9 +1417,7 @@ class OperationCommandService:
         if not codes:
             return set()
         available = set(
-            await self._session.scalars(
-                select(Stock.ts_code).where(Stock.ts_code.in_(codes))
-            )
+            await self._session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes)))
         )
         return codes - available
 
@@ -1427,6 +1443,16 @@ class OperationCommandService:
                     error_message=f"上游加工被人工终止：{reason}",
                 )
             )
+
+
+def _is_unchanged_deterministic_failure(task: ProcessingTask) -> bool:
+    current_process_type = PROCESS_TYPE_BY_DATASET.get(task.output_dataset)
+    return (
+        current_process_type is not None
+        and task.status == ProcessingTaskStatus.FAILED.value
+        and task.process_type == current_process_type
+        and task.attempt_count < task.max_attempts
+    )
 
 
 def _processing_logical_key(task: ProcessingTask) -> tuple[str, date | None]:

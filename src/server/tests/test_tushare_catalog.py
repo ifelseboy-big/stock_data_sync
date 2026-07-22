@@ -53,6 +53,10 @@ def test_trade_calendar_is_split_by_exchange_and_separate_year_batches() -> None
     assert TRADE_CAL_SPEC.expected_row_count(scopes[0].params) == 365
 
 
+def test_trade_date_extractor_ignores_provider_padding() -> None:
+    assert THS_HOT_SPEC.date_extractor({"trade_date": "20231012  "}) == date(2023, 10, 12)
+
+
 def test_activated_catalog_contains_core_stock_collection_interfaces() -> None:
     registry = build_tushare_api_registry()
 

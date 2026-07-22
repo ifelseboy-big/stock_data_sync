@@ -103,6 +103,145 @@ def test_stock_daily_core_uses_daily_keys_and_allows_extra_factor_rows(
     assert rows[0]["amount"] == Decimal("20000.0")
 
 
+def test_stock_daily_core_quarantines_conflicting_daily_basic_enrichment(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    daily = _daily_source("603081.SH")
+    daily.update(
+        {
+            "open": 11.51,
+            "high": 11.77,
+            "low": 11.28,
+            "close": 11.6,
+            "pre_close": 11.51,
+            "change": 0.09,
+            "pct_chg": 0.7819,
+        }
+    )
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [_daily_source("000001.SZ"), daily]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [
+                {
+                    "ts_code": "603081.SH",
+                    "trade_date": "20260717",
+                    "close": 11.51,
+                    "pe": 16.4368,
+                    "total_mv": 471481.3377,
+                },
+                {"ts_code": "000001.SZ", "trade_date": "20260717", "close": 10.5},
+            ],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [
+                {"ts_code": "603081.SH", "trade_date": "20260717", "adj_factor": 1.25},
+                {"ts_code": "000001.SZ", "trade_date": "20260717", "adj_factor": 1.25},
+            ],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    conflicting_row = next(row for row in rows if row["ts_code"] == "603081.SH")
+    assert conflicting_row["close"] == Decimal("11.6")
+    assert conflicting_row["adj_factor"] == Decimal("1.25")
+    assert conflicting_row["pe"] is None
+    assert conflicting_row["total_mv"] is None
+    assert prepared.rows_rejected == 1
+    assert "daily_basic 已隔离 1 条" in prepared.warning_messages[0]
+    assert "603081.SH" in prepared.warning_messages[0]
+
+
+def test_stock_daily_core_allows_small_daily_basic_key_gap(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    codes = ("000001.SZ", "920123.BJ")
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [_daily_source(code) for code in codes]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [{"ts_code": "000001.SZ", "trade_date": "20260717", "close": 10.5}],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [
+                {"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25}
+                for code in codes
+            ],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    bse_row = next(row for row in rows if row["ts_code"] == "920123.BJ")
+    assert bse_row["close"] == Decimal("10.5")
+    assert bse_row["turnover_rate"] is None
+    assert prepared.rows_rejected == 1
+    assert "daily_basic row is missing" in prepared.warning_messages[0]
+
+
+def test_stock_daily_core_blocks_large_daily_basic_gap(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    codes = tuple(f"{index:06d}.SZ" for index in range(101))
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [_daily_source(code) for code in codes]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [
+                {"ts_code": code, "trade_date": "20260717", "close": 10.5}
+                for code in codes[:-2]
+            ],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [
+                {"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25}
+                for code in codes
+            ],
+        ),
+    )
+
+    with pytest.raises(ProcessingError, match="quality threshold exceeded"):
+        StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+
+def test_stock_daily_core_still_requires_adj_factor_coverage(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [_daily_source("000001.SZ")]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [{"ts_code": "000001.SZ", "trade_date": "20260717", "close": 10.5}],
+        ),
+        _asset(store, batch_id, ADJ_FACTOR_SPEC, []),
+    )
+
+    with pytest.raises(ProcessingError, match="adj_factor does not cover daily"):
+        StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+
 def test_bse_code_mapping_uses_complete_official_table() -> None:
     assert len(BSE_CODE_ALIASES) == 248
     assert len(set(BSE_CODE_ALIASES.values())) == 248

@@ -67,7 +67,13 @@ class OperationsService:
             offset=0,
             limit=5,
         )
-        alerts = await self.alerts(now=now, source=None, page=1, page_size=5)
+        alerts = await self.alerts(
+            now=now,
+            category="action_required",
+            source=None,
+            page=1,
+            page_size=5,
+        )
         task_terminal = cast(int, counts["task_terminal"])
         provider_total = cast(int, counts["provider_total"])
         return OperationsOverview(
@@ -484,6 +490,7 @@ class OperationsService:
         self,
         *,
         now: datetime | None = None,
+        category: str,
         source: str | None,
         page: int,
         page_size: int,
@@ -499,6 +506,7 @@ class OperationsService:
                 AlertItem(
                     id=f"storage:{capacity.level.value}",
                     level="critical" if capacity.level == CapacityLevel.PROTECT else "warning",
+                    category="action_required",
                     source="storage",
                     task_name="raw_data_dir",
                     task_display_name="原始数据目录",
@@ -507,7 +515,10 @@ class OperationsService:
                     occurred_at=generated_at,
                 ),
             )
-        if source and source != "storage":
+        if (source and source != "storage") or category not in {
+            "action_required",
+            "all",
+        }:
             storage_alerts = []
         first_offset = (page - 1) * page_size
         storage_count = len(storage_alerts)
@@ -515,6 +526,7 @@ class OperationsService:
         database_limit = max(0, page_size - max(0, storage_count - first_offset))
         rows, database_total = await self._repository.alert_rows(
             since=generated_at - timedelta(days=30),
+            category=category,
             source=source if source != "storage" else "__NO_MATCH__",
             offset=database_offset,
             limit=database_limit,
@@ -625,6 +637,7 @@ class OperationsService:
         return AlertItem(
             id=f"{source}:{row['id']}",
             level=cast(Any, level),
+            category=cast(Any, row["category"]),
             source=source,
             task_name=task_name,
             task_display_name=presentation.display_name if presentation else task_name,

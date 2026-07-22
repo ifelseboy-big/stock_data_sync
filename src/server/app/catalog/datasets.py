@@ -150,7 +150,7 @@ ETF_SHARE_SIZE_DAILY_DATASET = DatasetSpec(
 STOCK_DAILY_CORE_DATASET = DatasetSpec(
     dataset_name="stock_daily.core",
     processor="stock_daily_core",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily_basic", ReleaseScope.DATE),
@@ -166,9 +166,9 @@ STOCK_DAILY_CORE_DATASET = DatasetSpec(
     release_scope=ReleaseScope.DATE,
     quality_rules=(
         QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),
-        QualityRuleSpec("daily_and_daily_basic_keys_equal"),
+        QualityRuleSpec("daily_basic_enrichment_isolated_below_threshold"),
         QualityRuleSpec("adj_factor_covers_daily_keys"),
-        QualityRuleSpec("daily_close_consistent"),
+        QualityRuleSpec("daily_price_internal_consistency"),
     ),
 )
 
@@ -277,7 +277,7 @@ CONCEPT_BOARD_DATASET = DatasetSpec(
 CONCEPT_BOARD_DAILY_DATASET = DatasetSpec(
     dataset_name="concept_board_daily",
     processor="concept_board_daily",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "concept_board", ReleaseScope.GLOBAL),
@@ -338,7 +338,7 @@ THEME_INDEX_DATASET = DatasetSpec(
 THEME_INDEX_DAILY_DATASET = DatasetSpec(
     dataset_name="theme_index_daily",
     processor="theme_index_daily",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "theme_index", ReleaseScope.GLOBAL),

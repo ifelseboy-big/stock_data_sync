@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -8,8 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog.tushare import build_tushare_api_registry
 from app.modules.acquisition.models import BatchType
-from app.modules.operations.command_service import OperationCommandService
+from app.modules.operations.command_service import (
+    OperationCommandService,
+    _is_unchanged_deterministic_failure,
+)
 from app.modules.operations.models import DeferredCollectionStage
+from app.modules.processing.models import ProcessingTask, ProcessingTaskStatus
 
 
 def _service(*scalar_results: tuple[str, ...]) -> tuple[OperationCommandService, MagicMock]:
@@ -22,6 +26,40 @@ def _service(*scalar_results: tuple[str, ...]) -> tuple[OperationCommandService,
         ),
         session,
     )
+
+
+def _failed_stock_daily_task(*, process_type: str, attempt_count: int = 1) -> ProcessingTask:
+    return ProcessingTask(
+        process_id=uuid4(),
+        source_batch_id=uuid4(),
+        process_type=process_type,
+        business_date=date(2026, 7, 17),
+        output_dataset="stock_daily.core",
+        output_version=uuid4(),
+        status=ProcessingTaskStatus.FAILED.value,
+        priority=100,
+        attempt_count=attempt_count,
+        max_attempts=3,
+    )
+
+
+def test_unchanged_deterministic_processing_failure_is_not_requeued() -> None:
+    unchanged = _failed_stock_daily_task(process_type="stock_daily_core@2")
+    prior_processor = _failed_stock_daily_task(process_type="stock_daily_core@1")
+    exhausted = _failed_stock_daily_task(process_type="stock_daily_core@2", attempt_count=3)
+
+    assert _is_unchanged_deterministic_failure(unchanged)
+    assert not _is_unchanged_deterministic_failure(prior_processor)
+    assert not _is_unchanged_deterministic_failure(exhausted)
+
+
+def test_processing_retry_records_the_current_processor_version() -> None:
+    task = _failed_stock_daily_task(process_type="stock_daily_core@1")
+
+    OperationCommandService._queue_processing_task(task, datetime.now(UTC))
+
+    assert task.process_type == "stock_daily_core@2"
+    assert task.status == ProcessingTaskStatus.QUEUED.value
 
 
 @pytest.mark.asyncio

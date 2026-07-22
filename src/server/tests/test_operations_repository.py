@@ -121,6 +121,7 @@ async def test_alerts_hide_dependency_blocks_and_expected_duplicate_warnings() -
 
     await repository.alert_rows(
         since=datetime(2026, 6, 1, tzinfo=UTC),
+        category="all",
         source=None,
         offset=0,
         limit=20,

@@ -213,7 +213,7 @@ def _extract_trade_date(record: Mapping[str, object]) -> date | None:
     value = record.get("trade_date")
     if value is None:
         return None
-    return datetime.strptime(str(value), "%Y%m%d").date()
+    return datetime.strptime(str(value).strip(), "%Y%m%d").date()
 
 
 def _arrow_schema(

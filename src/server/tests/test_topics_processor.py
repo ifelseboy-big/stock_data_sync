@@ -10,6 +10,7 @@ from app.catalog import ApiSpec
 from app.catalog.tushare import (
     DC_CONCEPT_CONS_SPEC,
     DC_HOT_SPEC,
+    THS_DAILY_SPEC,
     THS_HOT_SPEC,
     THS_INDEX_SPEC,
     TOP_LIST_SPEC,
@@ -17,6 +18,7 @@ from app.catalog.tushare import (
 from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.processors.topics import (
+    ConceptBoardDailyProcessor,
     ConceptBoardProcessor,
     DatedRows,
     MarketThemeMemberDailyProcessor,
@@ -65,6 +67,59 @@ def test_ths_index_rows_are_split_between_concepts_and_themes(tmp_path: Path) ->
     assert [row["ts_code"] for row in theme_rows] == ["700056.TI"]
     assert concept.rows_rejected == 1
     assert theme.rows_rejected == 1
+
+
+def test_ths_daily_processor_quarantines_single_missing_close(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        THS_DAILY_SPEC,
+        [
+            {
+                "ts_code": "885921.TI",
+                "trade_date": "20260713",
+                "close": 1000.5,
+            },
+            {
+                "ts_code": "861153.TI",
+                "trade_date": "20260713",
+                "close": None,
+            },
+        ],
+    )
+
+    prepared = ConceptBoardDailyProcessor().prepare(
+        _task(batch_id),
+        (dependency,),
+        store,
+    )
+
+    payload = cast(DatedRows, prepared.payload)
+    assert [row["ts_code"] for row in payload.rows] == ["885921.TI"]
+    assert prepared.rows_rejected == 1
+    assert "861153.TI" in prepared.warning_messages[0]
+
+
+def test_ths_daily_processor_blocks_when_every_close_is_missing(tmp_path: Path) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    dependency = _asset(
+        store,
+        batch_id,
+        THS_DAILY_SPEC,
+        [
+            {
+                "ts_code": "861153.TI",
+                "trade_date": "20260713",
+                "close": None,
+            }
+        ],
+    )
+
+    with pytest.raises(ProcessingError, match="close completeness threshold exceeded"):
+        ConceptBoardDailyProcessor().prepare(_task(batch_id), (dependency,), store)
 
 
 def test_top_list_processor_deduplicates_identical_provider_rows(tmp_path: Path) -> None:

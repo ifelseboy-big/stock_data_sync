@@ -774,6 +774,7 @@ class OperationsRepository:
         self,
         *,
         since: datetime,
+        category: str,
         source: str | None,
         offset: int,
         limit: int,
@@ -797,15 +798,11 @@ class OperationsRepository:
             (ProcessingTask.status == ProcessingTaskStatus.SUCCESS.value)
             & ProcessingTask.warning_message.is_not(None)
             & ~or_(
-                ProcessingTask.warning_message.like(
-                    "%个证券历史代码映射为现行代码%"
-                ),
+                ProcessingTask.warning_message.like("%个证券历史代码映射为现行代码%"),
                 ProcessingTask.warning_message.like(
                     "%重复记录仅有名称或数值精度差异，已确定性合并%"
                 ),
-                ProcessingTask.warning_message.like(
-                    "%完全重复记录，加工时已确定性去重%"
-                ),
+                ProcessingTask.warning_message.like("%完全重复记录，加工时已确定性去重%"),
             )
         )
         collection_warning = (
@@ -902,6 +899,10 @@ class OperationsRepository:
             select(
                 CollectionTask.task_id.label("id"),
                 literal("acquisition").label("source"),
+                case(
+                    (collection_warning, "data_gap"),
+                    else_="action_required",
+                ).label("category"),
                 CollectionTask.api_name.label("task_name"),
                 CollectionTask.status.label("status"),
                 case(
@@ -947,6 +948,10 @@ class OperationsRepository:
             select(
                 ProcessingTask.process_id.label("id"),
                 literal("processing").label("source"),
+                case(
+                    (processing_warning, "quality"),
+                    else_="action_required",
+                ).label("category"),
                 ProcessingTask.output_dataset.label("task_name"),
                 ProcessingTask.status.label("status"),
                 case(
@@ -987,6 +992,7 @@ class OperationsRepository:
         scheduler = select(
             ScheduledJobExecution.execution_id.label("id"),
             literal("scheduler").label("source"),
+            literal("action_required").label("category"),
             ScheduledJobExecution.job_id.label("task_name"),
             ScheduledJobExecution.status.label("status"),
             literal(None).label("error_code"),
@@ -1008,11 +1014,21 @@ class OperationsRepository:
         ranked = select(
             combined,
             func.count()
-            .over(partition_by=(combined.c.source, combined.c.group_key))
+            .over(
+                partition_by=(
+                    combined.c.category,
+                    combined.c.source,
+                    combined.c.group_key,
+                )
+            )
             .label("alert_count"),
             func.row_number()
             .over(
-                partition_by=(combined.c.source, combined.c.group_key),
+                partition_by=(
+                    combined.c.category,
+                    combined.c.source,
+                    combined.c.group_key,
+                ),
                 order_by=(combined.c.occurred_at.desc().nullslast(), combined.c.id),
             )
             .label("alert_rank"),
@@ -1020,6 +1036,7 @@ class OperationsRepository:
         statement = select(
             ranked.c.id,
             ranked.c.source,
+            ranked.c.category,
             ranked.c.task_name,
             ranked.c.status,
             ranked.c.error_code,
@@ -1037,6 +1054,8 @@ class OperationsRepository:
             ).label("error_message"),
             ranked.c.occurred_at,
         ).where(ranked.c.alert_rank == 1)
+        if category != "all":
+            statement = statement.where(ranked.c.category == category)
         if source:
             statement = statement.where(ranked.c.source == source)
         total = await self._session.scalar(select(func.count()).select_from(statement.subquery()))

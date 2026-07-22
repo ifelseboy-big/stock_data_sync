@@ -57,6 +57,8 @@ from app.modules.topics.models import (
 from app.storage import RawAssetStore
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+THS_DAILY_MAX_MISSING_CLOSE_COUNT = 20
+THS_DAILY_MAX_MISSING_CLOSE_RATIO = Decimal("0.01")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,12 +124,12 @@ class ConceptBoardDailyProcessor:
         dependencies: tuple[RawDependencyAsset, ...],
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
-        business_date = _business_date(task, self.name)
-        raw = read_raw_assets(dependencies, asset_store, (THS_DAILY_SPEC,))
-        rows = tuple(
-            _concept_board_daily_row(row, business_date) for row in raw.rows_by_api["ths_daily"]
+        return _prepare_ths_daily_rows(
+            task,
+            dependencies,
+            asset_store,
+            dataset=self.name,
         )
-        return PreparedDataset(DatedRows(business_date, rows), raw.row_count)
 
     def write(
         self, session: Session, prepared: PreparedDataset, *, published_at: datetime
@@ -274,12 +276,12 @@ class ThemeIndexDailyProcessor:
         dependencies: tuple[RawDependencyAsset, ...],
         asset_store: RawAssetStore,
     ) -> PreparedDataset:
-        business_date = _business_date(task, self.name)
-        raw = read_raw_assets(dependencies, asset_store, (THS_DAILY_SPEC,))
-        rows = tuple(
-            _concept_board_daily_row(row, business_date) for row in raw.rows_by_api["ths_daily"]
+        return _prepare_ths_daily_rows(
+            task,
+            dependencies,
+            asset_store,
+            dataset=self.name,
         )
-        return PreparedDataset(DatedRows(business_date, rows), raw.row_count)
 
     def write(
         self, session: Session, prepared: PreparedDataset, *, published_at: datetime
@@ -749,6 +751,59 @@ def _prepare_daily_rows(
     raw = read_raw_assets(dependencies, asset_store, (spec,))
     rows = tuple(transform(row, business_date) for row in raw.rows_by_api[spec.api_name])
     return PreparedDataset(DatedRows(business_date, rows), raw.row_count)
+
+
+def _prepare_ths_daily_rows(
+    task: ClaimedProcessingTask,
+    dependencies: tuple[RawDependencyAsset, ...],
+    asset_store: RawAssetStore,
+    *,
+    dataset: str,
+) -> PreparedDataset:
+    business_date = _business_date(task, dataset)
+    raw = read_raw_assets(dependencies, asset_store, (THS_DAILY_SPEC,))
+    source_rows = raw.rows_by_api["ths_daily"]
+    missing_close_rows = tuple(
+        row for row in source_rows if optional_text(row.get("close")) is None
+    )
+    allowed_count = min(
+        THS_DAILY_MAX_MISSING_CLOSE_COUNT,
+        max(
+            1,
+            int(Decimal(len(source_rows)) * THS_DAILY_MAX_MISSING_CLOSE_RATIO),
+        ),
+    )
+    if len(missing_close_rows) > allowed_count or len(missing_close_rows) == len(source_rows):
+        examples = ", ".join(
+            required_text(row.get("ts_code"), "ts_code")
+            for row in missing_close_rows[:5]
+        )
+        raise ProcessingError(
+            "ths_daily close completeness threshold exceeded; "
+            f"rows={len(source_rows)}, missing={len(missing_close_rows)}, "
+            f"allowed={allowed_count}, examples={examples}"
+        )
+    rows = tuple(
+        _concept_board_daily_row(row, business_date)
+        for row in source_rows
+        if optional_text(row.get("close")) is not None
+    )
+    warning_messages: tuple[str, ...] = ()
+    if missing_close_rows:
+        examples = ", ".join(
+            required_text(row.get("ts_code"), "ts_code")
+            for row in missing_close_rows[:5]
+        )
+        warning_messages = (
+            f"ths_daily 已隔离 {len(missing_close_rows)} 条缺少收盘价的板块记录，"
+            f"并继续发布其余数据（示例：{examples}）",
+        )
+    return PreparedDataset(
+        DatedRows(business_date, rows),
+        raw.row_count,
+        len(missing_close_rows),
+        warning_messages,
+    )
 
 
 def _filter_daily_stocks(

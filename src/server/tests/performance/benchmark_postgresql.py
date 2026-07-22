@@ -811,6 +811,7 @@ async def _benchmark_operations(profile: ScaleProfile) -> list[BenchmarkResult]:
                 "operations_alerts",
                 lambda: repository.alert_rows(
                     since=since,
+                    category="all",
                     source=None,
                     offset=0,
                     limit=50,

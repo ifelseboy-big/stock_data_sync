@@ -91,6 +91,7 @@ def test_processing_data_quality_warning_is_presented_as_warning() -> None:
         {
             "id": "process-id",
             "source": "processing",
+            "category": "quality",
             "task_name": "stock_top_list_daily",
             "status": "SUCCESS",
             "error_code": "DATA_QUALITY_WARNING",
@@ -101,6 +102,7 @@ def test_processing_data_quality_warning_is_presented_as_warning() -> None:
     )
 
     assert alert.level == "warning"
+    assert alert.category == "quality"
     assert alert.task_display_name == "龙虎榜股票明细"
     assert alert.task_name == "stock_top_list_daily"
     assert alert.title == "数据质量提醒"
@@ -114,6 +116,7 @@ def test_collection_data_gap_is_presented_as_warning() -> None:
         {
             "id": "task-id",
             "source": "acquisition",
+            "category": "data_gap",
             "task_name": "ths_hot",
             "status": "EMPTY_VALID",
             "error_code": "DATA_GAP_WARNING",
@@ -124,6 +127,7 @@ def test_collection_data_gap_is_presented_as_warning() -> None:
     )
 
     assert alert.level == "warning"
+    assert alert.category == "data_gap"
     assert alert.task_display_name == "同花顺股票热榜"
     assert alert.task_name == "ths_hot"
     assert alert.title == "数据缺口提醒"

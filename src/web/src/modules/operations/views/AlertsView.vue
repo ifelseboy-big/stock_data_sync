@@ -6,13 +6,19 @@ import PageHeader from '@/components/PageHeader.vue'
 import ResourceLabel from '@/components/ResourceLabel.vue'
 import { useApiResource } from '@/composables/useApiResource'
 import { getAlerts } from '@/modules/operations/api'
-import type { AlertLevel } from '@/modules/operations/contracts'
+import type { AlertCategory, AlertLevel } from '@/modules/operations/contracts'
 import { formatDateTime } from '@/modules/operations/presentation'
 
 const page = ref(1)
 const source = ref<'' | 'acquisition' | 'processing' | 'scheduler' | 'storage'>('')
+const category = ref<AlertCategory | 'all'>('action_required')
 const { data, loading, error, load } = useApiResource(() =>
-  getAlerts({ source: source.value || undefined, page: page.value, pageSize: 20 }),
+  getAlerts({
+    category: category.value,
+    source: source.value || undefined,
+    page: page.value,
+    pageSize: 20,
+  }),
 )
 
 function search() {
@@ -30,15 +36,31 @@ const sourceMap = {
   scheduler: '调度',
   storage: '存储',
 } as const
+const categoryMap: Record<AlertCategory, { label: string; type: 'danger' | 'warning' | 'info' }> = {
+  action_required: { label: '待处理', type: 'danger' },
+  data_gap: { label: '数据缺口', type: 'warning' },
+  quality: { label: '质量记录', type: 'info' },
+}
 </script>
 
 <template>
   <section>
-    <PageHeader title="告警中心" description="集中查看任务、依赖、接口和系统异常。">
+    <PageHeader
+      title="告警中心"
+      description="默认只显示需处理异常；已接受的数据缺口和自动隔离质量问题可切换查看。"
+    >
       <template #actions><el-button :loading="loading" @click="load">刷新</el-button></template>
     </PageHeader>
     <el-card shadow="never" class="filter-card">
       <el-form :inline="true" @submit.prevent="search">
+        <el-form-item label="类型">
+          <el-select v-model="category" style="width: 160px">
+            <el-option label="待处理" value="action_required" />
+            <el-option label="数据缺口" value="data_gap" />
+            <el-option label="质量记录" value="quality" />
+            <el-option label="全部" value="all" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="来源">
           <el-select v-model="source" clearable placeholder="全部" style="width: 160px">
             <el-option label="采集" value="acquisition" />
@@ -60,6 +82,13 @@ const sourceMap = {
         @retry="load"
       >
         <el-table :data="data?.items ?? []" scrollbar-always-on>
+          <el-table-column label="类型" width="105">
+            <template #default="{ row }">
+              <el-tag :type="categoryMap[row.category as AlertCategory].type">
+                {{ categoryMap[row.category as AlertCategory].label }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="级别" width="90">
             <template #default="{ row }">
               <el-tag :type="levelMap[row.level as AlertLevel].type">

@@ -117,6 +117,27 @@ MONEYFLOW_FIELDS = (
     "sell_elg_amount",
     "net_mf_amount",
 )
+DAILY_BASIC_ENRICHMENT_FIELDS = (
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dv_ratio",
+    "dv_ttm",
+    "total_share",
+    "float_share",
+    "free_share",
+    "total_mv",
+    "circ_mv",
+)
+DAILY_BASIC_MAX_ANOMALY_COUNT = 20
+DAILY_BASIC_MAX_ANOMALY_RATIO = Decimal("0.01")
+PRICE_TOLERANCE = Decimal("0.001")
+PCT_CHANGE_TOLERANCE = Decimal("0.01")
 
 
 class StockDailyCoreProcessor:
@@ -146,9 +167,7 @@ class StockDailyCoreProcessor:
             raw.rows_by_api["daily_basic"],
             api_name="daily_basic",
             key_fields=("trade_date",),
-            matching_fields=tuple(
-                field for field in DAILY_BASIC_SPEC.fields if field != "ts_code"
-            ),
+            matching_fields=tuple(field for field in DAILY_BASIC_SPEC.fields if field != "ts_code"),
         )
         factor_rows, factor_rejected, factor_warnings = _normalize_stock_code_rows(
             raw.rows_by_api["adj_factor"],
@@ -157,27 +176,50 @@ class StockDailyCoreProcessor:
             matching_fields=("trade_date", "adj_factor"),
         )
         daily = _key_by_security_date(daily_rows, task.business_date, self.name)
-        daily_basic = _key_by_security_date(
-            basic_rows, task.business_date, self.name
-        )
-        adj_factor = _key_by_security_date(
-            factor_rows, task.business_date, self.name
-        )
-        _require_same_keys("daily", daily, "daily_basic", daily_basic)
+        daily_basic = _key_by_security_date(basic_rows, task.business_date, self.name)
+        adj_factor = _key_by_security_date(factor_rows, task.business_date, self.name)
         _require_key_coverage("adj_factor", adj_factor, "daily", daily)
-        rows = tuple(
-            _stock_daily_core_row(
-                daily[key],
-                daily_basic[key],
-                adj_factor[key],
-                task.business_date,
+        rows: list[PreparedRow] = []
+        daily_basic_issues: list[tuple[tuple[str, date], str]] = []
+        valid_daily_basic_count = 0
+        for key in sorted(daily):
+            source = daily[key]
+            try:
+                enrichment = _daily_basic_enrichment(
+                    source,
+                    daily_basic.get(key),
+                )
+            except ProcessingError as exc:
+                daily_basic_issues.append((key, str(exc)))
+                enrichment = _empty_daily_basic_enrichment()
+            else:
+                valid_daily_basic_count += 1
+            rows.append(
+                _stock_daily_core_row(
+                    source,
+                    adj_factor[key],
+                    task.business_date,
+                    enrichment,
+                )
             )
-            for key in sorted(daily)
+
+        extra_basic_keys = tuple(sorted(set(daily_basic) - set(daily)))
+        for key in extra_basic_keys:
+            daily_basic_issues.append((key, "daily_basic has no matching daily row"))
+        _validate_daily_basic_quality(
+            daily_count=len(daily),
+            valid_count=valid_daily_basic_count,
+            issues=daily_basic_issues,
         )
         if not rows:
             raise ProcessingError("stock_daily.core cannot publish an empty trading day")
+        quality_warnings = (
+            (_daily_basic_quality_warning(daily_basic_issues),)
+            if daily_basic_issues
+            else ()
+        )
         return PreparedDataset(
-            payload=rows,
+            payload=tuple(rows),
             rows_read=raw.row_count,
             rows_rejected=(
                 daily_rejected
@@ -185,8 +227,15 @@ class StockDailyCoreProcessor:
                 + factor_rejected
                 + len(adj_factor)
                 - len(daily)
+                + len(extra_basic_keys)
+                + sum(1 for key, _reason in daily_basic_issues if key in daily)
             ),
-            warning_messages=(*daily_warnings, *basic_warnings, *factor_warnings),
+            warning_messages=(
+                *daily_warnings,
+                *basic_warnings,
+                *factor_warnings,
+                *quality_warnings,
+            ),
         )
 
     def write(
@@ -232,9 +281,7 @@ class StockDailyLimitProcessor:
             key_fields=("trade_date",),
             matching_fields=("trade_date", "pre_close", "up_limit", "down_limit"),
         )
-        rows = tuple(
-            _stock_limit_row(source, task.business_date) for source in normalized
-        )
+        rows = tuple(_stock_limit_row(source, task.business_date) for source in normalized)
         if not rows:
             raise ProcessingError("stock_daily.limit cannot publish an empty trading day")
         return PreparedDataset(
@@ -324,9 +371,7 @@ class StockTechnicalDailyProcessor:
                 "amount",
             ),
         )
-        rows = tuple(
-            _stock_technical_row(source, task.business_date) for source in normalized
-        )
+        rows = tuple(_stock_technical_row(source, task.business_date) for source in normalized)
         if not rows:
             raise ProcessingError("stock_technical_daily cannot publish an empty trading day")
         return PreparedDataset(
@@ -399,13 +444,9 @@ class StockMoneyflowDailyProcessor:
             raw.rows_by_api["moneyflow"],
             api_name="moneyflow",
             key_fields=("trade_date",),
-            matching_fields=tuple(
-                field for field in MONEYFLOW_SPEC.fields if field != "ts_code"
-            ),
+            matching_fields=tuple(field for field in MONEYFLOW_SPEC.fields if field != "ts_code"),
         )
-        rows = tuple(
-            _moneyflow_row(source, task.business_date) for source in normalized
-        )
+        rows = tuple(_moneyflow_row(source, task.business_date) for source in normalized)
         if not rows:
             raise ProcessingError("stock_moneyflow_daily cannot publish an empty trading day")
         return PreparedDataset(
@@ -460,9 +501,7 @@ class StockSuspendDailyProcessor:
             key_fields=("trade_date", "suspend_type"),
             matching_fields=("trade_date", "suspend_type", "suspend_timing"),
         )
-        rows = tuple(
-            _suspend_row(source, task.business_date) for source in normalized
-        )
+        rows = tuple(_suspend_row(source, task.business_date) for source in normalized)
         return PreparedDataset(
             payload=(task.business_date, rows),
             rows_read=raw.row_count,
@@ -534,14 +573,11 @@ def _normalize_stock_code_rows(
 
         previous_row, previous_is_alias = previous
         mismatched = tuple(
-            field
-            for field in matching_fields
-            if previous_row.get(field) != row.get(field)
+            field for field in matching_fields if previous_row.get(field) != row.get(field)
         )
         if mismatched:
             raise ProcessingError(
-                f"{api_name} stock code alias conflict for {new_code}; "
-                f"fields={mismatched[:5]}"
+                f"{api_name} stock code alias conflict for {new_code}; fields={mismatched[:5]}"
             )
         duplicate_count += 1
         if previous_is_alias and not is_alias:
@@ -562,21 +598,6 @@ def _normalize_stock_code_rows(
     )
 
 
-def _require_same_keys(
-    left_name: str,
-    left: dict[tuple[str, date], RawRow],
-    right_name: str,
-    right: dict[tuple[str, date], RawRow],
-) -> None:
-    if left.keys() == right.keys():
-        return
-    missing = sorted(set(left) - set(right))[:5]
-    extra = sorted(set(right) - set(left))[:5]
-    raise ProcessingError(
-        f"{left_name}/{right_name} key mismatch; missing={missing}, extra={extra}"
-    )
-
-
 def _require_key_coverage(
     superset_name: str,
     superset: dict[tuple[str, date], RawRow],
@@ -590,34 +611,73 @@ def _require_key_coverage(
 
 def _stock_daily_core_row(
     daily: RawRow,
-    basic: RawRow,
     factor: RawRow,
     business_date: date | None,
+    enrichment: PreparedRow,
 ) -> PreparedRow:
     trade_date = yyyymmdd(daily.get("trade_date"), "trade_date")
     require_business_date(trade_date, business_date, "stock_daily.core")
     daily_close = cast(Decimal, decimal_value(daily.get("close"), "daily.close", required=True))
-    basic_close = cast(
+    pre_close = cast(
         Decimal,
-        decimal_value(basic.get("close"), "daily_basic.close", required=True),
+        decimal_value(daily.get("pre_close"), "pre_close", required=True),
     )
-    if abs(daily_close - basic_close) > Decimal("0.001"):
-        raise ProcessingError(f"daily/daily_basic close mismatch for {daily.get('ts_code')}")
-    return {
+    change = cast(Decimal, decimal_value(daily.get("change"), "change", required=True))
+    pct_chg = cast(Decimal, decimal_value(daily.get("pct_chg"), "pct_chg", required=True))
+    open_price = cast(Decimal, decimal_value(daily.get("open"), "open", required=True))
+    high_price = cast(Decimal, decimal_value(daily.get("high"), "high", required=True))
+    low_price = cast(Decimal, decimal_value(daily.get("low"), "low", required=True))
+    _validate_daily_price_values(
+        ts_code=required_text(daily.get("ts_code"), "ts_code"),
+        open_price=open_price,
+        high_price=high_price,
+        low_price=low_price,
+        close=daily_close,
+        pre_close=pre_close,
+        change=change,
+        pct_chg=pct_chg,
+    )
+    row: PreparedRow = {
         "ts_code": required_text(daily.get("ts_code"), "ts_code"),
         "trade_date": trade_date,
-        "open": decimal_value(daily.get("open"), "open", required=True),
-        "high": decimal_value(daily.get("high"), "high", required=True),
-        "low": decimal_value(daily.get("low"), "low", required=True),
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
         "close": daily_close,
-        "pre_close": decimal_value(daily.get("pre_close"), "pre_close", required=True),
-        "change": decimal_value(daily.get("change"), "change", required=True),
-        "pct_chg": decimal_value(daily.get("pct_chg"), "pct_chg", required=True),
+        "pre_close": pre_close,
+        "change": change,
+        "pct_chg": pct_chg,
         "volume": scaled_decimal(daily.get("vol"), "vol", 100, required=True),
         "amount": scaled_decimal(daily.get("amount"), "amount", 1_000, required=True),
         "after_hours_volume": scaled_decimal(daily.get("ah_vol"), "ah_vol", 100),
         "after_hours_amount": scaled_decimal(daily.get("ah_amount"), "ah_amount", 1_000),
         "adj_factor": decimal_value(factor.get("adj_factor"), "adj_factor", required=True),
+        "limit_status": None,
+        "up_limit": None,
+        "down_limit": None,
+    }
+    row.update(enrichment)
+    return row
+
+
+def _daily_basic_enrichment(daily: RawRow, basic: RawRow | None) -> PreparedRow:
+    ts_code = required_text(daily.get("ts_code"), "ts_code")
+    if basic is None:
+        raise ProcessingError("daily_basic row is missing")
+    daily_close = cast(
+        Decimal,
+        decimal_value(daily.get("close"), "daily.close", required=True),
+    )
+    basic_close = cast(
+        Decimal,
+        decimal_value(basic.get("close"), "daily_basic.close", required=True),
+    )
+    if abs(daily_close - basic_close) > PRICE_TOLERANCE:
+        raise ProcessingError(
+            f"daily/daily_basic close mismatch for {ts_code}: "
+            f"daily={daily_close}, daily_basic={basic_close}"
+        )
+    return {
         "turnover_rate": decimal_value(basic.get("turnover_rate"), "turnover_rate"),
         "turnover_rate_f": decimal_value(basic.get("turnover_rate_f"), "turnover_rate_f"),
         "volume_ratio": decimal_value(basic.get("volume_ratio"), "volume_ratio"),
@@ -633,10 +693,67 @@ def _stock_daily_core_row(
         "free_share": scaled_decimal(basic.get("free_share"), "free_share", 10_000),
         "total_mv": scaled_decimal(basic.get("total_mv"), "total_mv", 10_000),
         "circ_mv": scaled_decimal(basic.get("circ_mv"), "circ_mv", 10_000),
-        "limit_status": None,
-        "up_limit": None,
-        "down_limit": None,
     }
+
+
+def _empty_daily_basic_enrichment() -> PreparedRow:
+    return {field: None for field in DAILY_BASIC_ENRICHMENT_FIELDS}
+
+
+def _validate_daily_basic_quality(
+    *,
+    daily_count: int,
+    valid_count: int,
+    issues: list[tuple[tuple[str, date], str]],
+) -> None:
+    if not issues:
+        return
+    allowed_count = min(
+        DAILY_BASIC_MAX_ANOMALY_COUNT,
+        max(1, int(Decimal(daily_count) * DAILY_BASIC_MAX_ANOMALY_RATIO)),
+    )
+    if valid_count and len(issues) <= allowed_count:
+        return
+    examples = ", ".join(
+        f"{key[0]}({reason})" for key, reason in issues[:5]
+    )
+    raise ProcessingError(
+        "daily_basic enrichment quality threshold exceeded; "
+        f"daily={daily_count}, valid={valid_count}, anomalies={len(issues)}, "
+        f"allowed={allowed_count}, examples={examples}"
+    )
+
+
+def _daily_basic_quality_warning(
+    issues: list[tuple[tuple[str, date], str]],
+) -> str:
+    examples = ", ".join(f"{key[0]}（{reason}）" for key, reason in issues[:5])
+    return (
+        f"daily_basic 已隔离 {len(issues)} 条缺失或不一致的估值记录，"
+        f"对应股票仅发布行情与复权数据，估值派生字段置空（示例：{examples}）"
+    )
+
+
+def _validate_daily_price_values(
+    *,
+    ts_code: str,
+    open_price: Decimal,
+    high_price: Decimal,
+    low_price: Decimal,
+    close: Decimal,
+    pre_close: Decimal,
+    change: Decimal,
+    pct_chg: Decimal,
+) -> None:
+    if min(open_price, high_price, low_price, close, pre_close) <= 0:
+        raise ProcessingError(f"daily contains a non-positive price for {ts_code}")
+    if low_price > min(open_price, close) or high_price < max(open_price, close):
+        raise ProcessingError(f"daily OHLC values are inconsistent for {ts_code}")
+    if abs(pre_close + change - close) > PRICE_TOLERANCE:
+        raise ProcessingError(f"daily price change is inconsistent for {ts_code}")
+    expected_pct_chg = change / pre_close * Decimal(100)
+    if abs(expected_pct_chg - pct_chg) > PCT_CHANGE_TOLERANCE:
+        raise ProcessingError(f"daily pct_chg is inconsistent for {ts_code}")
 
 
 def _stock_limit_row(source: RawRow, business_date: date | None) -> PreparedRow:

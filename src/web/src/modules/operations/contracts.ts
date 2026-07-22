@@ -11,6 +11,7 @@ export type ExecutionStatus =
 
 export type PriorityLevel = 'current_normal' | 'auto_supplement' | 'manual_rerun' | 'historical'
 export type AlertLevel = 'critical' | 'warning' | 'info'
+export type AlertCategory = 'action_required' | 'data_gap' | 'quality'
 
 export interface PageResult<T> {
   items: T[]
@@ -118,6 +119,7 @@ export interface ProviderEndpointMetric {
 export interface AlertItem {
   id: string
   level: AlertLevel
+  category: AlertCategory
   source: string
   taskName: string
   taskDisplayName: string
@@ -278,6 +280,7 @@ export interface DependencyQuery {
 }
 
 export interface AlertQuery {
+  category?: AlertCategory | 'all'
   source?: 'acquisition' | 'processing' | 'scheduler' | 'storage'
   page?: number
   pageSize?: number

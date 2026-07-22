@@ -209,6 +209,9 @@ async def scheduled_job_executions(
 @router.get("/alerts", response_model=PageResult[AlertItem])
 async def alerts(
     db: DbSession,
+    category: Literal["action_required", "data_gap", "quality", "all"] = (
+        "action_required"
+    ),
     source: Annotated[
         Literal["acquisition", "processing", "scheduler", "storage"] | None,
         Query(),
@@ -217,6 +220,7 @@ async def alerts(
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=200)] = 20,
 ) -> PageResult[AlertItem]:
     return await _service(db).alerts(
+        category=category,
         source=source,
         page=page,
         page_size=page_size,

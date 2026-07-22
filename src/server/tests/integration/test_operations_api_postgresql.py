@@ -419,7 +419,8 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
             "/api/v1/operations/runs"
             "?runType=processing&status=failed&unresolvedOnly=true&pageSize=200"
         )
-        alerts = await client.get("/api/v1/operations/alerts")
+        action_alerts = await client.get("/api/v1/operations/alerts")
+        alerts = await client.get("/api/v1/operations/alerts?category=all")
         command_options = await client.get("/api/v1/operations/command-options")
         resources = await client.get("/api/v1/system/resources")
 
@@ -432,6 +433,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         provider,
         runs,
         unresolved_runs,
+        action_alerts,
         alerts,
         command_options,
         resources,
@@ -459,11 +461,21 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
     assert any(item["id"] == str(collection_task_id) for item in runs.json()["items"])
     assert all(item["id"] != str(recovered_failure_id) for item in unresolved_runs.json()["items"])
     assert resources.json()["database"]["sharedBuffersBytes"] > 0
+    assert all(item["category"] == "action_required" for item in action_alerts.json()["items"])
+    assert all(
+        item["id"] != f"processing:{warning_process_id}"
+        for item in action_alerts.json()["items"]
+    )
+    assert all(
+        item["id"] != f"acquisition:{collection_gap_id}"
+        for item in action_alerts.json()["items"]
+    )
     assert all(item["id"] != f"processing:{blocked_process_id}" for item in alerts.json()["items"])
     warning_alert = next(
         item for item in alerts.json()["items"] if item["id"] == f"processing:{warning_process_id}"
     )
     assert warning_alert["level"] == "warning"
+    assert warning_alert["category"] == "quality"
     assert warning_alert["taskDisplayName"] == "龙虎榜股票明细"
     assert warning_alert["taskName"] == "stock_top_list_daily"
     assert warning_alert["title"] == "数据质量提醒"
@@ -473,6 +485,7 @@ async def test_operations_read_models_use_runtime_and_provider_records() -> None
         item for item in alerts.json()["items"] if item["id"] == f"acquisition:{collection_gap_id}"
     )
     assert gap_alert["level"] == "warning"
+    assert gap_alert["category"] == "data_gap"
     assert gap_alert["taskDisplayName"] == "同花顺股票热榜"
     assert gap_alert["taskName"] == "ths_hot"
     assert gap_alert["title"] == "数据缺口提醒"

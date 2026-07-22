@@ -23,6 +23,7 @@ type PriorityLevel = Literal[
     "historical",
 ]
 type AlertLevel = Literal["critical", "warning", "info"]
+type AlertCategory = Literal["action_required", "data_gap", "quality"]
 type ScheduledJobStatus = Literal["pending", "running", "success", "failed"]
 type ReadinessStatus = Literal["ready", "waiting", "blocked"]
 
@@ -145,6 +146,7 @@ class ProviderMonitoring(OperationsModel):
 class AlertItem(OperationsModel):
     id: str
     level: AlertLevel
+    category: AlertCategory
     source: str
     task_name: str
     task_display_name: str
