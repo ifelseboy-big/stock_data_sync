@@ -150,7 +150,7 @@ ETF_SHARE_SIZE_DAILY_DATASET = DatasetSpec(
 STOCK_DAILY_CORE_DATASET = DatasetSpec(
     dataset_name="stock_daily.core",
     processor="stock_daily_core",
-    processor_version="2",
+    processor_version="3",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily_basic", ReleaseScope.DATE),
@@ -175,7 +175,7 @@ STOCK_DAILY_CORE_DATASET = DatasetSpec(
 STOCK_DAILY_LIMIT_DATASET = DatasetSpec(
     dataset_name="stock_daily.limit",
     processor="stock_daily_limit",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "stk_limit", ReleaseScope.DATE),
         DatasetDependencySpec(

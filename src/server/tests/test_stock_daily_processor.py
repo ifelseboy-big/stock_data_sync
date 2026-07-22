@@ -1,7 +1,9 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pyarrow as pa
@@ -23,11 +25,13 @@ from app.catalog.tushare import (
 )
 from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
+from app.modules.processing.processors.base import PreparedDataset
 from app.modules.processing.processors.stock_daily import (
     StockDailyCoreProcessor,
     StockMoneyflowDailyProcessor,
     StockSuspendDailyProcessor,
     StockTechnicalDailyProcessor,
+    _existing_stock_daily_patch_values,
     _validate_limit_pre_close,
 )
 from app.modules.processing.staging import PreparedRow
@@ -177,10 +181,7 @@ def test_stock_daily_core_allows_small_daily_basic_key_gap(tmp_path: Path) -> No
             store,
             batch_id,
             ADJ_FACTOR_SPEC,
-            [
-                {"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25}
-                for code in codes
-            ],
+            [{"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25} for code in codes],
         ),
     )
 
@@ -204,9 +205,189 @@ def test_stock_daily_core_blocks_large_daily_basic_gap(tmp_path: Path) -> None:
             store,
             batch_id,
             DAILY_BASIC_SPEC,
+            [{"ts_code": code, "trade_date": "20260717", "close": 10.5} for code in codes[:-2]],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [{"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25} for code in codes],
+        ),
+    )
+
+    with pytest.raises(ProcessingError, match="quality threshold exceeded"):
+        StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+
+def test_stock_daily_core_isolates_systematic_bse_previous_close_lag(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    changed_bse_codes = tuple(f"920{index:03d}.BJ" for index in range(108))
+    unchanged_bse_codes = tuple(f"921{index:03d}.BJ" for index in range(12))
+    missing_bse_codes = tuple(f"922{index:03d}.BJ" for index in range(8))
+    other_codes = tuple(f"00{index:04d}.SZ" for index in range(872))
+    bse_codes = (*changed_bse_codes, *unchanged_bse_codes, *missing_bse_codes)
+    codes = (*bse_codes, *other_codes)
+    daily_rows = [_daily_source(code) for code in (*changed_bse_codes, *missing_bse_codes)]
+    daily_rows.extend(_unchanged_daily_source(code) for code in unchanged_bse_codes)
+    daily_rows.extend(_daily_source(code) for code in other_codes)
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, daily_rows),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [
+                {
+                    "ts_code": code,
+                    "trade_date": "20260717",
+                    "close": 10.0 if code.endswith(".BJ") else 10.5,
+                    "pe": 12.3,
+                }
+                for code in (*changed_bse_codes, *unchanged_bse_codes, *other_codes)
+            ],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [{"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25} for code in codes],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert len(rows) == len(codes)
+    assert prepared.rows_rejected == len(bse_codes)
+    assert all(row["pe"] is None for row in rows if row["ts_code"].endswith(".BJ"))
+    assert "daily_basic 已隔离 128 条" in prepared.warning_messages[0]
+    assert "BSE segment matches previous-close snapshot" in prepared.warning_messages[0]
+
+
+def test_stock_daily_core_still_blocks_large_unexplained_bse_close_gap(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    codes = tuple(f"92{index:04d}.BJ" for index in range(101))
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [_daily_source(code) for code in codes]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [
+                {
+                    "ts_code": code,
+                    "trade_date": "20260717",
+                    "close": 9.9 if index < 2 else 10.5,
+                }
+                for index, code in enumerate(codes)
+            ],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [{"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25} for code in codes],
+        ),
+    )
+
+    with pytest.raises(ProcessingError, match="quality threshold exceeded"):
+        StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+
+def test_stock_daily_core_isolates_single_missing_previous_close(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    codes = tuple(f"00{index:04d}.SZ" for index in range(100))
+    incomplete = _daily_source("920570.BJ")
+    incomplete.update({"pre_close": None, "change": None, "pct_chg": None})
+    daily_rows = [_daily_source(code) for code in codes]
+    daily_rows.append(incomplete)
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, daily_rows),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [{"ts_code": code, "trade_date": "20260717", "close": 10.5} for code in codes],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [
+                {"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25}
+                for code in (*codes, "920570.BJ")
+            ],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert len(rows) == len(codes)
+    assert all(row["ts_code"] != "920570.BJ" for row in rows)
+    assert prepared.rows_rejected == 1
+    assert "daily_basic row is missing" in prepared.warning_messages[0]
+    assert "daily 已隔离 1 条" in prepared.warning_messages[1]
+    assert "daily pre_close is missing for 920570.BJ" in prepared.warning_messages[1]
+
+
+def test_stock_daily_core_rejects_zero_previous_close_before_deriving_pct_change(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    daily = _daily_source("000001.SZ")
+    daily.update({"pre_close": 0, "change": None, "pct_chg": None})
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [daily]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [{"ts_code": "000001.SZ", "trade_date": "20260717", "close": 10.5}],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [{"ts_code": "000001.SZ", "trade_date": "20260717", "adj_factor": 1.25}],
+        ),
+    )
+
+    with pytest.raises(ProcessingError, match="non-positive price"):
+        StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+
+def test_stock_daily_core_blocks_large_missing_previous_close_gap(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    codes = tuple(f"00{index:04d}.SZ" for index in range(99))
+    incomplete_codes = ("920570.BJ", "920571.BJ")
+    daily_rows = [_daily_source(code) for code in codes]
+    for code in incomplete_codes:
+        row = _daily_source(code)
+        row.update({"pre_close": None, "change": None, "pct_chg": None})
+        daily_rows.append(row)
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, daily_rows),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
             [
                 {"ts_code": code, "trade_date": "20260717", "close": 10.5}
-                for code in codes[:-2]
+                for code in (*codes, *incomplete_codes)
             ],
         ),
         _asset(
@@ -215,12 +396,12 @@ def test_stock_daily_core_blocks_large_daily_basic_gap(tmp_path: Path) -> None:
             ADJ_FACTOR_SPEC,
             [
                 {"ts_code": code, "trade_date": "20260717", "adj_factor": 1.25}
-                for code in codes
+                for code in (*codes, *incomplete_codes)
             ],
         ),
     )
 
-    with pytest.raises(ProcessingError, match="quality threshold exceeded"):
+    with pytest.raises(ProcessingError, match="daily price quality threshold exceeded"):
         StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
 
 
@@ -336,9 +517,7 @@ def test_stock_technical_maps_bse_alias_and_prefers_current_code(tmp_path: Path)
         ),
     )
 
-    prepared = StockTechnicalDailyProcessor().prepare(
-        _task(batch_id), dependencies, store
-    )
+    prepared = StockTechnicalDailyProcessor().prepare(_task(batch_id), dependencies, store)
 
     rows = cast(tuple[PreparedRow, ...], prepared.payload)
     assert len(rows) == 1
@@ -409,6 +588,139 @@ def test_stock_daily_limit_still_rejects_conflicting_pre_close() -> None:
         )
 
 
+def test_stock_daily_core_write_preserves_published_limit_columns() -> None:
+    row: PreparedRow = {
+        "ts_code": "000001.SZ",
+        "trade_date": BUSINESS_DATE,
+        "open": Decimal("10.0"),
+        "high": Decimal("11.0"),
+        "low": Decimal("9.5"),
+        "close": Decimal("10.5"),
+        "pre_close": Decimal("10.0"),
+        "change": Decimal("0.5"),
+        "pct_chg": Decimal("5.0"),
+        "limit_status": None,
+        "up_limit": None,
+        "down_limit": None,
+    }
+    session = MagicMock()
+    session.scalars.return_value = ["000001.SZ"]
+    _mock_current_limit_release(session)
+    session.execute.return_value = [
+        (
+            "000001.SZ",
+            Decimal("10.5"),
+            Decimal("10.0"),
+            1,
+            Decimal("11.0"),
+            Decimal("9.0"),
+        ),
+    ]
+    processor = StockDailyCoreProcessor()
+    publisher = MagicMock()
+    publisher.publish.return_value = 1
+    processor._publisher = publisher
+
+    result = processor.write(
+        session,
+        PreparedDataset((row,), 1),
+        published_at=datetime.now(UTC),
+    )
+
+    assert result.rows_written == 1
+    published_rows = publisher.publish.call_args.kwargs["rows"]
+    assert published_rows[0]["limit_status"] == 1
+    assert published_rows[0]["up_limit"] == Decimal("11.0")
+    assert published_rows[0]["down_limit"] == Decimal("9.0")
+
+
+def test_existing_stock_daily_patch_values_are_keyed_by_security() -> None:
+    session = MagicMock()
+    _mock_current_limit_release(session)
+    session.execute.return_value = [
+        (
+            "000001.SZ",
+            Decimal("10.5"),
+            Decimal("10.0"),
+            1,
+            Decimal("11.0"),
+            Decimal("9.0"),
+        ),
+    ]
+
+    values = _existing_stock_daily_patch_values(
+        session,
+        (
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": BUSINESS_DATE,
+                "close": Decimal("10.5"),
+                "pre_close": Decimal("10.0"),
+            },
+        ),
+        BUSINESS_DATE,
+    )
+
+    assert values == {
+        "000001.SZ": {
+            "limit_status": 1,
+            "up_limit": Decimal("11.0"),
+            "down_limit": Decimal("9.0"),
+        }
+    }
+
+
+def test_existing_stock_daily_patch_values_drop_stale_limit_columns() -> None:
+    session = MagicMock()
+    _mock_current_limit_release(session)
+    session.execute.return_value = [
+        (
+            "000001.SZ",
+            Decimal("10.4"),
+            Decimal("10.0"),
+            1,
+            Decimal("11.0"),
+            Decimal("9.0"),
+        ),
+    ]
+
+    values = _existing_stock_daily_patch_values(
+        session,
+        (
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": BUSINESS_DATE,
+                "close": Decimal("10.5"),
+                "pre_close": Decimal("10.0"),
+            },
+        ),
+        BUSINESS_DATE,
+    )
+
+    assert values == {}
+
+
+def test_existing_stock_daily_patch_values_require_valid_limit_release() -> None:
+    session = MagicMock()
+    session.get.return_value = None
+
+    values = _existing_stock_daily_patch_values(
+        session,
+        (
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": BUSINESS_DATE,
+                "close": Decimal("10.5"),
+                "pre_close": Decimal("10.0"),
+            },
+        ),
+        BUSINESS_DATE,
+    )
+
+    assert values == {}
+    session.execute.assert_not_called()
+
+
 def _asset(
     store: LocalRawAssetStore,
     batch_id: UUID,
@@ -436,6 +748,19 @@ def _asset(
         content_hash=metadata.content_hash,
         schema_fingerprint=metadata.schema_fingerprint,
         row_count=metadata.row_count,
+    )
+
+
+def _mock_current_limit_release(session: MagicMock) -> None:
+    core_process_id = uuid4()
+    limit_process_id = uuid4()
+    session.get.side_effect = (
+        SimpleNamespace(process_id=core_process_id),
+        SimpleNamespace(process_id=limit_process_id),
+        SimpleNamespace(
+            status="READY",
+            resolved_release_process_id=core_process_id,
+        ),
     )
 
 
@@ -470,6 +795,12 @@ def _daily_source(ts_code: str) -> dict[str, object]:
         "vol": 10.0,
         "amount": 20.0,
     }
+
+
+def _unchanged_daily_source(ts_code: str) -> dict[str, object]:
+    row = _daily_source(ts_code)
+    row.update({"close": 10.0, "change": 0.0, "pct_chg": 0.0})
+    return row
 
 
 def _task(batch_id: UUID) -> ClaimedProcessingTask:

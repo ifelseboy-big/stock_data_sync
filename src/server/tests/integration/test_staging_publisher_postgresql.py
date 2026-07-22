@@ -1,11 +1,14 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
+from threading import Event
 
 import pytest
 from sqlalchemy import delete, func, select, text
 
 from app.catalog import WriteStrategy
 from app.db.sync_session import SyncSessionFactory
+from app.modules.processing.repository import _lock_publication_scope
 from app.modules.processing.staging import PostgresStagingPublisher
 from app.modules.stocks.models import Stock, StockTechnicalDaily, TradeCalendar
 
@@ -104,3 +107,33 @@ def test_staging_publisher_creates_missing_target_partition_before_write() -> No
         assert session.scalar(select(func.to_regclass(partition_name))) == partition_name
         assert session.get(StockTechnicalDaily, (ts_code, business_date)) is not None
         session.rollback()
+
+
+def test_stock_daily_date_publication_lock_serializes_competing_writers() -> None:
+    business_date = date(2099, 12, 30)
+    attempting = Event()
+    acquired = Event()
+
+    def acquire_competing_lock() -> None:
+        attempting.set()
+        with SyncSessionFactory() as session, session.begin():
+            assert _lock_publication_scope(
+                session,
+                dataset_name="stock_daily.limit",
+                business_date=business_date,
+            )
+            acquired.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with SyncSessionFactory() as session, session.begin():
+            assert _lock_publication_scope(
+                session,
+                dataset_name="stock_daily.core",
+                business_date=business_date,
+            )
+            future = executor.submit(acquire_competing_lock)
+            assert attempting.wait(timeout=2)
+            assert not acquired.wait(timeout=0.2)
+
+        assert acquired.wait(timeout=2)
+        future.result(timeout=2)

@@ -206,9 +206,7 @@ def reconcile_processing_runtime(*, recover_all_running: bool = False) -> None:
             "processing_tasks_recovered",
             recovered_count=recovered_count,
         )
-    unknown_stock_recovery = get_processing_repository().reconcile_unknown_stock_failures(
-        now=now
-    )
+    unknown_stock_recovery = get_processing_repository().reconcile_unknown_stock_failures(now=now)
     if unknown_stock_recovery.requeued_count:
         structlog.get_logger("scheduler").info(
             "unknown_stock_tasks_requeued",

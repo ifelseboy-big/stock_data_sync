@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -40,6 +40,7 @@ from app.modules.processing.models import (
     ProcessingTask,
     ProcessingTaskStatus,
 )
+from app.modules.processing.repository import PROCESSING_VERSION_NAMESPACE
 from app.modules.stocks.models import Stock, TradeCalendar
 from app.modules.topics.models import ConceptBoard, ThemeIndex
 from app.scheduler.catalog import SCHEDULED_JOB_BY_ID, ScheduledJobDefinition
@@ -94,6 +95,7 @@ DATE_SCOPED_DATASETS = tuple(
 PROCESS_TYPE_BY_DATASET = {
     spec.dataset_name: f"{spec.processor}@{spec.processor_version}" for spec in ALL_DATASET_SPECS
 }
+DATASET_SPEC_BY_NAME = {spec.dataset_name: spec for spec in ALL_DATASET_SPECS}
 
 
 class OperationCommandError(Exception):
@@ -758,8 +760,7 @@ class OperationCommandService:
                 )
             if _is_unchanged_deterministic_failure(task):
                 raise OperationCommandError(
-                    "原始输入和加工规则均未变化，重复重试不会改变结果；"
-                    "请先修复加工规则或重新采集"
+                    "原始输入和加工规则均未变化，重复重试不会改变结果；请先修复加工规则或重新采集"
                 )
             unavailable = await self._session.scalar(
                 select(func.count())
@@ -771,8 +772,8 @@ class OperationCommandService:
             )
             if unavailable:
                 raise OperationCommandError("加工任务仍有未就绪依赖，不能进入执行队列")
-            self._queue_processing_task(task, now)
-            return {"processId": str(process_id), "status": task.status}
+            queued_task = await self._queue_processing_task(task, now)
+            return {"processId": str(queued_task.process_id), "status": queued_task.status}
 
         return await self._execute_task_command(
             action="RETRY_PROCESSING_TASK",
@@ -921,10 +922,9 @@ class OperationCommandService:
                         "失败任务的原始输入和加工规则均未变化，重复重试不会改变结果"
                     )
                 raise OperationCommandError("全部失败加工任务仍有未就绪依赖，暂不能重试")
-            for task in retried:
-                self._queue_processing_task(task, now)
+            queued_tasks = [await self._queue_processing_task(task, now) for task in retried]
             return {
-                "retryCount": len(retried),
+                "retryCount": len(queued_tasks),
                 "skippedDependencyCount": len(
                     ({task.process_id for task in candidates} & unavailable_ids)
                     - unresolved_root_cause_ids
@@ -1399,11 +1399,105 @@ class OperationCommandService:
         await self._session.flush()
         return batch_id
 
-    @staticmethod
-    def _queue_processing_task(task: ProcessingTask, now: datetime) -> None:
+    async def _queue_processing_task(
+        self,
+        task: ProcessingTask,
+        now: datetime,
+    ) -> ProcessingTask:
         current_process_type = PROCESS_TYPE_BY_DATASET.get(task.output_dataset)
-        if current_process_type is not None:
-            task.process_type = current_process_type
+        spec = DATASET_SPEC_BY_NAME.get(task.output_dataset)
+        if (
+            current_process_type is None
+            or spec is None
+            or task.process_type == current_process_type
+        ):
+            self._reset_processing_task_for_retry(task, now)
+            return task
+
+        output_version = uuid5(
+            PROCESSING_VERSION_NAMESPACE,
+            f"{task.source_batch_id}:{task.output_dataset}:{spec.processor_version}:"
+            f"{task.business_date.isoformat() if task.business_date else 'GLOBAL'}",
+        )
+        process_id = uuid5(PROCESSING_VERSION_NAMESPACE, f"process:{output_version}")
+        created_id = (
+            await self._session.execute(
+                insert(ProcessingTask)
+                .values(
+                    process_id=process_id,
+                    source_batch_id=task.source_batch_id,
+                    process_type=current_process_type,
+                    business_date=task.business_date,
+                    output_dataset=task.output_dataset,
+                    output_version=output_version,
+                    status=ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+                    priority=task.priority,
+                    attempt_count=0,
+                    max_attempts=max(task.max_attempts, spec.max_attempts),
+                )
+                .on_conflict_do_nothing(index_elements=(ProcessingTask.output_version,))
+                .returning(ProcessingTask.process_id)
+            )
+        ).scalar_one_or_none()
+        replacement = await self._session.scalar(
+            select(ProcessingTask).where(ProcessingTask.process_id == process_id).with_for_update()
+        )
+        if replacement is None:
+            raise OperationCommandError("创建当前加工版本失败，请稍后重试", status_code=503)
+        if created_id is not None:
+            dependencies = tuple(
+                await self._session.scalars(
+                    select(ProcessingDependency).where(
+                        ProcessingDependency.process_id == task.process_id
+                    )
+                )
+            )
+            for dependency in dependencies:
+                await self._session.execute(
+                    insert(ProcessingDependency)
+                    .values(
+                        process_id=replacement.process_id,
+                        dependency_type=dependency.dependency_type,
+                        dependency_name=dependency.dependency_name,
+                        dependency_scope_key=dependency.dependency_scope_key,
+                        dependency_scope=dependency.dependency_scope,
+                        resolved_asset_id=dependency.resolved_asset_id,
+                        resolved_release_process_id=dependency.resolved_release_process_id,
+                        status=dependency.status,
+                        blocked_reason=dependency.blocked_reason,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=(
+                            ProcessingDependency.process_id,
+                            ProcessingDependency.dependency_type,
+                            ProcessingDependency.dependency_name,
+                            ProcessingDependency.dependency_scope_key,
+                        )
+                    )
+                )
+        if replacement.status == ProcessingTaskStatus.SUCCESS.value:
+            raise OperationCommandError("当前加工版本已经成功，无需重复重试")
+        if replacement.status == ProcessingTaskStatus.RUNNING.value:
+            raise OperationCommandError("当前加工版本正在运行，无需重复重试")
+        if _is_unchanged_deterministic_failure(replacement):
+            raise OperationCommandError(
+                "原始输入和加工规则均未变化，重复重试不会改变结果；请先修复加工规则或重新采集"
+            )
+        unavailable = await self._session.scalar(
+            select(func.count())
+            .select_from(ProcessingDependency)
+            .where(
+                ProcessingDependency.process_id == replacement.process_id,
+                ProcessingDependency.status != DependencyStatus.READY.value,
+            )
+        )
+        if unavailable:
+            raise OperationCommandError("当前加工版本仍有未就绪依赖，不能进入执行队列")
+        self._reset_processing_task_for_retry(replacement, now)
+        return replacement
+
+    @staticmethod
+    def _reset_processing_task_for_retry(task: ProcessingTask, now: datetime) -> None:
         task.status = ProcessingTaskStatus.QUEUED.value
         task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
         task.next_retry_at = None

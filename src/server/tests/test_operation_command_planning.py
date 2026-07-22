@@ -44,22 +44,49 @@ def _failed_stock_daily_task(*, process_type: str, attempt_count: int = 1) -> Pr
 
 
 def test_unchanged_deterministic_processing_failure_is_not_requeued() -> None:
-    unchanged = _failed_stock_daily_task(process_type="stock_daily_core@2")
-    prior_processor = _failed_stock_daily_task(process_type="stock_daily_core@1")
-    exhausted = _failed_stock_daily_task(process_type="stock_daily_core@2", attempt_count=3)
+    unchanged = _failed_stock_daily_task(process_type="stock_daily_core@3")
+    prior_processor = _failed_stock_daily_task(process_type="stock_daily_core@2")
+    exhausted = _failed_stock_daily_task(process_type="stock_daily_core@3", attempt_count=3)
 
     assert _is_unchanged_deterministic_failure(unchanged)
     assert not _is_unchanged_deterministic_failure(prior_processor)
     assert not _is_unchanged_deterministic_failure(exhausted)
 
 
-def test_processing_retry_records_the_current_processor_version() -> None:
-    task = _failed_stock_daily_task(process_type="stock_daily_core@1")
+@pytest.mark.asyncio
+async def test_processing_retry_creates_current_version_without_mutating_old_task() -> None:
+    task = _failed_stock_daily_task(process_type="stock_daily_core@2")
+    replacement = ProcessingTask(
+        process_id=uuid4(),
+        source_batch_id=task.source_batch_id,
+        process_type="stock_daily_core@3",
+        business_date=task.business_date,
+        output_dataset=task.output_dataset,
+        output_version=uuid4(),
+        status=ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+        priority=task.priority,
+        attempt_count=0,
+        max_attempts=3,
+    )
+    insert_result = MagicMock()
+    insert_result.scalar_one_or_none.return_value = replacement.process_id
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=insert_result)
+    session.scalar = AsyncMock(side_effect=(replacement, 0))
+    session.scalars = AsyncMock(return_value=())
+    service = OperationCommandService(
+        cast(AsyncSession, session),
+        build_tushare_api_registry(),
+    )
 
-    OperationCommandService._queue_processing_task(task, datetime.now(UTC))
+    queued = await service._queue_processing_task(task, datetime.now(UTC))
 
     assert task.process_type == "stock_daily_core@2"
-    assert task.status == ProcessingTaskStatus.QUEUED.value
+    assert task.status == ProcessingTaskStatus.FAILED.value
+    assert queued.process_id != task.process_id
+    assert queued.output_version != task.output_version
+    assert queued.process_type == "stock_daily_core@3"
+    assert queued.status == ProcessingTaskStatus.QUEUED.value
 
 
 @pytest.mark.asyncio

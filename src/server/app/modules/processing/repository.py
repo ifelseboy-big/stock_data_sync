@@ -3,12 +3,17 @@ from datetime import date, datetime, timedelta
 from uuid import UUID, uuid5
 
 import structlog
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.catalog import DatasetSpec, DependencyKind, ReleaseScope
-from app.common.errors import UNKNOWN_STOCKS_ERROR_PREFIX, parse_unknown_stock_codes
+from app.catalog.datasets import STOCK_DAILY_CORE_DATASET, STOCK_DAILY_LIMIT_DATASET
+from app.common.errors import (
+    UNKNOWN_STOCKS_ERROR_PREFIX,
+    ProcessingError,
+    parse_unknown_stock_codes,
+)
 from app.modules.acquisition.domain import TERMINAL_TASK_STATUSES
 from app.modules.acquisition.models import (
     BatchStatus,
@@ -48,6 +53,20 @@ PROCESSING_TERMINAL_STATUSES = frozenset(
         ProcessingTaskStatus.CANCELLED.value,
     }
 )
+STOCK_DAILY_CONFLICT_DATASETS = frozenset({"stock_daily.core", "stock_daily.limit"})
+STOCK_DAILY_BLOCKING_CORE_STATUSES = (
+    ProcessingTaskStatus.QUEUED.value,
+    ProcessingTaskStatus.RUNNING.value,
+    ProcessingTaskStatus.RETRY_WAIT.value,
+)
+STOCK_DAILY_CORE_PROCESS_TYPE = (
+    f"{STOCK_DAILY_CORE_DATASET.processor}@{STOCK_DAILY_CORE_DATASET.processor_version}"
+)
+STOCK_DAILY_LIMIT_PROCESS_TYPE = (
+    f"{STOCK_DAILY_LIMIT_DATASET.processor}@{STOCK_DAILY_LIMIT_DATASET.processor_version}"
+)
+
+
 class ProcessingRepository:
     def __init__(self, session_factory: SessionFactory) -> None:
         self._session_factory = session_factory
@@ -64,6 +83,7 @@ class ProcessingRepository:
         queued_task_count = 0
         blocked_task_count = 0
         with self._session_factory() as session, session.begin():
+            specs_by_dataset = {spec.dataset_name: spec for spec in dataset_specs}
             batch_statement = select(CollectionBatch).where(
                 CollectionBatch.status == BatchStatus.CLOSED.value
             )
@@ -131,6 +151,7 @@ class ProcessingRepository:
                         task=task,
                         spec=spec,
                         source_batch=batch,
+                        specs_by_dataset=specs_by_dataset,
                     )
                     status = self._refresh_task_readiness(session, task, now=now)
                     queued_task_count += int(status == ProcessingTaskStatus.QUEUED)
@@ -193,6 +214,18 @@ class ProcessingRepository:
             running_datasets = select(ProcessingTask.output_dataset).where(
                 ProcessingTask.status == ProcessingTaskStatus.RUNNING.value
             )
+            active_core = aliased(ProcessingTask)
+            active_core_dates = select(active_core.business_date).where(
+                active_core.output_dataset == "stock_daily.core",
+                or_(
+                    active_core.status.in_(STOCK_DAILY_BLOCKING_CORE_STATUSES),
+                    and_(
+                        active_core.status == ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+                        active_core.process_type == STOCK_DAILY_CORE_PROCESS_TYPE,
+                    ),
+                ),
+                active_core.business_date.is_not(None),
+            )
             task_statement = select(ProcessingTask).where(
                 or_(
                     ProcessingTask.status == ProcessingTaskStatus.QUEUED.value,
@@ -201,6 +234,10 @@ class ProcessingRepository:
                     & (ProcessingTask.next_retry_at <= now),
                 ),
                 ProcessingTask.output_dataset.not_in(running_datasets),
+                or_(
+                    ProcessingTask.output_dataset != "stock_daily.limit",
+                    ProcessingTask.business_date.not_in(active_core_dates),
+                ),
             )
             if source_batch_ids is not None:
                 if not source_batch_ids:
@@ -278,6 +315,13 @@ class ProcessingRepository:
         rows_rejected: int,
     ) -> ProcessingTransition:
         with self._session_factory() as session, session.begin():
+            publication_locked = _lock_publication_scope(
+                session,
+                dataset_name=spec.dataset_name,
+                business_date=task.business_date,
+            )
+            if publication_locked:
+                published_at = max(published_at, datetime.now(published_at.tzinfo))
             process = session.scalar(
                 select(ProcessingTask)
                 .where(ProcessingTask.process_id == task.process_id)
@@ -285,6 +329,31 @@ class ProcessingRepository:
             )
             if process is None or process.status != ProcessingTaskStatus.RUNNING.value:
                 raise RuntimeError("processing task is not in RUNNING state")
+            expected_process_type = f"{spec.processor}@{spec.processor_version}"
+            if (
+                spec.dataset_name in STOCK_DAILY_CONFLICT_DATASETS
+                and process.process_type != expected_process_type
+            ):
+                raise ProcessingError(
+                    "processing task uses a stale processor version; replan the closed batch"
+                )
+            if spec.dataset_name == "stock_daily.limit":
+                self._ensure_no_active_stock_daily_core(
+                    session,
+                    business_date=task.business_date,
+                )
+                self._refresh_stock_daily_core_dependency(
+                    session,
+                    process_id=task.process_id,
+                    business_date=task.business_date,
+                )
+            if expected_process_type in {
+                STOCK_DAILY_CORE_PROCESS_TYPE,
+                STOCK_DAILY_LIMIT_PROCESS_TYPE,
+            } and not _has_current_stock_daily_output_version(session, process, spec):
+                raise ProcessingError(
+                    "processing task output lineage is stale; replan the closed batch"
+                )
             publication = processor.write(session, prepared, published_at=published_at)
             rows_written = publication.rows_written
             scope_key = _release_scope_key(spec.release_scope, task.business_date)
@@ -320,6 +389,13 @@ class ProcessingRepository:
             process.rows_written = rows_written
             process.error_message = None
             process.warning_message = "\n".join(prepared.warning_messages)[:4000] or None
+            if spec.dataset_name == "stock_daily.core":
+                self._invalidate_stale_stock_daily_limit(
+                    session,
+                    core_process_id=process.process_id,
+                    business_date=task.business_date,
+                    now=published_at,
+                )
             self._resolve_downstream_after_success(session, process.process_id, published_at)
             if spec.dataset_name == "stock":
                 recovered_count = self._recover_resolved_unknown_stock_tasks(
@@ -338,6 +414,449 @@ class ProcessingRepository:
                 ProcessingTaskStatus.SUCCESS,
                 None,
             )
+
+    @staticmethod
+    def _ensure_no_active_stock_daily_core(
+        session: Session,
+        *,
+        business_date: date | None,
+    ) -> None:
+        if business_date is None:
+            raise ProcessingError("stock_daily.limit requires a business date")
+        active_count = session.scalar(
+            select(func.count())
+            .select_from(ProcessingTask)
+            .where(
+                ProcessingTask.output_dataset == "stock_daily.core",
+                ProcessingTask.business_date == business_date,
+                or_(
+                    ProcessingTask.status.in_(STOCK_DAILY_BLOCKING_CORE_STATUSES),
+                    and_(
+                        ProcessingTask.status == ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+                        ProcessingTask.process_type == STOCK_DAILY_CORE_PROCESS_TYPE,
+                    ),
+                ),
+            )
+        )
+        if int(active_count or 0):
+            raise ProcessingError(
+                "stock_daily.limit is waiting for the latest stock_daily.core release",
+                retryable=True,
+            )
+
+    @staticmethod
+    def _refresh_stock_daily_core_dependency(
+        session: Session,
+        *,
+        process_id: UUID,
+        business_date: date | None,
+    ) -> None:
+        if business_date is None:
+            raise ProcessingError("stock_daily.limit requires a business date")
+        dependency = session.scalar(
+            select(ProcessingDependency)
+            .where(
+                ProcessingDependency.process_id == process_id,
+                ProcessingDependency.dependency_type == DependencyType.DATASET_RELEASE.value,
+                ProcessingDependency.dependency_name == "stock_daily.core",
+                ProcessingDependency.dependency_scope_key == business_date.isoformat(),
+            )
+            .with_for_update()
+        )
+        if dependency is None:
+            raise ProcessingError("stock_daily.limit has no stock_daily.core dependency")
+        release = session.get(
+            DatasetRelease,
+            ("stock_daily.core", ReleaseScope.DATE.value, business_date.isoformat()),
+        )
+        if release is None:
+            raise ProcessingError(
+                "stock_daily.limit cannot publish without a current stock_daily.core release",
+                retryable=True,
+            )
+        dependency.resolved_release_process_id = release.process_id
+        dependency.status = DependencyStatus.READY.value
+        dependency.blocked_reason = None
+
+    def _invalidate_stale_stock_daily_limit(
+        self,
+        session: Session,
+        *,
+        core_process_id: UUID,
+        business_date: date | None,
+        now: datetime,
+    ) -> None:
+        if business_date is None:
+            return
+        scope_key = business_date.isoformat()
+        observed_release = session.get(
+            DatasetRelease,
+            ("stock_daily.limit", ReleaseScope.DATE.value, scope_key),
+        )
+        if observed_release is None:
+            planned_limit = self._current_stock_daily_limit_for_core(
+                session,
+                core_process_id=core_process_id,
+                business_date=business_date,
+                now=now,
+            )
+            if planned_limit is not None:
+                self._cancel_superseded_stock_daily_limit_tasks(
+                    session,
+                    business_date=business_date,
+                    keep_process_id=planned_limit.process_id,
+                    now=now,
+                )
+                return
+            self._replan_stock_daily_limit_without_release(
+                session,
+                core_process_id=core_process_id,
+                business_date=business_date,
+                now=now,
+            )
+            return
+        limit_process_id = observed_release.process_id
+        limit_task = session.scalar(
+            select(ProcessingTask)
+            .where(ProcessingTask.process_id == limit_process_id)
+            .with_for_update()
+        )
+        dependencies = session.scalars(
+            select(ProcessingDependency)
+            .where(ProcessingDependency.process_id == limit_process_id)
+            .order_by(
+                ProcessingDependency.dependency_type,
+                ProcessingDependency.dependency_name,
+                ProcessingDependency.dependency_scope_key,
+            )
+            .with_for_update()
+        ).all()
+        core_dependency = next(
+            (
+                dependency
+                for dependency in dependencies
+                if dependency.dependency_type == DependencyType.DATASET_RELEASE.value
+                and dependency.dependency_name == "stock_daily.core"
+                and dependency.dependency_scope_key == scope_key
+            ),
+            None,
+        )
+        limit_release = session.scalar(
+            select(DatasetRelease)
+            .where(
+                DatasetRelease.dataset_name == "stock_daily.limit",
+                DatasetRelease.scope_type == ReleaseScope.DATE.value,
+                DatasetRelease.scope_key == scope_key,
+                DatasetRelease.process_id == limit_process_id,
+            )
+            .with_for_update()
+        )
+        if limit_release is None:
+            return
+        if (
+            core_dependency is not None
+            and core_dependency.resolved_release_process_id == core_process_id
+        ):
+            return
+
+        session.delete(limit_release)
+        planned_limit = self._current_stock_daily_limit_for_core(
+            session,
+            core_process_id=core_process_id,
+            business_date=business_date,
+            now=now,
+        )
+        if planned_limit is not None:
+            structlog.get_logger("processing_repository").info(
+                "stale_stock_daily_limit_release_replaced_by_planned_task",
+                prior_process_id=str(limit_process_id),
+                successor_process_id=str(planned_limit.process_id),
+                core_process_id=str(core_process_id),
+                business_date=business_date.isoformat(),
+            )
+            return
+        if core_dependency is None or limit_task is None:
+            structlog.get_logger("processing_repository").warning(
+                "stale_stock_daily_limit_release_removed_without_dependency",
+                process_id=str(limit_process_id),
+                business_date=business_date.isoformat(),
+            )
+            return
+        successor = self._create_stock_daily_limit_successor(
+            session,
+            prior_task=limit_task,
+            prior_dependencies=dependencies,
+            core_process_id=core_process_id,
+            business_date=business_date,
+            now=now,
+        )
+        structlog.get_logger("processing_repository").info(
+            "stale_stock_daily_limit_release_replanned",
+            prior_process_id=str(limit_process_id),
+            successor_process_id=str(successor.process_id),
+            core_process_id=str(core_process_id),
+            business_date=business_date.isoformat(),
+        )
+
+    def _replan_stock_daily_limit_without_release(
+        self,
+        session: Session,
+        *,
+        core_process_id: UUID,
+        business_date: date,
+        now: datetime,
+    ) -> None:
+        active_tasks = session.scalars(
+            select(ProcessingTask)
+            .where(
+                ProcessingTask.output_dataset == "stock_daily.limit",
+                ProcessingTask.business_date == business_date,
+                ProcessingTask.process_type == STOCK_DAILY_LIMIT_PROCESS_TYPE,
+                ProcessingTask.status.not_in(PROCESSING_TERMINAL_STATUSES),
+            )
+            .order_by(ProcessingTask.process_id)
+            .with_for_update()
+        ).all()
+        template = self._freshest_stock_daily_limit_task(session, active_tasks)
+        for task in active_tasks:
+            if task.status != ProcessingTaskStatus.RUNNING.value:
+                _cancel_superseded_processing_task(task, now=now)
+        if template is None:
+            historical_tasks = session.scalars(
+                select(ProcessingTask)
+                .where(
+                    ProcessingTask.output_dataset == "stock_daily.limit",
+                    ProcessingTask.business_date == business_date,
+                )
+                .order_by(ProcessingTask.process_id)
+                .with_for_update()
+            ).all()
+            template = self._freshest_stock_daily_limit_task(session, historical_tasks)
+        if template is None:
+            structlog.get_logger("processing_repository").warning(
+                "stock_daily_limit_replan_skipped_without_template",
+                core_process_id=str(core_process_id),
+                business_date=business_date.isoformat(),
+            )
+            return
+        dependencies = session.scalars(
+            select(ProcessingDependency)
+            .where(ProcessingDependency.process_id == template.process_id)
+            .order_by(
+                ProcessingDependency.dependency_type,
+                ProcessingDependency.dependency_name,
+                ProcessingDependency.dependency_scope_key,
+            )
+            .with_for_update()
+        ).all()
+        if not dependencies:
+            structlog.get_logger("processing_repository").warning(
+                "stock_daily_limit_replan_skipped_without_dependencies",
+                process_id=str(template.process_id),
+                core_process_id=str(core_process_id),
+                business_date=business_date.isoformat(),
+            )
+            return
+        successor = self._create_stock_daily_limit_successor(
+            session,
+            prior_task=template,
+            prior_dependencies=dependencies,
+            core_process_id=core_process_id,
+            business_date=business_date,
+            now=now,
+        )
+        structlog.get_logger("processing_repository").info(
+            "stock_daily_limit_replanned_without_release",
+            prior_process_id=str(template.process_id),
+            successor_process_id=str(successor.process_id),
+            core_process_id=str(core_process_id),
+            business_date=business_date.isoformat(),
+        )
+
+    @staticmethod
+    def _cancel_superseded_stock_daily_limit_tasks(
+        session: Session,
+        *,
+        business_date: date,
+        keep_process_id: UUID,
+        now: datetime,
+    ) -> None:
+        tasks = session.scalars(
+            select(ProcessingTask)
+            .where(
+                ProcessingTask.output_dataset == "stock_daily.limit",
+                ProcessingTask.business_date == business_date,
+                ProcessingTask.process_type == STOCK_DAILY_LIMIT_PROCESS_TYPE,
+                ProcessingTask.process_id != keep_process_id,
+                ProcessingTask.status.not_in(PROCESSING_TERMINAL_STATUSES),
+            )
+            .with_for_update()
+        ).all()
+        for task in tasks:
+            if task.status != ProcessingTaskStatus.RUNNING.value:
+                _cancel_superseded_processing_task(task, now=now)
+
+    def _current_stock_daily_limit_for_core(
+        self,
+        session: Session,
+        *,
+        core_process_id: UUID,
+        business_date: date,
+        now: datetime,
+    ) -> ProcessingTask | None:
+        matching_processes = select(ProcessingDependency.process_id).where(
+            ProcessingDependency.dependency_type == DependencyType.DATASET_RELEASE.value,
+            ProcessingDependency.dependency_name == "stock_daily.core",
+            ProcessingDependency.dependency_scope_key == business_date.isoformat(),
+            ProcessingDependency.resolved_release_process_id == core_process_id,
+        )
+        tasks = session.scalars(
+            select(ProcessingTask)
+            .where(
+                ProcessingTask.process_id.in_(matching_processes),
+                ProcessingTask.output_dataset == "stock_daily.limit",
+                ProcessingTask.business_date == business_date,
+                ProcessingTask.process_type == STOCK_DAILY_LIMIT_PROCESS_TYPE,
+                ProcessingTask.status.not_in(PROCESSING_TERMINAL_STATUSES),
+            )
+            .order_by(ProcessingTask.process_id)
+            .with_for_update()
+        ).all()
+        task = self._freshest_stock_daily_limit_task(session, tasks)
+        if task is None:
+            return None
+        dependency = session.scalar(
+            select(ProcessingDependency)
+            .where(
+                ProcessingDependency.process_id == task.process_id,
+                ProcessingDependency.dependency_type == DependencyType.DATASET_RELEASE.value,
+                ProcessingDependency.dependency_name == "stock_daily.core",
+                ProcessingDependency.dependency_scope_key == business_date.isoformat(),
+                ProcessingDependency.resolved_release_process_id == core_process_id,
+            )
+            .with_for_update()
+        )
+        if dependency is None:
+            return None
+        dependency.status = DependencyStatus.READY.value
+        dependency.blocked_reason = None
+        if task.status != ProcessingTaskStatus.RUNNING.value:
+            self._refresh_task_readiness(session, task, now=now)
+        return task
+
+    @staticmethod
+    def _freshest_stock_daily_limit_task(
+        session: Session,
+        tasks: Sequence[ProcessingTask],
+    ) -> ProcessingTask | None:
+        if not tasks:
+            return None
+        task_ids = tuple(task.process_id for task in tasks)
+        sealed_at_by_process: dict[UUID, datetime] = {
+            process_id: sealed_at
+            for process_id, sealed_at in session.execute(
+                select(
+                    ProcessingDependency.process_id,
+                    func.max(RawDataAsset.sealed_at),
+                )
+                .join(
+                    RawDataAsset,
+                    RawDataAsset.asset_id == ProcessingDependency.resolved_asset_id,
+                )
+                .where(
+                    ProcessingDependency.process_id.in_(task_ids),
+                    ProcessingDependency.dependency_type == DependencyType.RAW_ASSET.value,
+                )
+                .group_by(ProcessingDependency.process_id)
+            )
+            if sealed_at is not None
+        }
+
+        def freshness_key(task: ProcessingTask) -> tuple[bool, float, float, str]:
+            sealed_at = sealed_at_by_process.get(task.process_id)
+            queued_or_finished_at = task.queued_at or task.finished_at
+            return (
+                sealed_at is not None,
+                sealed_at.timestamp() if sealed_at is not None else float("-inf"),
+                (
+                    queued_or_finished_at.timestamp()
+                    if queued_or_finished_at is not None
+                    else float("-inf")
+                ),
+                str(task.process_id),
+            )
+
+        return max(tasks, key=freshness_key)
+
+    def _create_stock_daily_limit_successor(
+        self,
+        session: Session,
+        *,
+        prior_task: ProcessingTask,
+        prior_dependencies: Sequence[ProcessingDependency],
+        core_process_id: UUID,
+        business_date: date,
+        now: datetime,
+    ) -> ProcessingTask:
+        output_version = _stock_daily_limit_successor_output_version(
+            source_batch_id=prior_task.source_batch_id,
+            business_date=business_date,
+            core_process_id=core_process_id,
+        )
+        process_id = uuid5(PROCESSING_VERSION_NAMESPACE, f"process:{output_version}")
+        created_id = session.execute(
+            insert(ProcessingTask)
+            .values(
+                process_id=process_id,
+                source_batch_id=prior_task.source_batch_id,
+                process_type=STOCK_DAILY_LIMIT_PROCESS_TYPE,
+                business_date=business_date,
+                output_dataset="stock_daily.limit",
+                output_version=output_version,
+                status=ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+                priority=prior_task.priority,
+                max_attempts=max(
+                    prior_task.max_attempts,
+                    STOCK_DAILY_LIMIT_DATASET.max_attempts,
+                ),
+            )
+            .on_conflict_do_nothing(index_elements=(ProcessingTask.output_version,))
+            .returning(ProcessingTask.process_id)
+        ).scalar_one_or_none()
+        successor = session.scalar(
+            select(ProcessingTask).where(ProcessingTask.process_id == process_id).with_for_update()
+        )
+        if successor is None:
+            raise RuntimeError("failed to create stock_daily.limit successor task")
+        for dependency in prior_dependencies:
+            is_core_dependency = (
+                dependency.dependency_type == DependencyType.DATASET_RELEASE.value
+                and dependency.dependency_name == "stock_daily.core"
+                and dependency.dependency_scope_key == business_date.isoformat()
+            )
+            self._upsert_dependency(
+                session,
+                process_id=successor.process_id,
+                dependency_type=DependencyType(dependency.dependency_type),
+                dependency_name=dependency.dependency_name,
+                scope_key=dependency.dependency_scope_key,
+                scope=dependency.dependency_scope,
+                status=(DependencyStatus.READY.value if is_core_dependency else dependency.status),
+                resolved_asset_id=dependency.resolved_asset_id,
+                resolved_release_process_id=(
+                    core_process_id
+                    if is_core_dependency
+                    else dependency.resolved_release_process_id
+                ),
+                blocked_reason=None if is_core_dependency else dependency.blocked_reason,
+            )
+        session.flush()
+        if created_id is not None or successor.status in {
+            ProcessingTaskStatus.WAITING_DEPENDENCY.value,
+            ProcessingTaskStatus.BLOCKED.value,
+        }:
+            self._refresh_task_readiness(session, successor, now=now)
+        return successor
 
     @staticmethod
     def _recover_resolved_unknown_stock_tasks(
@@ -433,9 +952,7 @@ class ProcessingRepository:
             candidates = session.scalars(
                 select(ProcessingTask).where(
                     ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
-                    ProcessingTask.error_message.like(
-                        f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"
-                    ),
+                    ProcessingTask.error_message.like(f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"),
                     ProcessingTask.finished_at.is_not(None),
                     ProcessingTask.finished_at >= now - timedelta(days=30),
                 )
@@ -450,9 +967,7 @@ class ProcessingRepository:
 
             referenced_codes = set().union(*parsed.values())
             available_codes = set(
-                session.scalars(
-                    select(Stock.ts_code).where(Stock.ts_code.in_(referenced_codes))
-                )
+                session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(referenced_codes)))
             )
             missing_codes = tuple(sorted(referenced_codes - available_codes))
             latest_failure_at = max(
@@ -532,12 +1047,23 @@ class ProcessingRepository:
         batch: CollectionBatch,
         spec: DatasetSpec,
     ) -> tuple[UUID, bool]:
-        output_version = uuid5(
-            PROCESSING_VERSION_NAMESPACE,
-            f"{batch.batch_id}:{spec.dataset_name}:{spec.processor_version}:"
-            f"{batch.business_date.isoformat() if batch.business_date else 'GLOBAL'}",
+        process_id, output_version = _processing_identity(batch, spec)
+        current = session.get(ProcessingTask, process_id)
+        if current is not None:
+            return process_id, False
+        prior_tasks = tuple(
+            session.scalars(
+                select(ProcessingTask).where(
+                    ProcessingTask.source_batch_id == batch.batch_id,
+                    ProcessingTask.output_dataset == spec.dataset_name,
+                    ProcessingTask.process_id != process_id,
+                )
+            )
         )
-        process_id = uuid5(PROCESSING_VERSION_NAMESPACE, f"process:{output_version}")
+        if prior_tasks:
+            latest = max(prior_tasks, key=_processing_task_generation_key)
+            if latest.status != ProcessingTaskStatus.FAILED.value:
+                return latest.process_id, False
         created_id = session.execute(
             insert(ProcessingTask)
             .values(
@@ -563,6 +1089,7 @@ class ProcessingRepository:
         task: ProcessingTask,
         spec: DatasetSpec,
         source_batch: CollectionBatch,
+        specs_by_dataset: dict[str, DatasetSpec],
     ) -> None:
         for dependency in spec.dependencies:
             if dependency.kind == DependencyKind.RAW_ASSET:
@@ -642,12 +1169,28 @@ class ProcessingRepository:
                     )
             else:
                 scope_key = _release_scope_key(dependency.scope, task.business_date)
-                upstream = session.scalar(
-                    select(ProcessingTask).where(
-                        ProcessingTask.source_batch_id == task.source_batch_id,
-                        ProcessingTask.output_dataset == dependency.name,
+                upstream_spec = specs_by_dataset.get(dependency.name)
+                upstream = None
+                if upstream_spec is not None:
+                    expected_process_id, _output_version = _processing_identity(
+                        source_batch,
+                        upstream_spec,
                     )
-                )
+                    upstream = session.get(ProcessingTask, expected_process_id)
+                if upstream is None:
+                    upstream_candidates = tuple(
+                        session.scalars(
+                            select(ProcessingTask).where(
+                                ProcessingTask.source_batch_id == task.source_batch_id,
+                                ProcessingTask.output_dataset == dependency.name,
+                            )
+                        )
+                    )
+                    if upstream_candidates:
+                        upstream = max(
+                            upstream_candidates,
+                            key=_processing_task_generation_key,
+                        )
                 release = session.scalar(
                     select(DatasetRelease).where(
                         DatasetRelease.dataset_name == dependency.name,
@@ -822,7 +1365,11 @@ class ProcessingRepository:
         session.flush()
         for dependent_id in dependent_ids:
             task = session.get(ProcessingTask, dependent_id)
-            if task is not None and task.status not in PROCESSING_TERMINAL_STATUSES:
+            if (
+                task is not None
+                and task.status not in PROCESSING_TERMINAL_STATUSES
+                and task.status != ProcessingTaskStatus.RUNNING.value
+            ):
                 self._refresh_task_readiness(session, task, now=now)
 
     @staticmethod
@@ -850,6 +1397,113 @@ class ProcessingRepository:
                     error_message=f"upstream processing failed: {message}",
                 )
             )
+
+
+def _lock_publication_scope(
+    session: Session,
+    *,
+    dataset_name: str,
+    business_date: date | None,
+) -> bool:
+    if dataset_name not in STOCK_DAILY_CONFLICT_DATASETS or business_date is None:
+        return False
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+        {"lock_key": f"stock_daily:{business_date.isoformat()}"},
+    )
+    return True
+
+
+def _processing_identity(batch: CollectionBatch, spec: DatasetSpec) -> tuple[UUID, UUID]:
+    output_version = _processing_output_version(
+        source_batch_id=batch.batch_id,
+        dataset_name=spec.dataset_name,
+        processor_version=spec.processor_version,
+        business_date=batch.business_date,
+    )
+    return (
+        uuid5(PROCESSING_VERSION_NAMESPACE, f"process:{output_version}"),
+        output_version,
+    )
+
+
+def _processing_output_version(
+    *,
+    source_batch_id: UUID,
+    dataset_name: str,
+    processor_version: str,
+    business_date: date | None,
+) -> UUID:
+    return uuid5(
+        PROCESSING_VERSION_NAMESPACE,
+        f"{source_batch_id}:{dataset_name}:{processor_version}:"
+        f"{business_date.isoformat() if business_date else 'GLOBAL'}",
+    )
+
+
+def _stock_daily_limit_successor_output_version(
+    *,
+    source_batch_id: UUID,
+    business_date: date,
+    core_process_id: UUID,
+) -> UUID:
+    return uuid5(
+        PROCESSING_VERSION_NAMESPACE,
+        f"{source_batch_id}:stock_daily.limit:"
+        f"{STOCK_DAILY_LIMIT_DATASET.processor_version}:{business_date.isoformat()}:"
+        f"core:{core_process_id}",
+    )
+
+
+def _has_current_stock_daily_output_version(
+    session: Session,
+    task: ProcessingTask,
+    spec: DatasetSpec,
+) -> bool:
+    standard_version = _processing_output_version(
+        source_batch_id=task.source_batch_id,
+        dataset_name=spec.dataset_name,
+        processor_version=spec.processor_version,
+        business_date=task.business_date,
+    )
+    if task.output_version == standard_version:
+        return True
+    if spec.dataset_name != "stock_daily.limit" or task.business_date is None:
+        return False
+    core_process_id = session.scalar(
+        select(ProcessingDependency.resolved_release_process_id).where(
+            ProcessingDependency.process_id == task.process_id,
+            ProcessingDependency.dependency_type == DependencyType.DATASET_RELEASE.value,
+            ProcessingDependency.dependency_name == "stock_daily.core",
+            ProcessingDependency.dependency_scope_key == task.business_date.isoformat(),
+        )
+    )
+    if core_process_id is None:
+        return False
+    successor_version = _stock_daily_limit_successor_output_version(
+        source_batch_id=task.source_batch_id,
+        business_date=task.business_date,
+        core_process_id=core_process_id,
+    )
+    return task.output_version == successor_version
+
+
+def _processing_task_generation_key(task: ProcessingTask) -> tuple[str, int, str, str]:
+    processor, separator, version = task.process_type.rpartition("@")
+    if not separator:
+        return task.process_type, -1, "", str(task.process_id)
+    try:
+        numeric_version = int(version)
+    except ValueError:
+        numeric_version = -1
+    return processor, numeric_version, version, str(task.process_id)
+
+
+def _cancel_superseded_processing_task(task: ProcessingTask, *, now: datetime) -> None:
+    task.status = ProcessingTaskStatus.CANCELLED.value
+    task.next_retry_at = None
+    task.finished_at = now
+    task.error_message = "superseded by a newer stock_daily.core publication"
 
 
 def _priority_for_batch(batch_type: BatchType) -> int:
