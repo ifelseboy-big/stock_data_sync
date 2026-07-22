@@ -135,6 +135,14 @@ sudo stock-data-sync mcp setup
 /Users/lingfeng/personal_apps/stock_data_sync/bin/stock-data-mcp
 ```
 
+启动入口使用普通用户执行，不要添加 `sudo`。也可以不使用管理员权限查询该入口：
+
+```bash
+stock-data-sync mcp command
+```
+
+只有创建或收敛数据库只读角色的 `stock-data-sync mcp setup` 需要 `sudo`。
+
 客户端配置示例：
 
 ```json

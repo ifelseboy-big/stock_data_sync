@@ -22,7 +22,9 @@ fail() {
 
 usage() {
   cat <<'EOF'
-用法：sudo stock-data-sync <command> [参数]
+用法：
+  sudo stock-data-sync <command> [参数]
+  stock-data-sync mcp command
 
 命令：
   start [service...]       启动全部服务或指定服务；不会自动修改数据库
@@ -38,7 +40,7 @@ usage() {
   config [show|path|validate|edit]
                            查看或修改单一 app.env 配置
   migrate                  显式执行数据库迁移；普通升级不会调用
-  mcp setup|command        配置只读角色；或输出本机stdio MCP启动命令
+  mcp setup|command        配置只读角色；或无 sudo 输出本机stdio MCP启动命令
   backup TARGET [--full]   手工备份数据库和 Parquet
   verify-backup DIR        校验备份
   restore DIR --confirm-database-replace
@@ -879,6 +881,12 @@ if [[ "$command_name" == "version" ]]; then
   printf '版本：%s\nCommit：%s\n主程序目录：%s\n数据目录：%s\n' \
     "$(tr -d '[:space:]' < "$PROGRAM_DIR/current/VERSION")" \
     "$(cat "$PROGRAM_DIR/current/COMMIT")" "$PROGRAM_DIR" "$DATA_DIR"
+  exit 0
+fi
+if [[ "$command_name" == "mcp" && "${1:-}" == "command" ]]; then
+  (( $# == 1 )) || fail "用法：stock-data-sync mcp command"
+  [[ -x "$PROGRAM_DIR/bin/stock-data-mcp" ]] || fail "MCP启动入口不存在：$PROGRAM_DIR/bin/stock-data-mcp"
+  printf '%s/bin/stock-data-mcp\n' "$PROGRAM_DIR"
   exit 0
 fi
 require_installation

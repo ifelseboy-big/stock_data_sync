@@ -164,6 +164,8 @@ printf '1.2.3\n' > "$release_dir/VERSION"
 printf 'abcdef1234567890\n' > "$release_dir/COMMIT"
 printf 'PROGRAM_DIR=%s\nDATA_DIR=%s\nINSTALL_DIR=%s\n' "$TEST_ROOT" "$TEST_ROOT/data" "$TEST_ROOT/data" > "$TEST_ROOT/config/app.env"
 ln -s 'releases/1.2.3-abcdef123456' "$TEST_ROOT/current"
+touch "$TEST_ROOT/bin/stock-data-mcp"
+chmod 0755 "$TEST_ROOT/bin/stock-data-mcp"
 
 version_output="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_DIR="$TEST_ROOT/data" \
   "$release_dir/deploy/production/bin/stock-data-sync" version)"
@@ -171,6 +173,23 @@ version_output="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_
 [[ "$version_output" == *"Commit：abcdef1234567890"* ]]
 [[ "$version_output" == *"主程序目录：$TEST_ROOT"* ]]
 [[ "$version_output" == *"数据目录：$TEST_ROOT/data"* ]]
+
+mcp_command_output="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_DIR="$TEST_ROOT/data" \
+  "$release_dir/deploy/production/bin/stock-data-sync" mcp command)"
+[[ "$mcp_command_output" == "$TEST_ROOT/bin/stock-data-mcp" ]]
+if mcp_command_error="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_DIR="$TEST_ROOT/data" \
+  "$release_dir/deploy/production/bin/stock-data-sync" mcp command unexpected 2>&1)"; then
+  printf 'mcp command accepted extra arguments\n' >&2
+  exit 1
+fi
+[[ "$mcp_command_error" == *"用法：stock-data-sync mcp command"* ]]
+chmod 0644 "$TEST_ROOT/bin/stock-data-mcp"
+if mcp_command_error="$(STOCK_DATA_SYNC_PROGRAM_DIR="$TEST_ROOT" STOCK_DATA_SYNC_DATA_DIR="$TEST_ROOT/data" \
+  "$release_dir/deploy/production/bin/stock-data-sync" mcp command 2>&1)"; then
+  printf 'mcp command accepted a non-executable entry\n' >&2
+  exit 1
+fi
+[[ "$mcp_command_error" == *"MCP启动入口不存在"* ]]
 
 switch_root="$TEST_ROOT/switch"
 mkdir -p "$switch_root/releases/1.2.3-test"
