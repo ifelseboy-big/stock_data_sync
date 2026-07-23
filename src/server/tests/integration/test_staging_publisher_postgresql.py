@@ -109,6 +109,55 @@ def test_staging_publisher_creates_missing_target_partition_before_write() -> No
         session.rollback()
 
 
+def test_replace_date_publishes_an_explicit_empty_scope() -> None:
+    business_date = date(2099, 12, 29)
+    published_at = datetime.now(UTC)
+    ts_code = "T999998.TEST"
+    publisher = PostgresStagingPublisher()
+
+    with SyncSessionFactory() as session:
+        session.add(
+            Stock(
+                ts_code=ts_code,
+                symbol="T999998",
+                name="empty scope test",
+                exchange="TEST",
+                list_status="L",
+                synced_at=published_at,
+            )
+        )
+        session.flush()
+        publisher.publish(
+            session,
+            target=StockTechnicalDaily.__table__,
+            rows=(
+                {
+                    "ts_code": ts_code,
+                    "trade_date": business_date,
+                    "synced_at": published_at,
+                },
+            ),
+            strategy=WriteStrategy.REPLACE_DATE,
+            key_columns=("ts_code", "trade_date"),
+            update_columns=("synced_at",),
+            replace_filters={"trade_date": business_date},
+        )
+
+        written = publisher.publish(
+            session,
+            target=StockTechnicalDaily.__table__,
+            rows=(),
+            strategy=WriteStrategy.REPLACE_DATE,
+            key_columns=("ts_code", "trade_date"),
+            update_columns=("synced_at",),
+            replace_filters={"trade_date": business_date},
+        )
+
+        assert written == 0
+        assert session.get(StockTechnicalDaily, (ts_code, business_date)) is None
+        session.rollback()
+
+
 def test_stock_daily_date_publication_lock_serializes_competing_writers() -> None:
     business_date = date(2099, 12, 30)
     attempting = Event()

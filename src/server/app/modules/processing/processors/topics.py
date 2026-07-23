@@ -161,7 +161,13 @@ class ConceptBoardDailyProcessor:
             ),
             replace_filters={"trade_date": payload.business_date},
         )
-        return PublicationResult(written, len(payload.rows) - len(matched))
+        rows_rejected = len(payload.rows) - len(matched)
+        warning_messages = _ths_target_filter_warning(
+            dataset="concept_board_daily",
+            rows_rejected=rows_rejected,
+            target="同花顺概念主表",
+        )
+        return PublicationResult(written, rows_rejected, warning_messages)
 
 
 class ConceptBoardMemberProcessor:
@@ -289,8 +295,6 @@ class ThemeIndexDailyProcessor:
         payload = cast(DatedRows, prepared.payload)
         theme_codes = _theme_index_codes(session)
         matched = tuple(row for row in payload.rows if row["ts_code"] in theme_codes)
-        if not matched:
-            raise ProcessingError("theme_index_daily has no rows matching theme_index")
         rows = _with_synced_at(matched, published_at)
         written = self._publisher.publish(
             session,
@@ -315,7 +319,13 @@ class ThemeIndexDailyProcessor:
             ),
             replace_filters={"trade_date": payload.business_date},
         )
-        return PublicationResult(written, len(payload.rows) - len(matched))
+        rows_rejected = len(payload.rows) - len(matched)
+        warning_messages = _ths_target_filter_warning(
+            dataset="theme_index_daily",
+            rows_rejected=rows_rejected,
+            target="同花顺主题指数主表",
+        )
+        return PublicationResult(written, rows_rejected, warning_messages)
 
 
 class ThemeIndexMemberProcessor:
@@ -1279,6 +1289,17 @@ def _stock_codes(session: Session, codes: set[str]) -> set[str]:
     if not codes:
         return set()
     return set(session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes))))
+
+
+def _ths_target_filter_warning(
+    *,
+    dataset: str,
+    rows_rejected: int,
+    target: str,
+) -> tuple[str, ...]:
+    if rows_rejected == 0:
+        return ()
+    return (f"{dataset} 已过滤 {rows_rejected} 条不属于{target}的日线记录",)
 
 
 def _with_synced_at(

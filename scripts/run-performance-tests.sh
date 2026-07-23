@@ -121,6 +121,7 @@ printf '执行失败恢复与告警查询回归...\n'
       tests/integration/test_processing_repository_postgresql.py::test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task \
       tests/integration/test_processing_repository_postgresql.py::test_stock_daily_invalidation_locks_task_before_dependency \
       tests/integration/test_processing_repository_postgresql.py::test_stale_processing_execution_cannot_publish_or_fail_reclaimed_attempt \
+      tests/integration/test_staging_publisher_postgresql.py::test_replace_date_publishes_an_explicit_empty_scope \
       -q
 )
 

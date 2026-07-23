@@ -1,20 +1,3 @@
-from ast import literal_eval
-
-UNKNOWN_STOCKS_ERROR_PREFIX = "dataset references unknown stocks:"
-
-
-def parse_unknown_stock_codes(message: str | None) -> set[str]:
-    if message is None or not message.startswith(UNKNOWN_STOCKS_ERROR_PREFIX):
-        return set()
-    try:
-        value = literal_eval(message.removeprefix(UNKNOWN_STOCKS_ERROR_PREFIX).strip())
-    except (SyntaxError, ValueError):
-        return set()
-    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
-        return set()
-    return set(value)
-
-
 class AppError(Exception):
     """Base exception for expected application failures."""
 
@@ -83,19 +66,6 @@ class ProcessingError(AppError):
     def __init__(self, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
-
-
-class UnknownStockCodesError(ProcessingError):
-    """Raised when a fact dataset arrives before its stock master rows."""
-
-    code = "unknown_stock_codes"
-
-    def __init__(self, codes: set[str]) -> None:
-        self.codes = tuple(sorted(codes))
-        super().__init__(
-            f"{UNKNOWN_STOCKS_ERROR_PREFIX} {list(self.codes)[:20]}",
-            retryable=True,
-        )
 
 
 class RawAssetError(AppError):

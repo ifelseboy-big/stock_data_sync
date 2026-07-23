@@ -150,7 +150,7 @@ ETF_SHARE_SIZE_DAILY_DATASET = DatasetSpec(
 STOCK_DAILY_CORE_DATASET = DatasetSpec(
     dataset_name="stock_daily.core",
     processor="stock_daily_core",
-    processor_version="4",
+    processor_version="5",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily_basic", ReleaseScope.DATE),
@@ -166,6 +166,7 @@ STOCK_DAILY_CORE_DATASET = DatasetSpec(
     release_scope=ReleaseScope.DATE,
     quality_rules=(
         QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),
+        QualityRuleSpec("filter_to_current_stock_master"),
         QualityRuleSpec("daily_basic_enrichment_isolated_with_bse_coverage_compatibility"),
         QualityRuleSpec("adj_factor_covers_daily_keys"),
         QualityRuleSpec("daily_price_internal_consistency"),
@@ -175,7 +176,7 @@ STOCK_DAILY_CORE_DATASET = DatasetSpec(
 STOCK_DAILY_LIMIT_DATASET = DatasetSpec(
     dataset_name="stock_daily.limit",
     processor="stock_daily_limit",
-    processor_version="2",
+    processor_version="3",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "stk_limit", ReleaseScope.DATE),
         DatasetDependencySpec(
@@ -189,6 +190,7 @@ STOCK_DAILY_LIMIT_DATASET = DatasetSpec(
     release_scope=ReleaseScope.DATE,
     quality_rules=(
         QualityRuleSpec("patch_target_complete"),
+        QualityRuleSpec("filter_to_current_stock_daily_core"),
         QualityRuleSpec("pre_close_consistent"),
     ),
 )
@@ -196,7 +198,7 @@ STOCK_DAILY_LIMIT_DATASET = DatasetSpec(
 STOCK_TECHNICAL_DAILY_DATASET = DatasetSpec(
     dataset_name="stock_technical_daily",
     processor="stock_technical_daily",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "stk_factor", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
@@ -210,6 +212,7 @@ STOCK_TECHNICAL_DAILY_DATASET = DatasetSpec(
     release_scope=ReleaseScope.DATE,
     quality_rules=(
         QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),
+        QualityRuleSpec("filter_to_current_stock_master"),
         QualityRuleSpec("overlapping_core_close_consistent"),
     ),
 )
@@ -217,7 +220,7 @@ STOCK_TECHNICAL_DAILY_DATASET = DatasetSpec(
 STOCK_MONEYFLOW_DAILY_DATASET = DatasetSpec(
     dataset_name="stock_moneyflow_daily",
     processor="stock_moneyflow_daily",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "moneyflow", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
@@ -231,14 +234,14 @@ STOCK_MONEYFLOW_DAILY_DATASET = DatasetSpec(
     release_scope=ReleaseScope.DATE,
     quality_rules=(
         QualityRuleSpec("natural_key_unique", {"columns": ("ts_code", "trade_date")}),
-        QualityRuleSpec("stock_foreign_key_complete"),
+        QualityRuleSpec("filter_to_current_stock_master"),
     ),
 )
 
 STOCK_SUSPEND_DAILY_DATASET = DatasetSpec(
     dataset_name="stock_suspend_daily",
     processor="stock_suspend_daily",
-    processor_version="1",
+    processor_version="2",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "suspend_d", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "stock", ReleaseScope.GLOBAL),
@@ -256,6 +259,7 @@ STOCK_SUSPEND_DAILY_DATASET = DatasetSpec(
             {"columns": ("ts_code", "trade_date", "suspend_type")},
         ),
         QualityRuleSpec("empty_allowed"),
+        QualityRuleSpec("filter_to_current_stock_master"),
     ),
 )
 
@@ -277,7 +281,7 @@ CONCEPT_BOARD_DATASET = DatasetSpec(
 CONCEPT_BOARD_DAILY_DATASET = DatasetSpec(
     dataset_name="concept_board_daily",
     processor="concept_board_daily",
-    processor_version="2",
+    processor_version="3",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "concept_board", ReleaseScope.GLOBAL),
@@ -338,7 +342,7 @@ THEME_INDEX_DATASET = DatasetSpec(
 THEME_INDEX_DAILY_DATASET = DatasetSpec(
     dataset_name="theme_index_daily",
     processor="theme_index_daily",
-    processor_version="2",
+    processor_version="3",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "ths_daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.DATASET_RELEASE, "theme_index", ReleaseScope.GLOBAL),
@@ -351,6 +355,7 @@ THEME_INDEX_DAILY_DATASET = DatasetSpec(
     quality_rules=(
         QualityRuleSpec("natural_key_unique", {"columns": ("source", "ts_code", "trade_date")}),
         QualityRuleSpec("filter_to_theme_index_master"),
+        QualityRuleSpec("empty_after_target_filter_allowed"),
     ),
 )
 

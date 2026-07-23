@@ -4,9 +4,7 @@ from typing import Any
 import pytest
 
 from app.catalog import ApiSpec
-from app.modules.acquisition.models import BatchType
 from app.modules.acquisition.planner import StagePlan
-from app.modules.processing.domain import UnknownStockRecoveryResult
 from app.scheduler import jobs
 
 
@@ -95,41 +93,6 @@ def test_daily_final_refreshes_stock_master_before_freezing(
     assert finalize is True
     assert stage_name == "daily_final"
     assert "stock_basic" in {spec.api_name for spec in specs}
-
-
-def test_processing_reconciliation_plans_idempotent_stock_master_repair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    latest_failure_at = FrozenDateTime(2026, 7, 19, 7, 20)
-    captured: list[StagePlan] = []
-
-    class Repository:
-        @staticmethod
-        def recover_running_tasks(**_: object) -> int:
-            return 0
-
-        @staticmethod
-        def reconcile_unknown_stock_failures(**_: object) -> UnknownStockRecoveryResult:
-            return UnknownStockRecoveryResult(
-                requeued_count=0,
-                missing_codes=("688806.SH",),
-                latest_failure_at=latest_failure_at,
-                master_refresh_required=True,
-            )
-
-    def capture_stage(stage: StagePlan, **_: Any) -> None:
-        captured.append(stage)
-
-    monkeypatch.setattr(jobs, "datetime", FrozenDateTime)
-    monkeypatch.setattr(jobs, "get_processing_repository", Repository)
-    monkeypatch.setattr(jobs, "_plan_stage", capture_stage)
-
-    jobs.reconcile_processing_runtime()
-
-    assert len(captured) == 1
-    assert captured[0].batch_type == BatchType.REPAIR
-    assert captured[0].scheduled_at == latest_failure_at
-    assert {spec.api_name for spec in captured[0].api_specs} == {"stock_basic"}
 
 
 def test_board_member_planner_creates_a_daily_batch(

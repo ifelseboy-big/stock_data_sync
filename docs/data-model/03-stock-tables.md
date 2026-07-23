@@ -40,6 +40,8 @@ act_ent_type varchar(64) null -- 实际控制人企业性质
 synced_at timestamptz not null -- 本行最后同步时间
 ```
 
+`stock` 保留供应方当前仍返回的主数据状态，用于标识和外键稳定性；股票行情、技术因子、资金流和停复牌事实只发布主表中 `list_status != 'D'` 的代码。历史原始包中的已退市或已不在最新主表中的代码不进入事实表，并在加工任务中记录拒绝数量和示例，因此这些事实表采用当前股票范围口径，不用于无幸存者偏差的退市研究。
+
 ## stock_company
 
 接口：[stock_company](https://tushare.pro/document/2?doc_id=112)。
@@ -107,7 +109,7 @@ synced_at timestamptz not null -- 本行最后同步时间
 primary key (ts_code, trade_date) -- 每只股票每个交易日一条记录
 ```
 
-不保存limit_pre_close；stk_limit.pre_close只与本表pre_close核对。正式核心版本依赖daily、daily_basic和adj_factor；涨跌停价由独立加工任务补充并单独记录发布状态。停牌期间daily无记录，由stock_suspend_daily解释。
+不保存limit_pre_close；stk_limit.pre_close只与本表pre_close核对。正式核心版本依赖daily、daily_basic和adj_factor，并按发布时最新非退市股票范围过滤；涨跌停价由独立加工任务补充并单独记录发布状态，只有核心日线已有行才补充，零匹配是有效结果。停牌期间daily无记录，由stock_suspend_daily解释。
 
 ## stock_technical_daily
 
@@ -174,7 +176,7 @@ synced_at timestamptz not null -- 本行最后同步时间
 primary key (ts_code, trade_date) -- 每只股票每个交易日一条资金流记录
 ```
 
-所有vol源字段由手乘100转股；所有amount源字段由万元乘10000转元。net_mf不能由其他列自行相减替代。
+所有vol源字段由手乘100转股；所有amount源字段由万元乘10000转元。net_mf不能由其他列自行相减替代。发布前按最新非退市股票范围过滤，范围外历史记录只进入任务质量统计。
 
 ## ths_board_moneyflow_daily
 
@@ -213,4 +215,4 @@ synced_at timestamptz not null -- 本行最后同步时间
 primary key (ts_code, trade_date, suspend_type) -- 每只股票每日每类停复牌事件一条记录
 ```
 
-suspend_timing保留源字符串，因为可能是“09:30-10:00”这样的区间，不设计成单一time字段。
+suspend_timing保留源字符串，因为可能是“09:30-10:00”这样的区间，不设计成单一time字段。发布范围同其他股票事实表，只保留最新主表中的非退市代码。

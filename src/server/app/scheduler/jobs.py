@@ -210,29 +210,6 @@ def reconcile_processing_runtime(*, recover_all_running: bool = False) -> None:
             "processing_tasks_recovered",
             recovered_count=recovered_count,
         )
-    unknown_stock_recovery = get_processing_repository().reconcile_unknown_stock_failures(now=now)
-    if unknown_stock_recovery.requeued_count:
-        structlog.get_logger("scheduler").info(
-            "unknown_stock_tasks_requeued",
-            recovered_count=unknown_stock_recovery.requeued_count,
-        )
-    if (
-        unknown_stock_recovery.master_refresh_required
-        and unknown_stock_recovery.latest_failure_at is not None
-    ):
-        _plan_stage(
-            StagePlan(
-                batch_type=BatchType.REPAIR,
-                business_date=now.date(),
-                scheduled_at=unknown_stock_recovery.latest_failure_at,
-                api_specs=(STOCK_BASIC_SPEC,),
-                finalize=True,
-            ),
-            now=now,
-            stage_name="unknown_stock_master_recovery",
-        )
-
-
 def plan_trade_calendar() -> None:
     timezone = ZoneInfo(settings.scheduler_timezone)
     now = datetime.now(timezone)

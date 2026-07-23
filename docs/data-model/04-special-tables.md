@@ -20,6 +20,8 @@ primary key (source, ts_code) -- 每个来源内板块代码唯一
 
 接口：[ths_daily](https://tushare.pro/document/2?doc_id=260)。
 
+`ths_daily` 的单日原始响应可能同时包含概念、行业和其他指数。本表只保留 `concept_board` 主表中的 `type=N` 代码；其余行计入加工拒绝数和质量警告，不写入本表。
+
 ```sql
 source varchar(8) not null default 'THS' -- 板块数据来源，当前固定为同花顺THS
 ts_code varchar(20) not null -- 同花顺概念板块代码
@@ -80,7 +82,7 @@ primary key (source, ts_code)
 
 ## theme_index_daily
 
-接口：[ths_daily](https://tushare.pro/document/2?doc_id=260)。字段单位与concept_board_daily一致，只发布theme_index主表中的代码。
+接口：[ths_daily](https://tushare.pro/document/2?doc_id=260)。字段单位与concept_board_daily一致，只发布theme_index主表中的 `type=TH` 代码。供应方某个历史日期即使返回大量行业或其他指数，只要没有目标主题代码，也按成功的零行日期发布处理，而不是加工失败。
 
 ```sql
 source varchar(8) not null default 'THS'
@@ -122,7 +124,7 @@ primary key (source, ts_code, con_code)
 foreign key (source, ts_code) references theme_index(source, ts_code)
 ```
 
-theme_index、theme_index_daily和theme_index_member数据规模很小，均使用普通表。概念和主题虽然复用同一组Tushare接口，但分别按type=N和type=TH采集、加工和发布，禁止混表。
+theme_index、theme_index_daily和theme_index_member数据规模很小，均使用普通表。概念和主题虽然复用同一组Tushare接口，但分别按type=N和type=TH采集、加工和发布，禁止混表；`ths_daily` 中的行业及其他类型不属于这两个数据集。
 
 ## stock_hot_rank_daily
 

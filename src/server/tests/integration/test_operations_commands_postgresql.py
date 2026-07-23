@@ -818,9 +818,9 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert len(collection_retry.json()["result"]["batchIds"]) == 1
     assert processing_retry.status_code == 202, processing_retry.text
     assert processing_retry.json()["result"] == {
-        "retryCount": 2,
+        "retryCount": 3,
         "skippedDependencyCount": 1,
-        "skippedRootCauseCount": 1,
+        "skippedRootCauseCount": 0,
         "skippedUnchangedCount": 0,
         "deduplicatedCount": 1,
         "skippedActiveCount": 1,
@@ -859,12 +859,19 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
         duplicate_process = session.get(ProcessingTask, duplicate_process_id)
         blocked_process = session.get(ProcessingTask, blocked_process_id)
         unknown_stock_process = session.get(ProcessingTask, unknown_stock_process_id)
+        current_moneyflow_process = session.scalar(
+            select(ProcessingTask).where(
+                ProcessingTask.source_batch_id == source_batch_id,
+                ProcessingTask.output_dataset == "stock_moneyflow_daily",
+                ProcessingTask.process_type == "stock_moneyflow_daily@2",
+            )
+        )
         legacy_core_process = session.get(ProcessingTask, legacy_core_process_id)
         current_core_process = session.scalar(
             select(ProcessingTask).where(
                 ProcessingTask.source_batch_id == source_batch_id,
                 ProcessingTask.output_dataset == "stock_daily.core",
-                ProcessingTask.process_type == "stock_daily_core@4",
+                ProcessingTask.process_type == "stock_daily_core@5",
             )
         )
         current_core_dependencies = (
@@ -892,6 +899,9 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
     assert unknown_stock_process is not None
     assert unknown_stock_process.status == ProcessingTaskStatus.FAILED.value
     assert unknown_stock_process.attempt_count == 3
+    assert current_moneyflow_process is not None
+    assert current_moneyflow_process.process_id != unknown_stock_process_id
+    assert current_moneyflow_process.status == ProcessingTaskStatus.QUEUED.value
     assert legacy_core_process is not None
     assert legacy_core_process.status == ProcessingTaskStatus.FAILED.value
     assert current_core_process is not None

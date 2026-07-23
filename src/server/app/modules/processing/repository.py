@@ -15,11 +15,7 @@ from app.catalog.datasets import (
     STOCK_DAILY_CORE_DATASET,
     STOCK_DAILY_LIMIT_DATASET,
 )
-from app.common.errors import (
-    UNKNOWN_STOCKS_ERROR_PREFIX,
-    ProcessingError,
-    parse_unknown_stock_codes,
-)
+from app.common.errors import ProcessingError
 from app.modules.acquisition.domain import TERMINAL_TASK_STATUSES
 from app.modules.acquisition.models import (
     BatchStatus,
@@ -35,7 +31,6 @@ from app.modules.processing.domain import (
     ProcessingPlanResult,
     ProcessingTransition,
     RawDependencyAsset,
-    UnknownStockRecoveryResult,
 )
 from app.modules.processing.models import (
     DatasetRelease,
@@ -46,7 +41,6 @@ from app.modules.processing.models import (
     ProcessingTaskStatus,
 )
 from app.modules.processing.processors.base import DatasetProcessor, PreparedDataset
-from app.modules.stocks.models import Stock
 
 type SessionFactory = Callable[[], Session]
 
@@ -506,7 +500,9 @@ class ProcessingRepository:
             process.rows_rejected = rows_rejected + publication.rows_rejected
             process.rows_written = rows_written
             process.error_message = None
-            process.warning_message = "\n".join(prepared.warning_messages)[:4000] or None
+            process.warning_message = "\n".join(
+                (*prepared.warning_messages, *publication.warning_messages)
+            )[:4000] or None
             if spec.dataset_name == "stock_daily.core":
                 self._invalidate_stale_stock_daily_limit(
                     session,
@@ -515,18 +511,6 @@ class ProcessingRepository:
                     now=published_at,
                 )
             self._resolve_downstream_after_success(session, process.process_id, published_at)
-            if spec.dataset_name == "stock":
-                recovered_count = self._recover_resolved_unknown_stock_tasks(
-                    session,
-                    stock_release_process_id=process.process_id,
-                    now=published_at,
-                )
-                if recovered_count:
-                    structlog.get_logger("processing_repository").info(
-                        "unknown_stock_tasks_requeued",
-                        recovered_count=recovered_count,
-                        stock_release_process_id=str(process.process_id),
-                    )
             return ProcessingTransition(
                 task.process_id,
                 ProcessingTaskStatus.SUCCESS,
@@ -976,140 +960,6 @@ class ProcessingRepository:
         }:
             self._refresh_task_readiness(session, successor, now=now)
         return successor
-
-    @staticmethod
-    def _recover_resolved_unknown_stock_tasks(
-        session: Session,
-        *,
-        stock_release_process_id: UUID,
-        now: datetime,
-    ) -> int:
-        candidates = session.scalars(
-            select(ProcessingTask)
-            .where(
-                ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
-                ProcessingTask.error_message.like(f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"),
-                ProcessingTask.finished_at >= now - timedelta(days=30),
-            )
-            .order_by(ProcessingTask.process_id)
-            .with_for_update(skip_locked=True)
-        ).all()
-        parsed = {
-            task.process_id: parsed_codes
-            for task in candidates
-            if (parsed_codes := parse_unknown_stock_codes(task.error_message))
-        }
-        if not parsed:
-            return 0
-
-        referenced_codes = set().union(*parsed.values())
-        available_codes = set(
-            session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(referenced_codes)))
-        )
-        dependencies = session.scalars(
-            select(ProcessingDependency)
-            .where(ProcessingDependency.process_id.in_(tuple(parsed)))
-            .order_by(
-                ProcessingDependency.process_id,
-                ProcessingDependency.dependency_type,
-                ProcessingDependency.dependency_name,
-                ProcessingDependency.dependency_scope_key,
-            )
-            .with_for_update()
-        ).all()
-        dependencies_by_process: dict[UUID, list[ProcessingDependency]] = {}
-        for dependency in dependencies:
-            dependencies_by_process.setdefault(dependency.process_id, []).append(dependency)
-
-        recovered_count = 0
-        for task in candidates:
-            required_codes = parsed.get(task.process_id)
-            if not required_codes or not required_codes.issubset(available_codes):
-                continue
-            task_dependencies = dependencies_by_process.get(task.process_id, [])
-            stock_dependencies = [
-                dependency
-                for dependency in task_dependencies
-                if dependency.dependency_type == DependencyType.DATASET_RELEASE.value
-                and dependency.dependency_name == "stock"
-            ]
-            if len(stock_dependencies) != 1:
-                continue
-            stock_dependency = stock_dependencies[0]
-            stock_dependency.status = DependencyStatus.READY.value
-            stock_dependency.resolved_release_process_id = stock_release_process_id
-            stock_dependency.blocked_reason = None
-            if any(
-                dependency.status != DependencyStatus.READY.value
-                for dependency in task_dependencies
-            ):
-                continue
-            task.status = ProcessingTaskStatus.QUEUED.value
-            task.max_attempts = max(task.max_attempts, task.attempt_count + 1)
-            task.next_retry_at = None
-            task.execution_token = None
-            task.queued_at = now
-            task.started_at = None
-            task.finished_at = None
-            task.error_message = None
-            recovered_count += 1
-        return recovered_count
-
-    def reconcile_unknown_stock_failures(
-        self,
-        *,
-        now: datetime,
-    ) -> UnknownStockRecoveryResult:
-        with self._session_factory() as session, session.begin():
-            release = session.get(
-                DatasetRelease,
-                ("stock", ReleaseScope.GLOBAL.value, "GLOBAL"),
-            )
-            requeued_count = (
-                self._recover_resolved_unknown_stock_tasks(
-                    session,
-                    stock_release_process_id=release.process_id,
-                    now=now,
-                )
-                if release is not None
-                else 0
-            )
-            session.flush()
-            candidates = session.scalars(
-                select(ProcessingTask).where(
-                    ProcessingTask.status == ProcessingTaskStatus.FAILED.value,
-                    ProcessingTask.error_message.like(f"{UNKNOWN_STOCKS_ERROR_PREFIX}%"),
-                    ProcessingTask.finished_at.is_not(None),
-                    ProcessingTask.finished_at >= now - timedelta(days=30),
-                )
-            ).all()
-            parsed = {
-                task.process_id: parsed_codes
-                for task in candidates
-                if (parsed_codes := parse_unknown_stock_codes(task.error_message))
-            }
-            if not parsed:
-                return UnknownStockRecoveryResult(requeued_count, (), None, False)
-
-            referenced_codes = set().union(*parsed.values())
-            available_codes = set(
-                session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(referenced_codes)))
-            )
-            missing_codes = tuple(sorted(referenced_codes - available_codes))
-            latest_failure_at = max(
-                task.finished_at
-                for task in candidates
-                if task.process_id in parsed and task.finished_at is not None
-            )
-            master_refresh_required = bool(missing_codes) and (
-                release is None or release.published_at <= latest_failure_at
-            )
-            return UnknownStockRecoveryResult(
-                requeued_count,
-                missing_codes,
-                latest_failure_at,
-                master_refresh_required,
-            )
 
     def fail_task(
         self,

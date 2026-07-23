@@ -28,6 +28,7 @@ from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAs
 from app.modules.processing.processors.base import PreparedDataset
 from app.modules.processing.processors.stock_daily import (
     StockDailyCoreProcessor,
+    StockDailyLimitProcessor,
     StockMoneyflowDailyProcessor,
     StockSuspendDailyProcessor,
     StockTechnicalDailyProcessor,
@@ -643,7 +644,7 @@ def test_stock_daily_limit_still_rejects_conflicting_pre_close() -> None:
         )
 
 
-def test_stock_daily_core_write_preserves_published_limit_columns() -> None:
+def test_stock_daily_core_write_filters_rows_outside_current_stock_master() -> None:
     row: PreparedRow = {
         "ts_code": "000001.SZ",
         "trade_date": BUSINESS_DATE,
@@ -678,15 +679,75 @@ def test_stock_daily_core_write_preserves_published_limit_columns() -> None:
 
     result = processor.write(
         session,
-        PreparedDataset((row,), 1),
+        PreparedDataset(
+            (
+                row,
+                row | {"ts_code": "000022.SZ"},
+            ),
+            2,
+        ),
         published_at=datetime.now(UTC),
     )
 
     assert result.rows_written == 1
+    assert result.rows_rejected == 1
+    assert "000022.SZ" in result.warning_messages[0]
     published_rows = publisher.publish.call_args.kwargs["rows"]
+    assert [published_row["ts_code"] for published_row in published_rows] == ["000001.SZ"]
     assert published_rows[0]["limit_status"] == 1
     assert published_rows[0]["up_limit"] == Decimal("11.0")
     assert published_rows[0]["down_limit"] == Decimal("9.0")
+
+
+def test_stock_moneyflow_write_filters_rows_outside_current_stock_master() -> None:
+    session = MagicMock()
+    session.scalars.return_value = ["000001.SZ"]
+    processor = StockMoneyflowDailyProcessor()
+    publisher = MagicMock()
+    publisher.publish.return_value = 1
+    processor._publisher = publisher
+    rows: tuple[PreparedRow, ...] = (
+        {"ts_code": "000001.SZ", "trade_date": BUSINESS_DATE},
+        {"ts_code": "000043.SZ", "trade_date": BUSINESS_DATE},
+    )
+
+    result = processor.write(
+        session,
+        PreparedDataset(rows, 2),
+        published_at=datetime.now(UTC),
+    )
+
+    assert result.rows_written == 1
+    assert result.rows_rejected == 1
+    assert "000043.SZ" in result.warning_messages[0]
+    assert publisher.publish.call_args.kwargs["rows"][0]["ts_code"] == "000001.SZ"
+
+
+def test_stock_daily_limit_allows_no_rows_after_core_scope_filter() -> None:
+    session = MagicMock()
+    session.execute.return_value = []
+    processor = StockDailyLimitProcessor()
+    publisher = MagicMock()
+    publisher.publish.return_value = 0
+    processor._publisher = publisher
+    row: PreparedRow = {
+        "ts_code": "000022.SZ",
+        "trade_date": BUSINESS_DATE,
+        "source_pre_close": Decimal("10"),
+        "up_limit": Decimal("11"),
+        "down_limit": Decimal("9"),
+    }
+
+    result = processor.write(
+        session,
+        PreparedDataset((row,), 1),
+        published_at=datetime.now(UTC),
+    )
+
+    assert result.rows_written == 0
+    assert result.rows_rejected == 1
+    assert "stock_daily.core" in result.warning_messages[0]
+    assert publisher.publish.call_args.kwargs["rows"] == ()
 
 
 def test_existing_stock_daily_patch_values_are_keyed_by_security() -> None:

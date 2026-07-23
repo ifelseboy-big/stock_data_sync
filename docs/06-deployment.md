@@ -359,6 +359,12 @@ sudo stock-data-sync upgrade \
 20260722_0014 (head)
 ```
 
+v0.1.37 将股票日线、涨跌停、技术因子、资金流和停复牌加工升级为当前非退市股票范围，范围外历史代码改为可审计过滤；同花顺日线只发布概念和主题指数，目标集合为空时允许成功发布。同时删除 `unknown stocks` 失败触发股票主表刷新和重复重试的循环，旧失败任务通过人工重试会按新的处理器版本创建替代任务。该版本不新增数据库迁移，目标 revision 仍为 `20260722_0014`：
+
+```bash
+sudo stock-data-sync upgrade --version 0.1.37
+```
+
 详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。
 
 ## 12. 手工备份与恢复

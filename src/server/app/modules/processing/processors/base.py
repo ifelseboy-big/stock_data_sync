@@ -20,6 +20,7 @@ class PreparedDataset:
 class PublicationResult:
     rows_written: int
     rows_rejected: int = 0
+    warning_messages: tuple[str, ...] = ()
 
 
 class DatasetProcessor(Protocol):

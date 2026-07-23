@@ -16,7 +16,7 @@ from app.catalog.tushare import (
     STK_LIMIT_SPEC,
     SUSPEND_SPEC,
 )
-from app.common.errors import ProcessingError, UnknownStockCodesError
+from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
 from app.modules.processing.models import (
     DatasetRelease,
@@ -295,10 +295,14 @@ class StockDailyCoreProcessor:
     ) -> PublicationResult:
         rows = cast(tuple[PreparedRow, ...], prepared.payload)
         business_date = _single_business_date(rows, self.name)
-        _validate_stock_codes(session, rows)
-        patch_values = _existing_stock_daily_patch_values(
+        matched_rows, rows_rejected, warning_messages = _filter_current_stock_rows(
             session,
             rows,
+            dataset="stock_daily.core",
+        )
+        patch_values = _existing_stock_daily_patch_values(
+            session,
+            matched_rows,
             business_date,
         )
         values = tuple(
@@ -307,7 +311,7 @@ class StockDailyCoreProcessor:
                 **patch_values.get(cast(str, row["ts_code"]), {}),
                 "synced_at": published_at,
             }
-            for row in rows
+            for row in matched_rows
         )
         rows_written = self._publisher.publish(
             session,
@@ -318,7 +322,7 @@ class StockDailyCoreProcessor:
             update_columns=CORE_UPDATE_COLUMNS,
             replace_filters={"trade_date": business_date},
         )
-        return PublicationResult(rows_written)
+        return PublicationResult(rows_written, rows_rejected, warning_messages)
 
 
 class StockDailyLimitProcessor:
@@ -368,8 +372,6 @@ class StockDailyLimitProcessor:
             )
         }
         matched_rows = tuple(row for row in rows if cast(str, row["ts_code"]) in existing)
-        if not matched_rows:
-            raise ProcessingError("stock_daily.limit has no rows matching stock_daily.core")
         for row in matched_rows:
             ts_code = cast(str, row["ts_code"])
             _validate_limit_pre_close(
@@ -387,6 +389,7 @@ class StockDailyLimitProcessor:
             }
             for row in matched_rows
         )
+        rows_rejected = len(rows) - len(matched_rows)
         return PublicationResult(
             self._publisher.publish(
                 session,
@@ -396,7 +399,13 @@ class StockDailyLimitProcessor:
                 key_columns=DAILY_KEY,
                 update_columns=("up_limit", "down_limit", "synced_at"),
             ),
-            rows_rejected=len(rows) - len(matched_rows),
+            rows_rejected=rows_rejected,
+            warning_messages=_filtered_rows_warning(
+                dataset="stock_daily.limit",
+                rows=rows,
+                matched_rows=matched_rows,
+                reason="不在 stock_daily.core 当前发布范围",
+            ),
         )
 
 
@@ -449,7 +458,11 @@ class StockTechnicalDailyProcessor:
     ) -> PublicationResult:
         rows = cast(tuple[PreparedRow, ...], prepared.payload)
         business_date = _single_business_date(rows, self.name)
-        _validate_stock_codes(session, rows)
+        matched_rows, rows_rejected, warning_messages = _filter_current_stock_rows(
+            session,
+            rows,
+            dataset="stock_technical_daily",
+        )
         core_close = {
             ts_code: close
             for ts_code, close in session.execute(
@@ -458,7 +471,7 @@ class StockTechnicalDailyProcessor:
                 )
             )
         }
-        for row in rows:
+        for row in matched_rows:
             ts_code = cast(str, row["ts_code"])
             if ts_code not in core_close:
                 continue
@@ -471,7 +484,7 @@ class StockTechnicalDailyProcessor:
                 for key, value in {**row, "synced_at": published_at}.items()
                 if key != "source_close"
             }
-            for row in rows
+            for row in matched_rows
         )
         return PublicationResult(
             self._publisher.publish(
@@ -482,7 +495,9 @@ class StockTechnicalDailyProcessor:
                 key_columns=DAILY_KEY,
                 update_columns=(*TECHNICAL_FIELDS, "synced_at"),
                 replace_filters={"trade_date": business_date},
-            )
+            ),
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
         )
 
 
@@ -524,8 +539,12 @@ class StockMoneyflowDailyProcessor:
     ) -> PublicationResult:
         rows = cast(tuple[PreparedRow, ...], prepared.payload)
         business_date = _single_business_date(rows, self.name)
-        _validate_stock_codes(session, rows)
-        values = tuple({**row, "synced_at": published_at} for row in rows)
+        matched_rows, rows_rejected, warning_messages = _filter_current_stock_rows(
+            session,
+            rows,
+            dataset="stock_moneyflow_daily",
+        )
+        values = tuple({**row, "synced_at": published_at} for row in matched_rows)
         return PublicationResult(
             self._publisher.publish(
                 session,
@@ -535,7 +554,9 @@ class StockMoneyflowDailyProcessor:
                 key_columns=DAILY_KEY,
                 update_columns=(*MONEYFLOW_FIELDS, "synced_at"),
                 replace_filters={"trade_date": business_date},
-            )
+            ),
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
         )
 
 
@@ -576,8 +597,12 @@ class StockSuspendDailyProcessor:
         published_at: datetime,
     ) -> PublicationResult:
         business_date, raw_rows = cast(tuple[date, tuple[PreparedRow, ...]], prepared.payload)
-        _validate_stock_codes(session, raw_rows)
-        values = tuple({**row, "synced_at": published_at} for row in raw_rows)
+        matched_rows, rows_rejected, warning_messages = _filter_current_stock_rows(
+            session,
+            raw_rows,
+            dataset="stock_suspend_daily",
+        )
+        values = tuple({**row, "synced_at": published_at} for row in matched_rows)
         return PublicationResult(
             self._publisher.publish(
                 session,
@@ -587,7 +612,9 @@ class StockSuspendDailyProcessor:
                 key_columns=("ts_code", "trade_date", "suspend_type"),
                 update_columns=("suspend_timing", "synced_at"),
                 replace_filters={"trade_date": business_date},
-            )
+            ),
+            rows_rejected=rows_rejected,
+            warning_messages=warning_messages,
         )
 
 
@@ -1066,11 +1093,54 @@ def _single_business_date(rows: tuple[PreparedRow, ...], dataset: str) -> date:
     return dates.pop()
 
 
-def _validate_stock_codes(session: Session, rows: tuple[PreparedRow, ...]) -> None:
+def _filter_current_stock_rows(
+    session: Session,
+    rows: tuple[PreparedRow, ...],
+    *,
+    dataset: str,
+) -> tuple[tuple[PreparedRow, ...], int, tuple[str, ...]]:
     codes = {cast(str, row["ts_code"]) for row in rows}
     if not codes:
-        return
-    existing = set(session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes))))
-    missing = codes - existing
-    if missing:
-        raise UnknownStockCodesError(missing)
+        return rows, 0, ()
+    current_codes = set(
+        session.scalars(
+            select(Stock.ts_code).where(
+                Stock.ts_code.in_(codes),
+                Stock.list_status != "D",
+            )
+        )
+    )
+    matched_rows = tuple(
+        row for row in rows if cast(str, row["ts_code"]) in current_codes
+    )
+    return (
+        matched_rows,
+        len(rows) - len(matched_rows),
+        _filtered_rows_warning(
+            dataset=dataset,
+            rows=rows,
+            matched_rows=matched_rows,
+            reason="不在当前股票主表范围（含已退市标的）",
+        ),
+    )
+
+
+def _filtered_rows_warning(
+    *,
+    dataset: str,
+    rows: tuple[PreparedRow, ...],
+    matched_rows: tuple[PreparedRow, ...],
+    reason: str,
+) -> tuple[str, ...]:
+    rejected_count = len(rows) - len(matched_rows)
+    if rejected_count == 0:
+        return ()
+    matched_codes = {cast(str, row["ts_code"]) for row in matched_rows}
+    rejected_codes = sorted(
+        {cast(str, row["ts_code"]) for row in rows if row["ts_code"] not in matched_codes}
+    )
+    examples = ", ".join(rejected_codes[:5])
+    return (
+        f"{dataset} 已过滤 {rejected_count} 条{reason}的记录"
+        f"（代码示例：{examples}）",
+    )

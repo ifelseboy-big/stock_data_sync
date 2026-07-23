@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pyarrow as pa
@@ -17,6 +18,7 @@ from app.catalog.tushare import (
 )
 from app.common.errors import ProcessingError
 from app.modules.processing.domain import ClaimedProcessingTask, RawDependencyAsset
+from app.modules.processing.processors.base import PreparedDataset
 from app.modules.processing.processors.topics import (
     ConceptBoardDailyProcessor,
     ConceptBoardProcessor,
@@ -24,6 +26,7 @@ from app.modules.processing.processors.topics import (
     MarketThemeMemberDailyProcessor,
     StockHotRankDailyProcessor,
     StockTopListDailyProcessor,
+    ThemeIndexDailyProcessor,
     ThemeIndexProcessor,
 )
 from app.storage import LocalRawAssetStore, RawAssetContext
@@ -120,6 +123,36 @@ def test_ths_daily_processor_blocks_when_every_close_is_missing(tmp_path: Path) 
 
     with pytest.raises(ProcessingError, match="close completeness threshold exceeded"):
         ConceptBoardDailyProcessor().prepare(_task(batch_id), (dependency,), store)
+
+
+def test_theme_index_daily_allows_empty_target_scope_after_filter() -> None:
+    session = MagicMock()
+    session.scalars.return_value = []
+    processor = ThemeIndexDailyProcessor()
+    publisher = MagicMock()
+    publisher.publish.return_value = 0
+    processor._publisher = publisher
+    prepared = PreparedDataset(
+        DatedRows(
+            BUSINESS_DATE,
+            (
+                {
+                    "source": "THS",
+                    "ts_code": "881001.TI",
+                    "trade_date": BUSINESS_DATE,
+                    "close": 1000,
+                },
+            ),
+        ),
+        1,
+    )
+
+    result = processor.write(session, prepared, published_at=datetime.now(UTC))
+
+    assert result.rows_written == 0
+    assert result.rows_rejected == 1
+    assert "同花顺主题指数主表" in result.warning_messages[0]
+    assert publisher.publish.call_args.kwargs["rows"] == ()
 
 
 def test_top_list_processor_deduplicates_identical_provider_rows(tmp_path: Path) -> None:

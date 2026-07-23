@@ -340,7 +340,7 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
     planned_limit_version = _processing_output_version(
         source_batch_id=new_core_batch_id,
         dataset_name="stock_daily.limit",
-        processor_version="2",
+        processor_version="3",
         business_date=business_date,
     )
     planned_limit_process_id = uuid5(
@@ -417,7 +417,7 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
                 ProcessingTask(
                     process_id=planned_limit_process_id,
                     source_batch_id=new_core_batch_id,
-                    process_type="stock_daily_limit@2",
+                    process_type="stock_daily_limit@3",
                     business_date=business_date,
                     output_dataset="stock_daily.limit",
                     output_version=planned_limit_version,
@@ -463,7 +463,7 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
                     ProcessingTask(
                         process_id=newer_limit_process_id,
                         source_batch_id=newer_limit_batch_id,
-                        process_type="stock_daily_limit@2",
+                        process_type="stock_daily_limit@3",
                         business_date=business_date,
                         output_dataset="stock_daily.limit",
                         output_version=uuid4(),
@@ -698,7 +698,7 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
         assert successor.output_version == planned_limit_version
     else:
         assert successor.process_id != planned_limit_process_id
-    assert successor.process_type == "stock_daily_limit@2"
+    assert successor.process_type == "stock_daily_limit@3"
     assert successor.status == ProcessingTaskStatus.QUEUED.value
     assert successor_dependency is not None
     assert successor_dependency.resolved_release_process_id == new_core_process_id
@@ -802,7 +802,7 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
     limit_spec = DatasetSpec(
         dataset_name="stock_daily.limit",
         processor="stock_daily_limit",
-        processor_version="2",
+        processor_version="3",
         dependencies=(
             DatasetDependencySpec(
                 DependencyKind.DATASET_RELEASE,
@@ -845,7 +845,7 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
     with SyncSessionFactory() as session, session.begin():
         old_limit = session.get(ProcessingTask, limit_process_id)
         assert old_limit is not None
-        old_limit.process_type = "stock_daily_limit@2"
+        old_limit.process_type = "stock_daily_limit@3"
         old_limit.status = ProcessingTaskStatus.QUEUED.value
         old_limit.queued_at = now + timedelta(minutes=1)
     stale_claim = repository.claim_next(
@@ -1051,7 +1051,7 @@ def test_stock_daily_invalidation_locks_task_before_dependency() -> None:
                 ProcessingTask(
                     process_id=new_core_process_id,
                     source_batch_id=new_core_batch_id,
-                    process_type="stock_daily_core@4",
+                    process_type="stock_daily_core@5",
                     business_date=business_date,
                     output_dataset="stock_daily.core",
                     output_version=uuid4(),
@@ -1320,7 +1320,7 @@ def test_processing_dependencies_and_global_slot_roundtrip() -> None:
     assert current_downstream_release.process_id == baseline_downstream_process_id
 
 
-def test_stock_release_requeues_failures_after_unknown_codes_become_available() -> None:
+def test_stock_release_does_not_requeue_failures_outside_current_universe() -> None:
     now = datetime(2037, 2, 2, 19, 5, tzinfo=TIMEZONE)
     old_stock_process_id = uuid4()
     new_stock_process_id = uuid4()
@@ -1427,7 +1427,11 @@ def test_stock_release_requeues_failures_after_unknown_codes_become_available() 
         quality_rules=(QualityRuleSpec("test"),),
     )
     repository = ProcessingRepository(SyncSessionFactory)
-    claimed = repository.claim_next(now=now, advisory_lock_id=731_599_904)
+    claimed = repository.claim_next(
+        now=now,
+        advisory_lock_id=731_599_904,
+        source_batch_ids=(master_batch_id,),
+    )
     assert claimed is not None and claimed.process_id == new_stock_process_id
 
     repository.publish_success(
@@ -1447,15 +1451,15 @@ def test_stock_release_requeues_failures_after_unknown_codes_become_available() 
             (failed_process_id, DependencyType.DATASET_RELEASE.value, "stock", "GLOBAL"),
         )
     assert recovered is not None
-    assert recovered.status == ProcessingTaskStatus.QUEUED.value
-    assert recovered.max_attempts == 3
-    assert recovered.error_message is None
+    assert recovered.status == ProcessingTaskStatus.FAILED.value
+    assert recovered.max_attempts == 2
+    assert recovered.error_message == "dataset references unknown stocks: ['699999.SH']"
     assert dependency is not None
     assert dependency.status == DependencyStatus.READY.value
-    assert dependency.resolved_release_process_id == new_stock_process_id
+    assert dependency.resolved_release_process_id == old_stock_process_id
 
 
-def test_unknown_stock_reconciliation_requests_only_one_newer_master_refresh() -> None:
+def test_processing_repository_has_no_unknown_stock_refresh_loop() -> None:
     now = datetime(2037, 2, 3, 19, 5, tzinfo=TIMEZONE)
     stock_process_id = uuid4()
     failed_process_id = uuid4()
@@ -1548,24 +1552,7 @@ def test_unknown_stock_reconciliation_requests_only_one_newer_master_refresh() -
         )
 
     repository = ProcessingRepository(SyncSessionFactory)
-    first = repository.reconcile_unknown_stock_failures(now=now)
-
-    assert first.requeued_count == 0
-    assert first.missing_codes == ("699998.SH",)
-    assert first.master_refresh_required is True
-    assert first.latest_failure_at == now - timedelta(minutes=5)
-
-    with SyncSessionFactory() as session, session.begin():
-        release = session.get(DatasetRelease, ("stock", "GLOBAL", "GLOBAL"))
-        assert release is not None
-        release.published_at = now + timedelta(minutes=1)
-
-    after_newer_refresh = repository.reconcile_unknown_stock_failures(
-        now=now + timedelta(minutes=2)
-    )
-
-    assert after_newer_refresh.missing_codes == ("699998.SH",)
-    assert after_newer_refresh.master_refresh_required is False
+    assert not hasattr(repository, "reconcile_unknown_stock_failures")
 
 
 def test_processing_planner_uses_bounded_catalog_watermark() -> None:

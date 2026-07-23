@@ -16,7 +16,6 @@ from app.catalog import ApiSpec, ScheduleGroup, SpecRegistry
 from app.catalog.datasets import ALL_DATASET_SPECS
 from app.catalog.specs import DependencyKind, ParameterValue, ReleaseScope, RequestScope
 from app.catalog.tushare import ths_member_scopes
-from app.common.errors import parse_unknown_stock_codes
 from app.core.config import settings
 from app.modules.acquisition.models import (
     BatchStatus,
@@ -41,7 +40,7 @@ from app.modules.processing.models import (
     ProcessingTaskStatus,
 )
 from app.modules.processing.repository import PROCESSING_VERSION_NAMESPACE
-from app.modules.stocks.models import Stock, TradeCalendar
+from app.modules.stocks.models import TradeCalendar
 from app.modules.topics.models import ConceptBoard, ThemeIndex
 from app.scheduler.catalog import SCHEDULED_JOB_BY_ID, ScheduledJobDefinition
 
@@ -787,11 +786,6 @@ class OperationCommandService:
                 raise OperationCommandError("加工任务不存在", status_code=404)
             if task.status not in PROCESSING_RETRYABLE:
                 raise OperationCommandError(f"状态 {task.status} 不允许人工重试")
-            missing_stock_codes = await self._missing_unknown_stock_codes(task.error_message)
-            if missing_stock_codes:
-                raise OperationCommandError(
-                    "股票主数据尚未补齐，任务正在等待自动修复，不能重复重试"
-                )
             if _is_unchanged_deterministic_failure(task):
                 raise OperationCommandError(
                     "原始输入和加工规则均未变化，重复重试不会改变结果；请先修复加工规则或重新采集"
@@ -937,26 +931,6 @@ class OperationCommandService:
                     .distinct()
                 )
             )
-            unknown_codes_by_process = {
-                task.process_id: codes
-                for task in candidates
-                if (codes := parse_unknown_stock_codes(task.error_message))
-            }
-            all_unknown_codes = (
-                set().union(*unknown_codes_by_process.values())
-                if (unknown_codes_by_process)
-                else set()
-            )
-            available_stock_codes = set(
-                await self._session.scalars(
-                    select(Stock.ts_code).where(Stock.ts_code.in_(all_unknown_codes))
-                )
-            )
-            unresolved_root_cause_ids = {
-                process_id
-                for process_id, codes in unknown_codes_by_process.items()
-                if not codes.issubset(available_stock_codes)
-            }
             unchanged_failure_ids = {
                 task.process_id for task in candidates if _is_unchanged_deterministic_failure(task)
             }
@@ -964,12 +938,9 @@ class OperationCommandService:
                 task
                 for task in candidates
                 if task.process_id not in unavailable_ids
-                and task.process_id not in unresolved_root_cause_ids
                 and task.process_id not in unchanged_failure_ids
             )
             if not retried:
-                if unresolved_root_cause_ids:
-                    raise OperationCommandError("失败任务的股票主数据尚未补齐，正在等待自动修复")
                 if unchanged_failure_ids:
                     raise OperationCommandError(
                         "失败任务的原始输入和加工规则均未变化，重复重试不会改变结果"
@@ -979,10 +950,9 @@ class OperationCommandService:
             return {
                 "retryCount": len(queued_tasks),
                 "skippedDependencyCount": len(
-                    ({task.process_id for task in candidates} & unavailable_ids)
-                    - unresolved_root_cause_ids
+                    {task.process_id for task in candidates} & unavailable_ids
                 ),
-                "skippedRootCauseCount": len(unresolved_root_cause_ids),
+                "skippedRootCauseCount": 0,
                 "skippedUnchangedCount": len(unchanged_failure_ids),
                 "deduplicatedCount": len(task_rows) - len(logical_tasks),
                 "skippedActiveCount": len(logical_tasks) - len(candidates),
@@ -1612,15 +1582,6 @@ class OperationCommandService:
         task.started_at = None
         task.finished_at = None
         task.error_message = None
-
-    async def _missing_unknown_stock_codes(self, message: str | None) -> set[str]:
-        codes = parse_unknown_stock_codes(message)
-        if not codes:
-            return set()
-        available = set(
-            await self._session.scalars(select(Stock.ts_code).where(Stock.ts_code.in_(codes)))
-        )
-        return codes - available
 
     async def _block_processing_downstream(self, process_id: UUID, reason: str) -> None:
         dependent_ids = tuple(
