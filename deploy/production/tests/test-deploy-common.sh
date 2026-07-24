@@ -111,6 +111,8 @@ grep -Fq 'http://$health_host:$HTTP_PORT$APP_API_PREFIX/health/live' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'wait_for_api 30 && return 0' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
+grep -Fq 'original_source_repository="$SOURCE_REPOSITORY"' \
+  "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 grep -Fq 'if wait_for_api 5; then' \
   "$PROJECT_ROOT/deploy/production/bin/stock-data-sync"
 [[ "$(grep -Ec '^[[:space:]]+wait_for_server$' "$PROJECT_ROOT/deploy/production/bin/stock-data-sync")" == "3" ]]

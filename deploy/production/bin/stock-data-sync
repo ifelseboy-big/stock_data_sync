@@ -785,7 +785,7 @@ validate_config_candidate() {
     original_data_dir="$DATA_DIR"
     original_install_dir="$INSTALL_DIR"
     original_service_user="$SERVICE_USER"
-    original_repository="$SOURCE_REPOSITORY"
+    original_source_repository="$SOURCE_REPOSITORY"
     original_app_env="$APP_ENV"
     original_postgres_bin_dir="$POSTGRES_BIN_DIR"
     original_postgres_port="$POSTGRES_PORT"
