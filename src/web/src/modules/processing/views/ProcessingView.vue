@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AdminCommandDialog from '@/components/AdminCommandDialog.vue'
@@ -28,7 +28,9 @@ const retryTarget = ref<RunRecordItem | null>(null)
 const retryLoading = ref(false)
 const retryAllOpen = ref(false)
 const retryAllLoading = ref(false)
-const { data, loading, error, load } = useApiResource(() =>
+let runningPollTimer: number | undefined
+let queuePollTimer: number | undefined
+const { data, loading, error, load, refresh } = useApiResource(() =>
   getProcessingQueue({
     status: status.value || undefined,
     datasetName: datasetName.value.trim() || undefined,
@@ -36,9 +38,20 @@ const { data, loading, error, load } = useApiResource(() =>
     pageSize: 50,
   }),
 )
-const currentTasks = computed(
-  () => data.value?.items.filter((item) => item.status === 'running') ?? [],
+const {
+  data: runningData,
+  loading: runningLoading,
+  error: runningError,
+  load: loadRunning,
+  refresh: refreshRunning,
+} = useApiResource(() =>
+  getProcessingQueue({
+    status: 'running',
+    page: 1,
+    pageSize: 8,
+  }),
 )
+const currentTasks = computed(() => runningData.value?.items ?? [])
 const waitingTasks = computed(
   () => data.value?.items.filter((item) => item.status !== 'running') ?? [],
 )
@@ -56,6 +69,28 @@ const {
     pageSize: 20,
   }),
 )
+
+function pageIsVisible() {
+  return document.visibilityState === 'visible'
+}
+
+onMounted(() => {
+  runningPollTimer = window.setInterval(() => {
+    if (pageIsVisible()) void refreshRunning()
+  }, 2_000)
+  queuePollTimer = window.setInterval(() => {
+    if (pageIsVisible()) void refresh()
+  }, 10_000)
+})
+
+onBeforeUnmount(() => {
+  if (runningPollTimer !== undefined) window.clearInterval(runningPollTimer)
+  if (queuePollTimer !== undefined) window.clearInterval(queuePollTimer)
+})
+
+async function refreshAll() {
+  await Promise.all([load(), loadRunning(), loadFailed()])
+}
 
 function search() {
   page.value = 1
@@ -83,7 +118,7 @@ async function submitRetry(value: { reason: string; idempotencyKey: string }) {
     )
     ElMessage.success('加工任务已重新进入受控并发队列')
     retryTarget.value = null
-    await Promise.all([load(), loadFailed()])
+    await refreshAll()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '加工任务重试失败')
   } finally {
@@ -113,7 +148,7 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
       `已将 ${retried} 个逻辑任务加入加工队列${notes.length ? `；${notes.join('，')}` : ''}`,
     )
     retryAllOpen.value = false
-    await Promise.all([load(), loadFailed()])
+    await refreshAll()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '全部失败任务重试失败')
   } finally {
@@ -125,11 +160,21 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
 <template>
   <section>
     <PageHeader title="加工队列" description="按配置受控并发执行；同一数据集保持串行发布。">
-      <template #actions><el-button :loading="loading" @click="load">刷新</el-button></template>
+      <template #actions>
+        <el-button :loading="loading || runningLoading || failedLoading" @click="refreshAll">
+          刷新
+        </el-button>
+      </template>
     </PageHeader>
 
     <el-card shadow="never" class="execution-slot">
-      <div class="execution-slot__label">当前运行任务 {{ currentTasks.length }} 个</div>
+      <div class="execution-slot__header">
+        <div class="execution-slot__label">当前运行任务 {{ currentTasks.length }} 个</div>
+        <div class="execution-slot__freshness">
+          <span class="execution-slot__live-dot" aria-hidden="true" />
+          自动刷新 · 数据时间 {{ formatDateTime(runningData?.generatedAt) }}
+        </div>
+      </div>
       <div v-for="task in currentTasks" :key="task.id" class="execution-slot__content">
         <div>
           <ResourceLabel
@@ -147,7 +192,14 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
         </div>
       </div>
       <div v-if="!currentTasks.length" class="execution-slot__empty">
-        空闲，等待可执行任务进入队列
+        <template v-if="runningError">
+          运行状态加载失败：{{ runningError }}
+          <el-button link type="primary" @click="loadRunning">重新加载</el-button>
+        </template>
+        <template v-else-if="data?.total">
+          当前采样未发现运行任务；队列仍有 {{ data.total }} 个活动任务，系统会持续派发。
+        </template>
+        <template v-else>当前采样未发现运行任务；页面会持续自动刷新。</template>
       </div>
     </el-card>
 
@@ -342,6 +394,29 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
 </template>
 
 <style scoped>
+.execution-slot__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.execution-slot__freshness {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.execution-slot__live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--el-color-success);
+}
+
 .failed-panel {
   margin-bottom: 16px;
 }
@@ -350,5 +425,12 @@ async function submitRetryAll(value: { reason: string; idempotencyKey: string })
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .execution-slot__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>

@@ -551,6 +551,23 @@ class AcquisitionRepository:
                 for item in session.scalars(select(RawDataAsset))
             )
 
+    def assets_for_tasks(self, task_ids: Collection[UUID]) -> tuple[AssetSnapshot, ...]:
+        if not task_ids:
+            return ()
+        with self._session_factory() as session:
+            return tuple(
+                AssetSnapshot(
+                    task_id=item.task_id,
+                    storage_uri=item.storage_uri,
+                    content_hash=item.content_hash,
+                    schema_fingerprint=item.schema_fingerprint,
+                    row_count=item.row_count,
+                )
+                for item in session.scalars(
+                    select(RawDataAsset).where(RawDataAsset.task_id.in_(task_ids))
+                )
+            )
+
     def asset_for_task(self, task_id: UUID) -> AssetSnapshot | None:
         with self._session_factory() as session:
             item = session.scalar(select(RawDataAsset).where(RawDataAsset.task_id == task_id))

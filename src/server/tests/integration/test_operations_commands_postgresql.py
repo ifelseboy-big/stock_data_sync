@@ -871,7 +871,7 @@ async def test_bulk_retry_queues_unresolved_collection_and_processing_tasks() ->
             select(ProcessingTask).where(
                 ProcessingTask.source_batch_id == source_batch_id,
                 ProcessingTask.output_dataset == "stock_daily.core",
-                ProcessingTask.process_type == "stock_daily_core@5",
+                ProcessingTask.process_type == "stock_daily_core@6",
             )
         )
         current_core_dependencies = (

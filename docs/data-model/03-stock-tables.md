@@ -70,7 +70,7 @@ synced_at timestamptz not null -- 本行最后同步时间
 
 ## stock_daily
 
-合并接口：[daily](https://tushare.pro/document/2?doc_id=27)、[adj_factor](https://tushare.pro/document/2?doc_id=28)、[daily_basic](https://tushare.pro/document/2?doc_id=32)；[stk_limit](https://tushare.pro/document/2?doc_id=183)只负责补充涨跌停价。粒度一致，所以合并为一张正式日表。`daily` 提供价格和成交事实，`adj_factor` 是必需复权依赖，`daily_basic` 只增强可空的估值和股本字段。北交所历史 `daily_basic` 覆盖缺失或跨接口价格错位时，对应增强字段置空并记录加工警告，仍发布已经通过日线内部一致性和复权覆盖校验的行情；沪深大面积缺失或冲突继续阻断发布。
+合并接口：[daily](https://tushare.pro/document/2?doc_id=27)、[adj_factor](https://tushare.pro/document/2?doc_id=28)、[daily_basic](https://tushare.pro/document/2?doc_id=32)；[stk_limit](https://tushare.pro/document/2?doc_id=183)只负责补充涨跌停价。粒度一致，所以合并为一张正式日表。`daily` 提供价格和成交事实，`adj_factor` 是必需复权依赖，`daily_basic` 只增强可空的估值和股本字段。显式证券代码别名同时出现旧代码和现代码时，以现代码原始行作为权威记录，旧代码行计入可审计过滤；只出现旧代码时才映射为现代码。`change` 和 `pct_chg` 统一由 `close`、`pre_close` 推导，源接口的冗余涨跌字段不一致时记录加工警告但不丢弃价格事实。北交所历史 `daily_basic` 覆盖缺失或跨接口价格错位时，对应增强字段置空并记录加工警告，仍发布已经通过价格、复权覆盖校验的行情；沪深大面积缺失或冲突继续阻断发布。
 
 ```sql
 ts_code varchar(16) not null references stock(ts_code) -- 股票的Tushare统一代码

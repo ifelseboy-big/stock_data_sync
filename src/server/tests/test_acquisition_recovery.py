@@ -30,8 +30,15 @@ class FakeRepository:
         self.completed = False
         self.failed = False
         self.recovered = False
+        self.full_asset_scan_called = False
+        self.scoped_asset_task_ids: tuple[object, ...] = ()
 
     def assets(self) -> tuple[object, ...]:
+        self.full_asset_scan_called = True
+        return ()
+
+    def assets_for_tasks(self, task_ids: tuple[object, ...]) -> tuple[object, ...]:
+        self.scoped_asset_task_ids = task_ids
         return ()
 
     def running_tasks(self) -> tuple[RunningTaskSnapshot, ...]:
@@ -149,3 +156,30 @@ def test_startup_recovery_requeues_an_interrupted_final_attempt(tmp_path: Path) 
     assert report.retried_tasks == 1
     assert repository.recovered
     assert not repository.failed
+
+
+def test_fast_startup_recovery_only_checks_running_tasks(tmp_path: Path) -> None:
+    task = _task()
+    repository = FakeRepository(task)
+    registry = SpecRegistry[ApiSpec](lambda item: item.api_name)
+    registry.register(_spec())
+    store = LocalRawAssetStore(tmp_path)
+    recovery = AcquisitionRecovery(
+        repository=repository,  # type: ignore[arg-type]
+        asset_store=store,
+        api_specs=registry,
+        timezone=TIMEZONE,
+        running_timeout_seconds=300,
+    )
+
+    report = recovery.reconcile(
+        recover_all_running=True,
+        audit_all_assets=False,
+    )
+
+    assert report.retried_tasks == 1
+    assert repository.recovered
+    assert not repository.full_asset_scan_called
+    assert repository.scoped_asset_task_ids == (task.task_id,)
+    assert report.missing_assets == 0
+    assert report.removed_temporary_files == 0

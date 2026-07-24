@@ -50,7 +50,10 @@ def main() -> None:
                     execution_count=recovered_execution_count,
                 )
             execute_scheduled_job("ensure-future-partitions", "STARTUP_CATCHUP")
-            reconcile_collection_runtime(recover_all_running=True)
+            reconcile_collection_runtime(
+                recover_all_running=True,
+                audit_all_assets=False,
+            )
             reconcile_processing_runtime(recover_all_running=True)
             execute_scheduled_job("close-collection-batches", "STARTUP_CATCHUP")
             execute_scheduled_job("plan-processing-tasks", "STARTUP_CATCHUP")

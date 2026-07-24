@@ -1,6 +1,6 @@
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
-from threading import Lock
+from threading import Event, Lock, Thread
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -34,9 +34,19 @@ class AcquisitionRuntime:
         self._lock = Lock()
         self._dispatch_lock = Lock()
         self._stopping = False
+        self._refill_event = Event()
+        self._refill_thread = Thread(
+            target=self._refill_loop,
+            name="collection-refill",
+            daemon=True,
+        )
+        self._refill_thread.start()
 
     def dispatch(self, *, now: datetime) -> int:
-        if not self._dispatch_lock.acquire(blocking=False):
+        return self._dispatch(now=now, blocking=False)
+
+    def _dispatch(self, *, now: datetime, blocking: bool) -> int:
+        if not self._dispatch_lock.acquire(blocking=blocking):
             return 0
         try:
             return self._fill_available_slots(now=now)
@@ -46,14 +56,14 @@ class AcquisitionRuntime:
     def _fill_available_slots(self, *, now: datetime) -> int:
         capacity = self._capacity_gate.snapshot()
         submitted = 0
-        while True:
+        with self._lock:
+            available_slots = (
+                0 if self._stopping else self._max_workers - len(self._futures)
+            )
+        for _ in range(available_slots):
             with self._lock:
                 if self._stopping:
                     break
-                available_slots = self._max_workers - len(self._futures)
-            if available_slots <= 0:
-                break
-
             task = self._repository.claim_next(
                 allowed_batch_types=capacity.allowed_batch_types(),
                 now=now,
@@ -81,6 +91,8 @@ class AcquisitionRuntime:
     def shutdown(self) -> None:
         with self._lock:
             self._stopping = True
+        self._refill_event.set()
+        self._refill_thread.join()
         with self._dispatch_lock:
             pass
         self._thread_pool.shutdown(wait=True, cancel_futures=False)
@@ -104,4 +116,16 @@ class AcquisitionRuntime:
         with self._lock:
             stopping = self._stopping
         if not stopping:
-            self.dispatch(now=datetime.now(self._timezone))
+            self._refill_event.set()
+
+    def _refill_loop(self) -> None:
+        while True:
+            self._refill_event.wait()
+            self._refill_event.clear()
+            with self._lock:
+                if self._stopping:
+                    return
+            self._dispatch(
+                now=datetime.now(self._timezone),
+                blocking=True,
+            )

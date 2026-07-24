@@ -2,6 +2,10 @@
 
 生产环境是单台 Mac。PostgreSQL、FastAPI/Web 和 Scheduler 作为原生 macOS 进程运行，由 `launchd` 管理。程序源码来自 GitHub 正式版本标签，并在目标 Mac 本地构建。
 
+当前远程实例通过 SSH 别名 `lingfeng-local` 管理，Web 入口为
+`http://192.168.2.140:8888/`，Web 与 API 共同监听 `192.168.2.140:8888`，
+API 路径前缀为 `/api/v1`。
+
 ## 1. 基本原则
 
 - 首次安装的主程序目录、数据目录、Web/API 监听 IPv4、Web/API 端口和 PostgreSQL 端口都没有默认值，必须由用户明确传入。
@@ -363,6 +367,12 @@ v0.1.37 将股票日线、涨跌停、技术因子、资金流和停复牌加工
 
 ```bash
 sudo stock-data-sync upgrade --version 0.1.37
+```
+
+v0.1.38 将 `stock_daily.core` 升级为 `stock_daily_core@6`：代码别名重叠时确定性保留现代码原始行，涨跌额和涨跌幅由收盘价与前收盘价统一推导；同时缩短 Scheduler 启动恢复、修复加工并发补位和加工队列实时展示。规划器修订会自动分批重建旧版本失败或活动任务，已成功任务保持不变。该版本不新增数据库迁移，目标 revision 仍为 `20260722_0014`：
+
+```bash
+sudo stock-data-sync upgrade --version 0.1.38
 ```
 
 详细字段、约束和索引见[系统运行与发布表](data-model/02-runtime-tables.md)和[数据库落地设计](data-model/06-database-implementation.md)。

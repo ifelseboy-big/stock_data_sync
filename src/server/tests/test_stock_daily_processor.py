@@ -396,6 +396,52 @@ def test_stock_daily_core_isolates_single_missing_previous_close(
     assert "daily pre_close is missing for 920570.BJ" in prepared.warning_messages[1]
 
 
+def test_stock_daily_core_derives_change_from_close_and_previous_close(
+    tmp_path: Path,
+) -> None:
+    store = LocalRawAssetStore(tmp_path)
+    batch_id = uuid4()
+    daily = {
+        "ts_code": "603005.SH",
+        "trade_date": "20260717",
+        "open": 93.0,
+        "high": 94.88,
+        "low": 85.91,
+        "close": 86.8,
+        "pre_close": 91.89,
+        "change": -5.03,
+        "pct_chg": -5.4739,
+        "vol": 180173.44,
+        "amount": 1637884.572,
+    }
+    dependencies = (
+        _asset(store, batch_id, DAILY_SPEC, [daily]),
+        _asset(
+            store,
+            batch_id,
+            DAILY_BASIC_SPEC,
+            [{"ts_code": "603005.SH", "trade_date": "20260717", "close": 86.8}],
+        ),
+        _asset(
+            store,
+            batch_id,
+            ADJ_FACTOR_SPEC,
+            [{"ts_code": "603005.SH", "trade_date": "20260717", "adj_factor": 1.25}],
+        ),
+    )
+
+    prepared = StockDailyCoreProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert rows[0]["change"] == Decimal("-5.09")
+    assert cast(Decimal, rows[0]["pct_chg"]).quantize(Decimal("0.000001")) == Decimal(
+        "-5.539232"
+    )
+    assert prepared.rows_rejected == 0
+    assert "根据 close/pre_close 重算 1 条" in prepared.warning_messages[0]
+    assert "603005.SH" in prepared.warning_messages[0]
+
+
 def test_stock_daily_core_rejects_zero_previous_close_before_deriving_pct_change(
     tmp_path: Path,
 ) -> None:
@@ -492,7 +538,7 @@ def test_corporate_action_code_mapping_uses_current_security_code() -> None:
     assert canonical_stock_code("300114.SZ") == "302132.SZ"
 
 
-def test_stock_daily_core_maps_historical_corporate_action_code(tmp_path: Path) -> None:
+def test_stock_daily_core_prefers_current_code_when_alias_rows_overlap(tmp_path: Path) -> None:
     store = LocalRawAssetStore(tmp_path)
     batch_id = uuid4()
     dependencies = (
@@ -500,7 +546,7 @@ def test_stock_daily_core_maps_historical_corporate_action_code(tmp_path: Path) 
             store,
             batch_id,
             DAILY_SPEC,
-            [_daily_source("300114.SZ")],
+            [_daily_source("300114.SZ"), _daily_source("302132.SZ")],
         ),
         _asset(
             store,
@@ -511,7 +557,12 @@ def test_stock_daily_core_maps_historical_corporate_action_code(tmp_path: Path) 
                     "ts_code": "300114.SZ",
                     "trade_date": "20260717",
                     "close": 10.5,
-                }
+                },
+                {
+                    "ts_code": "302132.SZ",
+                    "trade_date": "20260717",
+                    "close": 10.5,
+                },
             ],
         ),
         _asset(
@@ -523,7 +574,12 @@ def test_stock_daily_core_maps_historical_corporate_action_code(tmp_path: Path) 
                     "ts_code": "300114.SZ",
                     "trade_date": "20260717",
                     "adj_factor": 1.25,
-                }
+                },
+                {
+                    "ts_code": "302132.SZ",
+                    "trade_date": "20260717",
+                    "adj_factor": 1.2501,
+                },
             ],
         ),
     )
@@ -532,6 +588,8 @@ def test_stock_daily_core_maps_historical_corporate_action_code(tmp_path: Path) 
 
     rows = cast(tuple[PreparedRow, ...], prepared.payload)
     assert rows[0]["ts_code"] == "302132.SZ"
+    assert rows[0]["adj_factor"] == Decimal("1.2501")
+    assert prepared.rows_rejected == 3
     assert len(prepared.warning_messages) == 3
     assert all("300114.SZ->302132.SZ" in warning for warning in prepared.warning_messages)
 
@@ -583,7 +641,7 @@ def test_stock_technical_maps_bse_alias_and_prefers_current_code(tmp_path: Path)
     assert "430017.BJ->920017.BJ" in prepared.warning_messages[0]
 
 
-def test_stock_technical_rejects_conflicting_bse_alias_rows(tmp_path: Path) -> None:
+def test_stock_technical_prefers_current_code_when_alias_values_conflict(tmp_path: Path) -> None:
     store = LocalRawAssetStore(tmp_path)
     batch_id = uuid4()
     dependencies = (
@@ -598,8 +656,15 @@ def test_stock_technical_rejects_conflicting_bse_alias_rows(tmp_path: Path) -> N
         ),
     )
 
-    with pytest.raises(ProcessingError, match="stock code alias conflict"):
-        StockTechnicalDailyProcessor().prepare(_task(batch_id), dependencies, store)
+    prepared = StockTechnicalDailyProcessor().prepare(_task(batch_id), dependencies, store)
+
+    rows = cast(tuple[PreparedRow, ...], prepared.payload)
+    assert len(rows) == 1
+    assert rows[0]["ts_code"] == "920017.BJ"
+    assert rows[0]["source_close"] == Decimal("10.6")
+    assert rows[0]["macd"] == Decimal("2.0")
+    assert prepared.rows_rejected == 1
+    assert "430017.BJ->920017.BJ" in prepared.warning_messages[0]
 
 
 def test_stock_suspend_maps_old_only_bse_code_without_rejecting_it(

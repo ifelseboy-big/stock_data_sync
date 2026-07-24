@@ -150,7 +150,7 @@ ETF_SHARE_SIZE_DAILY_DATASET = DatasetSpec(
 STOCK_DAILY_CORE_DATASET = DatasetSpec(
     dataset_name="stock_daily.core",
     processor="stock_daily_core",
-    processor_version="5",
+    processor_version="6",
     dependencies=(
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily", ReleaseScope.DATE),
         DatasetDependencySpec(DependencyKind.RAW_ASSET, "daily_basic", ReleaseScope.DATE),
@@ -169,7 +169,7 @@ STOCK_DAILY_CORE_DATASET = DatasetSpec(
         QualityRuleSpec("filter_to_current_stock_master"),
         QualityRuleSpec("daily_basic_enrichment_isolated_with_bse_coverage_compatibility"),
         QualityRuleSpec("adj_factor_covers_daily_keys"),
-        QualityRuleSpec("daily_price_internal_consistency"),
+        QualityRuleSpec("derive_change_and_pct_chg_from_close_and_pre_close"),
     ),
 )
 

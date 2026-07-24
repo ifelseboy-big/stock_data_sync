@@ -93,7 +93,7 @@ error_message text null -- 加工失败或阻塞的错误说明
 warning_message text null -- 加工成功但存在可接受数据质量问题时的警告说明
 ```
 
-消费一个或多个原始资产并生成正式数据。每次领取都生成新的 `execution_token`，正式表写入、发布切换和失败回写前必须在行锁内确认 token 仍属于当前 `RUNNING`；超时恢复会清空旧 token，防止旧 worker 在新尝试开始后重复发布或覆盖状态。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。失败是否已经恢复，优先按 `dataset_release` 主键 `(dataset_name, scope_type, scope_key)` 精确查找当前发布；尚未发布时再按同数据集、同发布范围查找活动加工任务。`idx_processing_active_recovery (output_dataset, business_date) INCLUDE (source_batch_id, queued_at, started_at)` 仅覆盖活动状态，为后一个判断提供访问路径。加工入口并发上限由 `PROCESSING_MAX_WORKERS` 控制，默认 3；DATE 数据集同一输出数据集的不同业务日期可以并行，其他发布范围仍按输出数据集互斥。
+消费一个或多个原始资产并生成正式数据。每次领取都生成新的 `execution_token`，正式表写入、发布切换和失败回写前必须在行锁内确认 token 仍属于当前 `RUNNING`；超时恢复会清空旧 token，防止旧 worker 在新尝试开始后重复发布或覆盖状态。`process_type` 保存处理器名称和版本；规划器发现同批次、同输出数据集存在旧版本活动任务时，取消尚未运行的旧任务并创建当前版本，旧版本运行任务不抢占但当前版本任务仍会生成，已经成功的历史任务不因处理器升级自动重算。`warning_message` 与 `error_message` 分离：警告不会把成功任务改为失败，也不会阻止数据发布，但会进入运维查询供人工复核。失败是否已经恢复，优先按 `dataset_release` 主键 `(dataset_name, scope_type, scope_key)` 精确查找当前发布；尚未发布时再按同数据集、同发布范围查找活动加工任务。`idx_processing_active_recovery (output_dataset, business_date) INCLUDE (source_batch_id, queued_at, started_at)` 仅覆盖活动状态，为后一个判断提供访问路径。加工入口并发上限由 `PROCESSING_MAX_WORKERS` 控制，默认 3；DATE 数据集同一输出数据集的不同业务日期可以并行，其他发布范围仍按输出数据集互斥。
 
 ## processing_dependency
 

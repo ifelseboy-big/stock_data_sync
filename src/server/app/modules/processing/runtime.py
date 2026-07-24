@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
-from threading import Lock
+from threading import Event, Lock, Thread
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -35,6 +35,13 @@ class ProcessingRuntime:
         self._lock = Lock()
         self._dispatch_lock = Lock()
         self._stopping = False
+        self._refill_event = Event()
+        self._refill_thread = Thread(
+            target=self._refill_loop,
+            name="processing-refill",
+            daemon=True,
+        )
+        self._refill_thread.start()
 
     def dispatch(
         self,
@@ -62,15 +69,20 @@ class ProcessingRuntime:
 
     def wake(self, *, now: datetime) -> int:
         """Fill available worker slots; completed workers keep refilling the queue."""
-        if not self._dispatch_lock.acquire(blocking=False):
+        return self._wake(now=now, blocking=False)
+
+    def _wake(self, *, now: datetime, blocking: bool) -> int:
+        if not self._dispatch_lock.acquire(blocking=blocking):
             return 0
         try:
             submitted = 0
-            while True:
+            with self._lock:
+                available_slots = (
+                    0 if self._stopping else self._max_workers - len(self._futures)
+                )
+            for _ in range(available_slots):
                 with self._lock:
                     if self._stopping:
-                        break
-                    if len(self._futures) >= self._max_workers:
                         break
                 task = self._repository.claim_next(
                     now=now,
@@ -100,6 +112,8 @@ class ProcessingRuntime:
     def shutdown(self) -> None:
         with self._lock:
             self._stopping = True
+        self._refill_event.set()
+        self._refill_thread.join()
         with self._dispatch_lock:
             pass
         self._thread_pool.shutdown(wait=True, cancel_futures=False)
@@ -125,4 +139,16 @@ class ProcessingRuntime:
         with self._lock:
             stopping = self._stopping
         if not stopping:
-            self.wake(now=datetime.now(self._timezone))
+            self._refill_event.set()
+
+    def _refill_loop(self) -> None:
+        while True:
+            self._refill_event.wait()
+            self._refill_event.clear()
+            with self._lock:
+                if self._stopping:
+                    return
+            self._wake(
+                now=datetime.now(self._timezone),
+                blocking=True,
+            )

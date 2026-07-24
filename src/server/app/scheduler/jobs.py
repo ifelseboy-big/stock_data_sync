@@ -69,8 +69,15 @@ def close_collection_batches() -> None:
         )
 
 
-def reconcile_collection_runtime(*, recover_all_running: bool = False) -> None:
-    get_acquisition_recovery().reconcile(recover_all_running=recover_all_running)
+def reconcile_collection_runtime(
+    *,
+    recover_all_running: bool = False,
+    audit_all_assets: bool = True,
+) -> None:
+    get_acquisition_recovery().reconcile(
+        recover_all_running=recover_all_running,
+        audit_all_assets=audit_all_assets,
+    )
 
 
 def plan_processing_tasks() -> None:

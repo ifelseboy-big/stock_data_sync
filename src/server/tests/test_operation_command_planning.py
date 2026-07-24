@@ -44,9 +44,9 @@ def _failed_stock_daily_task(*, process_type: str, attempt_count: int = 1) -> Pr
 
 
 def test_unchanged_deterministic_processing_failure_is_not_requeued() -> None:
-    unchanged = _failed_stock_daily_task(process_type="stock_daily_core@5")
-    prior_processor = _failed_stock_daily_task(process_type="stock_daily_core@4")
-    exhausted = _failed_stock_daily_task(process_type="stock_daily_core@5", attempt_count=3)
+    unchanged = _failed_stock_daily_task(process_type="stock_daily_core@6")
+    prior_processor = _failed_stock_daily_task(process_type="stock_daily_core@5")
+    exhausted = _failed_stock_daily_task(process_type="stock_daily_core@6", attempt_count=3)
 
     assert _is_unchanged_deterministic_failure(unchanged)
     assert not _is_unchanged_deterministic_failure(prior_processor)
@@ -55,11 +55,11 @@ def test_unchanged_deterministic_processing_failure_is_not_requeued() -> None:
 
 @pytest.mark.asyncio
 async def test_processing_retry_creates_current_version_without_mutating_old_task() -> None:
-    task = _failed_stock_daily_task(process_type="stock_daily_core@4")
+    task = _failed_stock_daily_task(process_type="stock_daily_core@5")
     replacement = ProcessingTask(
         process_id=uuid4(),
         source_batch_id=task.source_batch_id,
-        process_type="stock_daily_core@5",
+        process_type="stock_daily_core@6",
         business_date=task.business_date,
         output_dataset=task.output_dataset,
         output_version=uuid4(),
@@ -81,11 +81,11 @@ async def test_processing_retry_creates_current_version_without_mutating_old_tas
 
     queued = await service._queue_processing_task(task, datetime.now(UTC))
 
-    assert task.process_type == "stock_daily_core@4"
+    assert task.process_type == "stock_daily_core@5"
     assert task.status == ProcessingTaskStatus.FAILED.value
     assert queued.process_id != task.process_id
     assert queued.output_version != task.output_version
-    assert queued.process_type == "stock_daily_core@5"
+    assert queued.process_type == "stock_daily_core@6"
     assert queued.status == ProcessingTaskStatus.QUEUED.value
 
 

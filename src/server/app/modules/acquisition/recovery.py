@@ -35,21 +35,30 @@ class AcquisitionRecovery:
         self._timezone = timezone
         self._running_timeout = timedelta(seconds=running_timeout_seconds)
 
-    def reconcile(self, *, recover_all_running: bool = False) -> RecoveryReport:
+    def reconcile(
+        self,
+        *,
+        recover_all_running: bool = False,
+        audit_all_assets: bool = True,
+    ) -> RecoveryReport:
         now = datetime.now(self._timezone)
         completed_tasks = 0
         retried_tasks = 0
         missing_assets = 0
 
-        assets = self._repository.assets()
+        running_tasks = self._repository.running_tasks()
+        assets = (
+            self._repository.assets()
+            if audit_all_assets
+            else self._repository.assets_for_tasks(tuple(task.task_id for task in running_tasks))
+        )
         assets_by_task = {item.task_id: item for item in assets}
-        known_uris = tuple(item.storage_uri for item in assets)
         for asset in assets:
             if not self._asset_store.exists(asset.storage_uri):
                 self._repository.mark_asset_missing(asset.task_id, now=now)
                 missing_assets += 1
 
-        for task in self._repository.running_tasks():
+        for task in running_tasks:
             is_stale = (
                 task.started_at is None
                 or now - task.started_at >= self._running_timeout
@@ -108,20 +117,26 @@ class AcquisitionRecovery:
                 )
                 retried_tasks += int(transition.next_retry_at is not None)
 
-        orphan_report = self._asset_store.find_orphans(known_uris)
         removed_temporary_files = 0
-        for path in orphan_report.temporary_files:
-            if recover_all_running or _is_stale_path(path, now, self._running_timeout):
-                self._asset_store.remove_temporary_file(path)
-                removed_temporary_files += 1
+        unregistered_asset_count = 0
+        if audit_all_assets:
+            orphan_report = self._asset_store.find_orphans(
+                tuple(item.storage_uri for item in assets)
+            )
+            unregistered_asset_count = len(orphan_report.unregistered_assets)
+            for path in orphan_report.temporary_files:
+                if recover_all_running or _is_stale_path(path, now, self._running_timeout):
+                    self._asset_store.remove_temporary_file(path)
+                    removed_temporary_files += 1
 
         structlog.get_logger("acquisition_recovery").info(
             "acquisition_reconciled",
+            audit_all_assets=audit_all_assets,
             completed_tasks=completed_tasks,
             retried_tasks=retried_tasks,
             missing_assets=missing_assets,
             removed_temporary_files=removed_temporary_files,
-            unregistered_assets=len(orphan_report.unregistered_assets),
+            unregistered_assets=unregistered_asset_count,
         )
         return RecoveryReport(
             completed_tasks=completed_tasks,

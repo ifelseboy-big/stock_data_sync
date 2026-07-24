@@ -112,6 +112,21 @@ class BlockingProcessingExecutor:
         return ProcessingTransition(task.process_id, ProcessingTaskStatus.SUCCESS, None)
 
 
+class ImmediateProcessingExecutor:
+    def __init__(self, expected_count: int) -> None:
+        self._lock = Lock()
+        self._expected_count = expected_count
+        self.completed = 0
+        self.all_completed = Event()
+
+    def execute(self, task: ClaimedProcessingTask) -> ProcessingTransition:
+        with self._lock:
+            self.completed += 1
+            if self.completed == self._expected_count:
+                self.all_completed.set()
+        return ProcessingTransition(task.process_id, ProcessingTaskStatus.SUCCESS, None)
+
+
 def test_acquisition_runtime_serializes_concurrent_wakeups_and_refills_workers() -> None:
     repository = AcquisitionRepositoryStub(task_count=8)
     executor = BlockingAcquisitionExecutor(expected_count=8, initial_workers=4)
@@ -164,6 +179,27 @@ def test_processing_runtime_serializes_concurrent_wakeups_and_refills_three_slot
     assert executor.max_active == 3
     assert len(repository.claimed_ids) == 9
     assert len(set(repository.claimed_ids)) == 9
+
+
+def test_processing_runtime_fast_tasks_do_not_hold_the_wakeup_loop() -> None:
+    repository = ProcessingRepositoryStub(task_count=30)
+    executor = ImmediateProcessingExecutor(expected_count=30)
+    runtime = ProcessingRuntime(
+        repository=repository,  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        advisory_lock_id=123,
+        max_workers=3,
+        timezone=ZoneInfo("UTC"),
+    )
+    try:
+        assert runtime.wake(now=datetime.now(UTC)) == 3
+        assert executor.all_completed.wait(timeout=3)
+    finally:
+        runtime.shutdown()
+
+    assert executor.completed == 30
+    assert len(repository.claimed_ids) == 30
+    assert len(set(repository.claimed_ids)) == 30
 
 
 def _collection_task() -> ClaimedCollectionTask:

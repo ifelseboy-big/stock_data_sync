@@ -45,6 +45,7 @@ from app.modules.processing.processors.base import DatasetProcessor, PreparedDat
 type SessionFactory = Callable[[], Session]
 
 PROCESSING_VERSION_NAMESPACE = UUID("24f4614f-5c65-59af-9955-bc7352d39d51")
+PROCESSING_PLANNER_REVISION = 2
 PROCESSING_TERMINAL_STATUSES = frozenset(
     {
         ProcessingTaskStatus.SUCCESS.value,
@@ -182,6 +183,7 @@ class ProcessingRepository:
                 session,
                 batch=batch,
                 spec=spec,
+                now=now,
             )
             created_task_count += int(created)
             planned_specs[process_id] = spec
@@ -1035,6 +1037,7 @@ class ProcessingRepository:
         *,
         batch: CollectionBatch,
         spec: DatasetSpec,
+        now: datetime,
     ) -> tuple[UUID, bool]:
         process_id, output_version = _processing_identity(batch, spec)
         current = session.get(ProcessingTask, process_id)
@@ -1051,7 +1054,22 @@ class ProcessingRepository:
         )
         if prior_tasks:
             latest = max(prior_tasks, key=_processing_task_generation_key)
-            if latest.status != ProcessingTaskStatus.FAILED.value:
+            expected_process_type = f"{spec.processor}@{spec.processor_version}"
+            for prior_task in prior_tasks:
+                if (
+                    prior_task.process_type != expected_process_type
+                    and prior_task.status not in PROCESSING_TERMINAL_STATUSES
+                    and prior_task.status != ProcessingTaskStatus.RUNNING.value
+                ):
+                    _cancel_replaced_processor_task(
+                        prior_task,
+                        expected_process_type=expected_process_type,
+                        now=now,
+                    )
+            if latest.status == ProcessingTaskStatus.SUCCESS.value or (
+                latest.process_type == expected_process_type
+                and latest.status not in PROCESSING_TERMINAL_STATUSES
+            ):
                 return latest.process_id, False
         created_id = session.execute(
             insert(ProcessingTask)
@@ -1454,34 +1472,37 @@ def _lock_publication_scope(
 
 
 def _processing_plan_version(dataset_specs: Sequence[DatasetSpec]) -> str:
-    payload = [
-        {
-            "dataset_name": spec.dataset_name,
-            "processor": spec.processor,
-            "processor_version": spec.processor_version,
-            "dependencies": [
-                {
-                    "kind": dependency.kind.value,
-                    "name": dependency.name,
-                    "scope": dependency.scope.value,
-                    "triggers_recompute": dependency.triggers_recompute,
-                    "merge_previous_scopes": dependency.merge_previous_scopes,
-                }
-                for dependency in spec.dependencies
-            ],
-            "write_strategy": spec.write_strategy.value,
-            "release_scope": spec.release_scope.value,
-            "quality_rules": [
-                {
-                    "name": rule.name,
-                    "parameters": dict(rule.parameters),
-                }
-                for rule in spec.quality_rules
-            ],
-            "max_attempts": spec.max_attempts,
-        }
-        for spec in sorted(dataset_specs, key=lambda item: item.dataset_name)
-    ]
+    payload = {
+        "planner_revision": PROCESSING_PLANNER_REVISION,
+        "datasets": [
+            {
+                "dataset_name": spec.dataset_name,
+                "processor": spec.processor,
+                "processor_version": spec.processor_version,
+                "dependencies": [
+                    {
+                        "kind": dependency.kind.value,
+                        "name": dependency.name,
+                        "scope": dependency.scope.value,
+                        "triggers_recompute": dependency.triggers_recompute,
+                        "merge_previous_scopes": dependency.merge_previous_scopes,
+                    }
+                    for dependency in spec.dependencies
+                ],
+                "write_strategy": spec.write_strategy.value,
+                "release_scope": spec.release_scope.value,
+                "quality_rules": [
+                    {
+                        "name": rule.name,
+                        "parameters": dict(rule.parameters),
+                    }
+                    for rule in spec.quality_rules
+                ],
+                "max_attempts": spec.max_attempts,
+            }
+            for spec in sorted(dataset_specs, key=lambda item: item.dataset_name)
+        ],
+    }
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -1583,6 +1604,19 @@ def _cancel_superseded_processing_task(task: ProcessingTask, *, now: datetime) -
     task.execution_token = None
     task.finished_at = now
     task.error_message = "superseded by a newer stock_daily.core publication"
+
+
+def _cancel_replaced_processor_task(
+    task: ProcessingTask,
+    *,
+    expected_process_type: str,
+    now: datetime,
+) -> None:
+    task.status = ProcessingTaskStatus.CANCELLED.value
+    task.next_retry_at = None
+    task.execution_token = None
+    task.finished_at = now
+    task.error_message = f"replaced by current processor {expected_process_type}"
 
 
 def _priority_for_batch(batch_type: BatchType) -> int:

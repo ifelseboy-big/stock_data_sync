@@ -881,41 +881,52 @@ def test_new_stock_daily_core_invalidates_release_and_uses_current_limit_task(
 
 def test_processor_upgrade_replans_failed_tasks_without_reprocessing_successes() -> None:
     now = datetime(2037, 1, 23, 8, tzinfo=TIMEZONE)
-    acquisition = AcquisitionRepository(SyncSessionFactory)
-    batch_id = acquisition.create_or_get_batch(
-        batch_type=BatchType.REPAIR,
-        business_date=now.date(),
-        scheduled_at=now,
-    )
-    acquisition.append_tasks(
-        batch_id,
-        (
-            TaskBlueprint("TUSHARE", "versioned_upstream_raw", "date", {}, 1),
-            TaskBlueprint("TUSHARE", "versioned_downstream_raw", "date", {}, 1),
-        ),
-        finalize=True,
-        now=now,
-    )
-    for index in range(2):
-        collection = acquisition.claim_next(
-            allowed_batch_types={BatchType.REPAIR},
-            now=now,
+    batch_id = uuid4()
+    with SyncSessionFactory() as session, session.begin():
+        session.add(
+            CollectionBatch(
+                batch_id=batch_id,
+                batch_type=BatchType.REPAIR.value,
+                business_date=now.date(),
+                status=BatchStatus.CLOSED.value,
+                scheduled_at=now,
+                closed_at=now,
+            )
         )
-        assert collection is not None
-        acquisition.complete_task(
-            collection,
-            RawAssetMetadata(
-                storage_uri=f"file:///tmp/versioned-{index}.parquet",
-                content_hash=str(index + 1) * 64,
-                schema_fingerprint="a" * 64,
-                row_count=1,
-                size_bytes=1,
-            ),
-            request_count=1,
-            empty=False,
-            completed_at=now,
-        )
-    assert acquisition.close_ready_batches(now=now) == (batch_id,)
+        for index, api_name in enumerate(
+            ("versioned_upstream_raw", "versioned_downstream_raw")
+        ):
+            task_id = uuid4()
+            session.add(
+                CollectionTask(
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    provider="TUSHARE",
+                    api_name=api_name,
+                    scope_key="date",
+                    request_params={},
+                    status=CollectionTaskStatus.SUCCESS.value,
+                    max_attempts=1,
+                    finished_at=now,
+                )
+            )
+            session.flush()
+            session.add(
+                RawDataAsset(
+                    task_id=task_id,
+                    provider="TUSHARE",
+                    api_name=api_name,
+                    business_date=now.date(),
+                    request_params={},
+                    storage_uri=f"file:///tmp/versioned-{index}.parquet",
+                    content_hash=str(index + 1) * 64,
+                    schema_fingerprint="a" * 64,
+                    row_count=1,
+                    is_complete=True,
+                    fetched_at=now,
+                    sealed_at=now,
+                )
+            )
 
     upstream_v1 = _versioned_dataset("versioned_upstream", "versioned_upstream_raw", "1")
     downstream_dependency = DatasetDependencySpec(
@@ -945,12 +956,15 @@ def test_processor_upgrade_replans_failed_tasks_without_reprocessing_successes()
             )
         )
         for task in tasks:
-            task.status = (
-                ProcessingTaskStatus.SUCCESS.value
-                if task.output_dataset == "versioned_stable"
-                else ProcessingTaskStatus.FAILED.value
-            )
-            task.finished_at = now
+            if task.output_dataset == "versioned_stable":
+                task.status = ProcessingTaskStatus.SUCCESS.value
+                task.finished_at = now
+            elif task.output_dataset == "versioned_upstream":
+                task.status = ProcessingTaskStatus.QUEUED.value
+                task.queued_at = now
+            else:
+                task.status = ProcessingTaskStatus.FAILED.value
+                task.finished_at = now
 
     upstream_v2 = _versioned_dataset("versioned_upstream", "versioned_upstream_raw", "2")
     downstream_v2 = _versioned_dataset(
@@ -989,6 +1003,13 @@ def test_processor_upgrade_replans_failed_tasks_without_reprocessing_successes()
                 ProcessingTask.process_type == "noop@2",
             )
         )
+        replaced_upstream_v1 = session.scalar(
+            select(ProcessingTask).where(
+                ProcessingTask.source_batch_id == batch_id,
+                ProcessingTask.output_dataset == "versioned_upstream",
+                ProcessingTask.process_type == "noop@1",
+            )
+        )
         assert upgraded_downstream is not None
         dependency = session.get(
             ProcessingDependency,
@@ -1001,6 +1022,9 @@ def test_processor_upgrade_replans_failed_tasks_without_reprocessing_successes()
         )
     assert upgraded_upstream is not None
     assert stable_v2_task is None
+    assert replaced_upstream_v1 is not None
+    assert replaced_upstream_v1.status == ProcessingTaskStatus.CANCELLED.value
+    assert replaced_upstream_v1.error_message == "replaced by current processor noop@2"
     assert dependency is not None
     assert dependency.resolved_release_process_id == upgraded_upstream.process_id
 
@@ -1051,7 +1075,7 @@ def test_stock_daily_invalidation_locks_task_before_dependency() -> None:
                 ProcessingTask(
                     process_id=new_core_process_id,
                     source_batch_id=new_core_batch_id,
-                    process_type="stock_daily_core@5",
+                    process_type="stock_daily_core@6",
                     business_date=business_date,
                     output_dataset="stock_daily.core",
                     output_version=uuid4(),
