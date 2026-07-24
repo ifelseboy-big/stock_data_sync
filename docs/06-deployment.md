@@ -181,6 +181,41 @@ sudo stock-data-sync restart
 
 升级不会覆盖用户已有值。新程序必须为新增可选配置提供代码默认值；新增必填配置时，目标版本的 doctor 必须在切换前失败并提示用户处理。
 
+### 6.1 飞书数据同步报警
+
+Scheduler 可在每天 08:00 检查前一日数据同步结果，并在异常时由 lark-cli 发送飞书私聊。配置项如下：
+
+```text
+LARK_ALERT_ENABLED=true
+LARK_CLI_PATH=/Users/<service-user>/.../bin/lark-cli
+LARK_CLI_NODE_PATH=/Users/<service-user>/.../bin/node
+LARK_ALERT_RECIPIENT_OPEN_ID=ou_xxx
+LARK_ALERT_SEND_AS=bot
+LARK_ALERT_TIMEOUT_SECONDS=30
+```
+
+推荐使用 `bot` 身份，接收人是 `ou_` 开头的用户 open_id。机器人必须具有 `im:message:send_as_bot` 权限，并已与接收人建立可发送私聊的关系。`LARK_CLI_PATH` 必须是服务用户可执行的绝对路径；如果 lark-cli 是 Node.js 脚本，还必须配置 `LARK_CLI_NODE_PATH`，Scheduler 会把它的目录补入 LaunchDaemon PATH。首次安装会尝试从服务用户环境中探测这两个路径，普通升级不会覆盖现有配置。
+
+启用前使用服务用户验证身份：
+
+```bash
+sudo -u <service-user> -H env \
+  PATH="$(dirname <LARK_CLI_NODE_PATH>):/usr/bin:/bin:/usr/sbin:/sbin" \
+  <LARK_CLI_PATH> auth status --json --verify
+```
+
+生产 Scheduler 由系统 LaunchDaemon 启动，无法使用交互式终端授权。如果 lark-cli 报告 Keychain 不可访问，需要先在服务用户的交互式终端完成配置。也可以执行 `lark-cli config keychain-downgrade` 改用仅靠文件权限保护的本地密钥，但这会降低 Keychain 的进程级访问隔离，必须由管理员明确接受该安全取舍后再操作。
+
+配置完成后执行：
+
+```bash
+sudo stock-data-sync config validate
+sudo stock-data-sync doctor
+sudo stock-data-sync restart scheduler
+```
+
+报警文本包含日期、未成功的调度项、批次/采集/加工状态计数及最多 12 条异常明细，不包含 Token、数据库口令或完整请求参数。同一日期使用固定幂等键，且同一检查日已有成功记录后不重复发送。
+
 ## 7. 普通升级
 
 升级不需要再次指定主程序目录或数据目录：

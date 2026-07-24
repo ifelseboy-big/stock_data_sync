@@ -69,6 +69,10 @@ def test_scheduler_registers_collection_coordination_jobs() -> None:
     assert scheduler.get_job("plan-daily-final") is not None
     assert scheduler.get_job("plan-theme-members") is not None
     assert scheduler.get_job("plan-hot-rank") is not None
+    alert_job = scheduler.get_job("check-previous-day-data-sync")
+    assert alert_job is not None
+    assert str(alert_job.trigger) == "cron[hour='8', minute='0,15,30,45']"
+    assert SCHEDULED_JOB_BY_ID[alert_job.id].manual_allowed is False
 
 
 @pytest.mark.parametrize(

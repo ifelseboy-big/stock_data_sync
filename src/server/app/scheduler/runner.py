@@ -72,6 +72,9 @@ def main() -> None:
                 plan_due_collection_stages()
             except Exception:
                 logger.exception("daily_startup_catchup_failed")
+            now = datetime.now(ZoneInfo(settings.scheduler_timezone))
+            if now.hour >= 8:
+                _run_startup_job("check-previous-day-data-sync")
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             logger.info("scheduler_stopped")

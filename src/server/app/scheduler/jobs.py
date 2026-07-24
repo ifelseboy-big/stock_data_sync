@@ -573,6 +573,8 @@ def cleanup_scheduled_job_executions() -> None:
 
 def registered_job_functions() -> dict[str, Callable[[], None]]:
     """Return the canonical scheduler function registry used by cron and manual runs."""
+    from app.scheduler.data_sync_alerts import check_previous_day_data_sync
+
     return {
         "dispatch-collection-tasks": dispatch_collection_tasks,
         "close-collection-batches": close_collection_batches,
@@ -594,6 +596,7 @@ def registered_job_functions() -> dict[str, Callable[[], None]]:
         "plan-etf-share-size": plan_etf_share_size,
         "plan-theme-members": plan_theme_members,
         "plan-hot-rank": plan_hot_rank,
+        "check-previous-day-data-sync": check_previous_day_data_sync,
         "ensure-future-partitions": ensure_future_partitions,
         "cleanup-scheduled-job-executions": cleanup_scheduled_job_executions,
     }

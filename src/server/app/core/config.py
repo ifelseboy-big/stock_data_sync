@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -67,6 +68,12 @@ class Settings(BaseSettings):
     processing_running_timeout_seconds: int = Field(default=21600, ge=300, le=172800)
     processing_plan_batch_limit: int = Field(default=100, ge=1, le=1000)
     collection_close_batch_limit: int = Field(default=100, ge=1, le=1000)
+    lark_alert_enabled: bool = False
+    lark_cli_path: str = "lark-cli"
+    lark_cli_node_path: str = ""
+    lark_alert_recipient_open_id: str = ""
+    lark_alert_send_as: Literal["bot", "user"] = "bot"
+    lark_alert_timeout_seconds: int = Field(default=30, ge=5, le=120)
 
     @model_validator(mode="after")
     def validate_tushare_request_budget(self) -> "Settings":
@@ -80,6 +87,15 @@ class Settings(BaseSettings):
             raise ValueError("raw storage warning percent must be less than protect percent")
         if self.raw_storage_warning_free_bytes <= self.raw_storage_protect_free_bytes:
             raise ValueError("raw storage warning free bytes must exceed protect free bytes")
+        if self.lark_alert_enabled:
+            if not self.lark_cli_path.strip():
+                raise ValueError("LARK_CLI_PATH is required when Lark alerts are enabled")
+            if self.lark_cli_node_path and not Path(self.lark_cli_node_path).is_absolute():
+                raise ValueError("LARK_CLI_NODE_PATH must be absolute when configured")
+            if not self.lark_alert_recipient_open_id.startswith("ou_"):
+                raise ValueError(
+                    "LARK_ALERT_RECIPIENT_OPEN_ID must be a Feishu open_id when alerts are enabled"
+                )
         return self
 
 

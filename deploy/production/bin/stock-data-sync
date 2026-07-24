@@ -422,6 +422,24 @@ run_doctor() {
     /bin/bash -n "$ENV_FILE" && doctor_pass "配置文件语法正确" || doctor_fail_check "配置文件存在语法错误"
   fi
   [[ -n "${TUSHARE_TOKEN:-}" ]] || doctor_warn "TUSHARE_TOKEN 尚未填写"
+  if [[ "${LARK_ALERT_ENABLED:-false}" == "true" ]]; then
+    [[ "${LARK_ALERT_RECIPIENT_OPEN_ID:-}" == ou_* ]] && \
+      doctor_pass "飞书报警接收人 open_id 已配置" || doctor_fail_check "飞书报警接收人 open_id 无效"
+    [[ "${LARK_ALERT_SEND_AS:-bot}" == "bot" || "${LARK_ALERT_SEND_AS:-bot}" == "user" ]] && \
+      doctor_pass "飞书报警发送身份合法" || doctor_fail_check "飞书报警发送身份必须为 bot 或 user"
+    [[ -n "${LARK_CLI_PATH:-}" && "$LARK_CLI_PATH" == /* && -x "$LARK_CLI_PATH" ]] && \
+      doctor_pass "lark-cli 可执行文件存在" || doctor_fail_check "LARK_CLI_PATH 必须是可执行文件的绝对路径"
+    if [[ -n "${LARK_CLI_NODE_PATH:-}" ]]; then
+      [[ "$LARK_CLI_NODE_PATH" == /* && -x "$LARK_CLI_NODE_PATH" ]] && \
+        doctor_pass "lark-cli Node.js 可执行文件存在" || doctor_fail_check "LARK_CLI_NODE_PATH 必须是可执行文件的绝对路径"
+    fi
+    if [[ -n "${LARK_CLI_PATH:-}" && -x "$LARK_CLI_PATH" ]]; then
+      /usr/bin/sudo -u "$SERVICE_USER" test -x "$LARK_CLI_PATH" && \
+        doctor_pass "服务用户可执行 lark-cli" || doctor_fail_check "服务用户不能执行 lark-cli"
+    fi
+  else
+    doctor_warn "飞书数据同步报警未启用"
+  fi
   if [[ "$TUSHARE_REQUEST_BUDGET_PER_MINUTE" =~ ^[0-9]+$ && "$TUSHARE_REQUEST_LIMIT_PER_MINUTE" =~ ^[0-9]+$ ]] && \
     (( 10#$TUSHARE_REQUEST_BUDGET_PER_MINUTE <= 10#$TUSHARE_REQUEST_LIMIT_PER_MINUTE )); then
     doctor_pass "Tushare 请求预算合法"

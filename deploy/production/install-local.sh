@@ -156,6 +156,8 @@ pre_install_doctor "$SERVICE_HOME"
 
 BREW_BIN="$(deploy_find_executable brew "$SERVICE_HOME")"
 UV_BIN="$(deploy_find_executable uv "$SERVICE_HOME")"
+LARK_CLI_PATH="$(deploy_find_executable lark-cli "$SERVICE_HOME" || true)"
+LARK_CLI_NODE_PATH="$(deploy_find_node_runtime "$SERVICE_HOME" || true)"
 POSTGRES_PREFIX="$(/usr/bin/sudo -u "$SERVICE_USER" -H "$BREW_BIN" --prefix postgresql@18)"
 POSTGRES_BIN_DIR="$POSTGRES_PREFIX/bin"
 "$POSTGRES_BIN_DIR/postgres" --version | grep -q ' 18\.' || fail "必须使用 PostgreSQL 18"
@@ -250,6 +252,13 @@ umask 077
   printf '# 加工任务运行超时秒数。[用户可修改]\n'; deploy_write_env_value PROCESSING_RUNNING_TIMEOUT_SECONDS 21600
   printf '# 每轮最多规划的关闭批次数。[用户可修改]\n'; deploy_write_env_value PROCESSING_PLAN_BATCH_LIMIT 100
   printf '# 每轮最多关闭的完成批次数。[用户可修改]\n'; deploy_write_env_value COLLECTION_CLOSE_BATCH_LIMIT 100
+  printf '\n# =============================================================================\n# 飞书数据同步报警\n# =============================================================================\n\n'
+  printf '# 是否启用前一日数据同步失败飞书报警。[用户可修改]\n'; deploy_write_env_value LARK_ALERT_ENABLED false
+  printf '# lark-cli 绝对路径；安装器在当前服务用户环境中自动探测。[用户可修改]\n'; deploy_write_env_value LARK_CLI_PATH "$LARK_CLI_PATH"
+  printf '# lark-cli 脚本依赖的 Node.js 绝对路径；用于补齐 LaunchDaemon PATH。[用户可修改]\n'; deploy_write_env_value LARK_CLI_NODE_PATH "$LARK_CLI_NODE_PATH"
+  printf '# 飞书私聊接收人的 open_id（ou_ 开头）。[用户填写]\n'; deploy_write_env_value LARK_ALERT_RECIPIENT_OPEN_ID ""
+  printf '# 发送身份，推荐 bot；也可使用 user。[用户可修改]\n'; deploy_write_env_value LARK_ALERT_SEND_AS bot
+  printf '# 单次发送超时秒数。[用户可修改]\n'; deploy_write_env_value LARK_ALERT_TIMEOUT_SECONDS 30
 } > "$PROGRAM_DIR/config/app.env"
 chown root:wheel "$PROGRAM_DIR/config/app.env"
 chmod 0600 "$PROGRAM_DIR/config/app.env"

@@ -153,6 +153,14 @@ SCHEDULED_JOB_DEFINITIONS = (
         "每日 22:35",
     ),
     ScheduledJobDefinition(
+        "check-previous-day-data-sync",
+        "检查前一日数据同步",
+        "核对前一日调度、采集批次、采集任务和加工任务；未全部成功时发送飞书私聊。",
+        "monitoring",
+        "每日 08:00；发送失败时每 15 分钟重试至 08:45",
+        manual_allowed=False,
+    ),
+    ScheduledJobDefinition(
         "ensure-future-partitions",
         "预建未来月份数据分区",
         "为 6 张大型日事实表预建当前月和未来月份分区，写入时仍会再次兜底检查。",

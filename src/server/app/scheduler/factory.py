@@ -180,6 +180,14 @@ def create_scheduler() -> BlockingScheduler:
     )
     scheduler.add_job(
         execute_scheduled_job,
+        trigger=CronTrigger(hour=8, minute="0,15,30,45"),
+        args=("check-previous-day-data-sync", "SCHEDULED"),
+        id="check-previous-day-data-sync",
+        name=_job_name("check-previous-day-data-sync"),
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        execute_scheduled_job,
         trigger=CronTrigger(hour=8, minute=30),
         args=("ensure-future-partitions", "SCHEDULED"),
         id="ensure-future-partitions",
